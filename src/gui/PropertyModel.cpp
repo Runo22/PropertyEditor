@@ -460,11 +460,6 @@ QVariant PropertyModel::headerData(int section, Qt::Orientation orientation, int
 
 // ── helpers ──────────────────────────────────────────────────────────────────────
 
-PropertyNode* PropertyModel::_nodeFromIndex(const QModelIndex& idx) const
-{
-    return idx.isValid() ? static_cast<PropertyNode*>(idx.internalPointer()) : _root.get();
-}
-
 QModelIndex PropertyModel::_indexFromNode(PropertyNode* node, int column) const
 {
     if (!node || node == _root.get()) return {};

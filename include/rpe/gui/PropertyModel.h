@@ -7,7 +7,6 @@
 #include <QAbstractItemModel>
 #include <QHash>
 #include <QMutex>
-#include <QSet>
 
 #include <atomic>
 #include <functional>
@@ -105,7 +104,6 @@ private slots:
     void _flushPending();
 
 private:
-    PropertyNode* _nodeFromIndex(const QModelIndex& idx) const;
     QModelIndex   _indexFromNode(PropertyNode* node, int column = 0) const;
     void          _resetRoot();
     void          _buildTree(PropertyNode* parent, rttr::type type, const QString& prefix);
