@@ -1,4 +1,11 @@
-#include <rttr_property_editor/rttr_property_editor.h>
+// ─────────────────────────────────────────────────────────────────────────────
+//  rpe demo — exercises all three features:
+//    1. ECS browser   : Entities (filtered to Transform) → Components → Properties
+//    2. PropertyEditor : standalone, write-back data editing (incl. arrays/enum/
+//                        color/file path)
+//    3. VariantEditor  : the separate "edit any rttr::variant struct" feature
+// ─────────────────────────────────────────────────────────────────────────────
+#include <rpe/rpe.h>
 
 #include <QApplication>
 #include <QLabel>
@@ -7,182 +14,188 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
-#include <rttr/registration>
-#include <rttr/type>
-
-#include <flecs.h>
+#include <rttr/registration.h>
 
 #include <cmath>
 #include <string>
 #include <vector>
 
 // ── Demo types ────────────────────────────────────────────────────────────────
+enum class Shape { Circle, Square, Triangle };
 
-enum class Color { Red, Green, Blue };
+struct Vec3 { double x = 0.0, y = 0.0, z = 0.0; };
 
-struct Vec3 {
-    double x = 0.0;
-    double y = 0.0;
-    double z = 0.0;
-};
-
-struct TransformComponent {
+struct Transform {
     Vec3   position;
     Vec3   rotation;
     double scale = 1.0;
 };
 
-struct PhysicsComponent {
-    Vec3              velocity;
-    double            mass    = 1.0;
-    bool              isStatic= false;
-    std::string       tag     = "default";
-    std::vector<double> forces;
+struct Material {
+    QColor              tint        = QColor(200, 120, 60);
+    double              roughness   = 0.5;
+    std::string         texturePath = "textures/wood.png";
+    Shape               shape       = Shape::Square;
+    std::vector<double> weights     = {1.0, 0.5, 0.25};   // array inside the view
 };
 
-// ── RTTR registration ─────────────────────────────────────────────────────────
+struct Physics {
+    Vec3                velocity;
+    double              mass     = 1.0;
+    bool                isStatic = false;
+    std::string         tag      = "default";
+    std::vector<double> forces   = {0.0, -9.8, 0.0};      // array inside the view
+};
 
+// ── RTTR registration (with editor hints) ─────────────────────────────────────
 RTTR_REGISTRATION
 {
     using namespace rttr;
 
-    registration::enumeration<Color>("Color")
-    (
-        value("Red",   Color::Red),
-        value("Green", Color::Green),
-        value("Blue",  Color::Blue)
-    );
+    registration::enumeration<Shape>("Shape")(
+        value("Circle",   Shape::Circle),
+        value("Square",   Shape::Square),
+        value("Triangle", Shape::Triangle));
 
     registration::class_<Vec3>("Vec3")
         .property("x", &Vec3::x)
         .property("y", &Vec3::y)
-        .property("z", &Vec3::z)
-    ;
+        .property("z", &Vec3::z);
 
-    registration::class_<TransformComponent>("TransformComponent")
-        .property("position", &TransformComponent::position)
-        .property("rotation", &TransformComponent::rotation)
-        .property("scale",    &TransformComponent::scale)
-    ;
+    registration::class_<Transform>("Transform")
+        .property("position", &Transform::position)
+        .property("rotation", &Transform::rotation)
+        .property("scale",    &Transform::scale)(
+            metadata(rpe::hint::Min, 0.0), metadata(rpe::hint::Max, 100.0),
+            metadata(rpe::hint::Step, 0.1), metadata(rpe::hint::Decimals, 3));
 
-    registration::class_<PhysicsComponent>("PhysicsComponent")
-        .property("velocity", &PhysicsComponent::velocity)
-        .property("mass",     &PhysicsComponent::mass)
-        .property("isStatic", &PhysicsComponent::isStatic)
-        .property("tag",      &PhysicsComponent::tag)
-        .property("forces",   &PhysicsComponent::forces)
-    ;
+    registration::class_<Material>("Material")
+        .property("tint",        &Material::tint)(
+            metadata(rpe::hint::Editor, rpe::editor::Color))
+        .property("roughness",   &Material::roughness)(
+            metadata(rpe::hint::Min, 0.0), metadata(rpe::hint::Max, 1.0),
+            metadata(rpe::hint::Step, 0.05), metadata(rpe::hint::Decimals, 3))
+        .property("texturePath", &Material::texturePath)(
+            metadata(rpe::hint::Editor, rpe::editor::FilePath),
+            metadata(rpe::hint::Label, "Texture"))
+        .property("shape",       &Material::shape)
+        .property("weights",     &Material::weights);
+
+    registration::class_<Physics>("Physics")
+        .property("velocity", &Physics::velocity)
+        .property("mass",     &Physics::mass)(metadata(rpe::hint::Min, 0.0))
+        .property("isStatic", &Physics::isStatic)
+        .property("tag",      &Physics::tag)
+        .property("forces",   &Physics::forces);
 }
 
-// ── Tab 1: Standalone PropertyEditor demo ─────────────────────────────────────
+// ── Tab 1: ECS browser (only when the flecs layer is built) ───────────────────
+#if defined(RPE_WITH_FLECS)
+static QWidget* makeEcsTab(QWidget* parent)
+{
+    static flecs::world world;
 
-static QWidget* makePropertyEditorDemo(QWidget* parent)
+    // Register the (void* -> typed instance) bridges so the ECS browser can edit
+    // components referenced by raw pointer.
+    rpe::TypeBridge::registerTypes<Transform, Physics, Material>();
+
+    static auto player   = world.entity("Player");
+    static auto enemy    = world.entity("Enemy");
+    static auto noXform  = world.entity("AudioBus");   // no Transform → filtered out
+
+    player.set<Transform>({ {1, 2, 0}, {}, 1.0 });
+    player.set<Physics>({ {0.5, 0, 0}, 70.0, false, "player", {0, -9.8, 0} });
+    player.set<Material>({});
+
+    enemy.set<Transform>({ {-5, 0, 0}, {0, 45, 0}, 1.5 });
+    enemy.set<Physics>({ {-1, 0, 0}, 90.0, false, "enemy", {0, -9.8, 0} });
+
+    noXform.set<Physics>({});
+
+    auto* browser = new rpe::EntityComponentBrowser(parent);
+    browser->setWorld(&world);
+    browser->setEntityComponentFilter(QStringLiteral("Transform"), /*enabled*/ true);
+    browser->setLiveUpdateIntervalMs(20);
+
+    auto* timer = new QTimer(parent);
+    timer->setInterval(20);
+    QObject::connect(timer, &QTimer::timeout, [] {
+        static double t = 0.0;
+        t += 0.02;
+        if (auto* tc = player.get_mut<Transform>()) {
+            tc->position.x = std::sin(t) * 5.0;
+            tc->position.y = std::cos(t) * 2.0;
+        }
+        if (auto* pc = enemy.get_mut<Physics>()) {
+            pc->velocity.x = std::cos(t) * 3.0;
+            pc->mass       = 90.0 + std::sin(t);
+        }
+    });
+    timer->start();
+    return browser;
+}
+#endif // RPE_WITH_FLECS
+
+// ── Tab 2: standalone write-back editor ────────────────────────────────────────
+static QWidget* makePropertyEditorTab(QWidget* parent)
 {
     auto* container = new QWidget(parent);
     auto* layout    = new QVBoxLayout(container);
 
     auto* label = new QLabel(
-        QStringLiteral("Live 50Hz PhysicsComponent — double-click a value to edit, "
-                        "right-click for override/reset."), container);
+        QObject::tr("Write-back editor for a Material (edits modify the object; "
+                    "arrays, enum, color and file-path editors included)."), container);
     label->setWordWrap(true);
     layout->addWidget(label);
 
+    static Material material;
     auto* editor = new rpe::PropertyEditor(container);
-    editor->bindType(rttr::type::get<PhysicsComponent>());
-    editor->setMode(rpe::DisplayMode::EditLive);
+    editor->editObject(material);            // bind + WriteBack + provider in one call
+    editor->expandAll();
     layout->addWidget(editor, 1);
-
-    // Static live object — persists for the life of the app
-    static PhysicsComponent live;
-    live.forces = {0.0, 0.0, 0.0};
-
-    auto* timer = new QTimer(container);
-    timer->setInterval(20); // 50 Hz
-    QObject::connect(timer, &QTimer::timeout, [editor]() {
-        static double t = 0.0;
-        t += 0.02;
-        live.velocity.x = std::sin(t) * 10.0;
-        live.velocity.y = std::cos(t) * 5.0;
-        live.velocity.z = std::sin(t * 0.5) * 2.0;
-        live.mass       = 1.0 + std::abs(std::sin(t * 0.3));
-        live.isStatic   = static_cast<int>(t) % 10 < 5;
-        live.forces[0]  = std::sin(t * 2.0);
-        live.forces[1]  = std::cos(t * 3.0);
-        live.forces[2]  = std::sin(t * 0.7);
-        editor->refresh(rttr::instance(live));
-    });
-    timer->start();
-
-    QObject::connect(editor, &rpe::PropertyEditor::propertyEdited,
-                     [](const QString& path, const rttr::variant&) {
-        qDebug("propertyEdited: %s", qPrintable(path));
-    });
-
     return container;
 }
 
-// ── Tab 2: EntityComponentBrowser demo ───────────────────────────────────────
-
-static QWidget* makeEcsBrowserDemo(QWidget* parent)
+// ── Tab 3: VariantEditor (separate feature) ────────────────────────────────────
+static QWidget* makeVariantTab(QWidget* parent)
 {
-    static flecs::world world;
+    auto* container = new QWidget(parent);
+    auto* layout    = new QVBoxLayout(container);
 
-    // Create three entities with varying components
-    static auto player   = world.entity("Player");
-    static auto enemy    = world.entity("Enemy");
-    static auto obstacle = world.entity("Obstacle");
+    auto* label = new QLabel(QObject::tr("Independent feature: edit an arbitrary "
+                                         "rttr::variant struct."), container);
+    label->setWordWrap(true);
+    layout->addWidget(label);
 
-    player.set<TransformComponent>({ {1.0, 2.0, 0.0},  {0.0, 0.0,  0.0}, 1.0 });
-    player.set<PhysicsComponent>  ({ {0.5, 0.0, 0.0}, 70.0, false, "player", {0.0, -9.8} });
+    auto* ve = new rpe::VariantEditor(container);
+    ve->setVariant(rttr::variant(Transform{ {3, 4, 5}, {10, 20, 30}, 2.0 }));
+    layout->addWidget(ve, 1);
 
-    enemy.set<TransformComponent>({ {-5.0, 0.0, 0.0}, {0.0, 45.0, 0.0}, 1.5 });
-    enemy.set<PhysicsComponent>  ({ {-1.0, 0.0, 0.0}, 90.0, false, "enemy", {0.0, -9.8} });
-
-    obstacle.set<TransformComponent>({ {0.0, 0.0, 5.0}, {0.0, 0.0, 0.0}, 3.0 });
-    // obstacle has no PhysicsComponent intentionally
-
-    auto* browser = new rpe::EntityComponentBrowser(parent);
-    browser->setWorld(&world);
-    browser->setLiveUpdateIntervalMs(20); // 50 Hz
-
-    // Animate entities so live values change visibly
-    auto* animTimer = new QTimer(parent);
-    animTimer->setInterval(20);
-    QObject::connect(animTimer, &QTimer::timeout, []() {
-        static double t = 0.0;
-        t += 0.02;
-
-        if (auto* tc = player.get_mut<TransformComponent>()) {
-            tc->position.x = std::sin(t) * 5.0;
-            tc->position.y = std::cos(t) * 2.0;
-        }
-        if (auto* pc = enemy.get_mut<PhysicsComponent>()) {
-            pc->velocity.x = std::cos(t) * 3.0;
-            pc->velocity.y = std::sin(t * 0.7);
-        }
-    });
-    animTimer->start();
-
-    return browser;
+    auto* echo = new QLabel(container);
+    layout->addWidget(echo);
+    QObject::connect(ve, &rpe::VariantEditor::valueChanged,
+        [echo](const QString& path, const rttr::variant&) {
+            echo->setText(QObject::tr("Edited: %1").arg(path));
+        });
+    return container;
 }
-
-// ── main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
-    app.setApplicationName(QStringLiteral("RTTR Property Editor Test"));
+    app.setApplicationName(QStringLiteral("rpe demo"));
 
     QMainWindow window;
-    window.setWindowTitle(QStringLiteral("RTTR Property Editor — Test"));
-    window.resize(1000, 650);
+    window.setWindowTitle(QStringLiteral("RTTR Property Editor — Demo"));
+    window.resize(1080, 680);
 
     auto* tabs = new QTabWidget(&window);
-    tabs->addTab(makePropertyEditorDemo(tabs), QStringLiteral("PropertyEditor Demo"));
-    tabs->addTab(makeEcsBrowserDemo(tabs),      QStringLiteral("ECS Browser Demo"));
-
+#if defined(RPE_WITH_FLECS)
+    tabs->addTab(makeEcsTab(tabs),            QStringLiteral("ECS Browser"));
+#endif
+    tabs->addTab(makePropertyEditorTab(tabs), QStringLiteral("Property Editor"));
+    tabs->addTab(makeVariantTab(tabs),        QStringLiteral("Variant Editor"));
     window.setCentralWidget(tabs);
     window.show();
-
     return app.exec();
 }

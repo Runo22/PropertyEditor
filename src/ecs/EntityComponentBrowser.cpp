@@ -1,13 +1,14 @@
-#include "rttr_property_editor/ecs/EntityComponentBrowser.h"
-#include "rttr_property_editor/ecs/EntityListWidget.h"
-#include "rttr_property_editor/ecs/ComponentListWidget.h"
-#include "rttr_property_editor/widgets/PropertyEditor.h"
+#include "rpe/ecs/EntityComponentBrowser.h"
 
+#include "rpe/ecs/EntityListWidget.h"
+#include "rpe/gui/PropertyEditor.h"
+
+#include <QCheckBox>
 #include <QSplitter>
 #include <QTimer>
 #include <QVBoxLayout>
 
-#include <rttr/instance>
+#include <rttr/instance.h>
 
 namespace rpe {
 
@@ -15,46 +16,68 @@ EntityComponentBrowser::EntityComponentBrowser(QWidget* parent)
     : QWidget(parent)
 {
     _setupUi();
-
     _liveTimer = new QTimer(this);
-    _liveTimer->setInterval(20); // 50 Hz default
+    _liveTimer->setInterval(20);   // 50 Hz default
     connect(_liveTimer, &QTimer::timeout, this, &EntityComponentBrowser::_onLiveUpdate);
 }
 
 void EntityComponentBrowser::_setupUi()
 {
-    auto* mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(0, 0, 0, 0);
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(2);
 
-    _hSplitter = new QSplitter(Qt::Horizontal, this);
+    auto* hSplit = new QSplitter(Qt::Horizontal, this);
 
-    _entityList = new EntityListWidget(_hSplitter);
-    _hSplitter->addWidget(_entityList);
+    _entityList = new EntityListWidget(hSplit);
+    hSplit->addWidget(_entityList);
 
-    _vSplitter = new QSplitter(Qt::Vertical, _hSplitter);
-    _componentList  = new ComponentListWidget(_vSplitter);
-    _propertyEditor = new PropertyEditor(_vSplitter);
-    _vSplitter->addWidget(_componentList);
-    _vSplitter->addWidget(_propertyEditor);
-    _vSplitter->setStretchFactor(0, 1);
-    _vSplitter->setStretchFactor(1, 3);
+    auto* right   = new QWidget(hSplit);
+    auto* rLayout = new QVBoxLayout(right);
+    rLayout->setContentsMargins(0, 0, 0, 0);
+    rLayout->setSpacing(2);
 
-    _hSplitter->addWidget(_vSplitter);
-    _hSplitter->setStretchFactor(0, 1);
-    _hSplitter->setStretchFactor(1, 2);
+    _writeCheck = new QCheckBox(tr("Write edits back to world"), right);
+    _writeCheck->setToolTip(tr("On: edits modify the live component.\n"
+                               "Off: edits are pinned as overrides only."));
+    rLayout->addWidget(_writeCheck);
 
-    mainLayout->addWidget(_hSplitter);
+    auto* vSplit = new QSplitter(Qt::Vertical, right);
+    _componentList  = new ComponentListWidget(vSplit);
+    _propertyEditor = new PropertyEditor(vSplit);
+    vSplit->addWidget(_componentList);
+    vSplit->addWidget(_propertyEditor);
+    vSplit->setStretchFactor(0, 1);
+    vSplit->setStretchFactor(1, 3);
+    rLayout->addWidget(vSplit, 1);
+
+    hSplit->addWidget(right);
+    hSplit->setStretchFactor(0, 1);
+    hSplit->setStretchFactor(1, 2);
+    layout->addWidget(hSplit);
+
+    // The editor needs the *current* component pointer at read/write time.
+    // We relink a persistent wrapper so the returned instance stays valid for
+    // the duration of the synchronous get/set.
+    _propertyEditor->setInstanceProvider([this]() -> rttr::instance {
+        void* p = _liveComponentPtr();
+        if (!p) return rttr::instance();
+        _liveWrapper.relink(p);
+        return _liveWrapper.instance();
+    });
 
     connect(_entityList, &EntityListWidget::entitySelected,
-            this,        &EntityComponentBrowser::_onEntitySelected);
+            this, &EntityComponentBrowser::_onEntitySelected);
     connect(_entityList, &EntityListWidget::entityDeselected,
-            this,        &EntityComponentBrowser::_onEntityDeselected);
+            this, &EntityComponentBrowser::_onEntityDeselected);
     connect(_componentList, &ComponentListWidget::componentSelected,
-            this,           &EntityComponentBrowser::_onComponentSelected);
+            this, &EntityComponentBrowser::_onComponentSelected);
     connect(_componentList, &ComponentListWidget::componentDeselected,
-            this,           &EntityComponentBrowser::_onComponentDeselected);
+            this, &EntityComponentBrowser::_onComponentDeselected);
     connect(_propertyEditor, &PropertyEditor::propertyEdited,
-            this,            &EntityComponentBrowser::propertyEdited);
+            this, &EntityComponentBrowser::propertyEdited);
+    connect(_writeCheck, &QCheckBox::toggled,
+            this, &EntityComponentBrowser::_onWriteToggled);
 }
 
 void EntityComponentBrowser::setWorld(flecs::world* world)
@@ -66,58 +89,72 @@ void EntityComponentBrowser::setWorld(flecs::world* world)
     _propertyEditor->unbind();
 }
 
-void EntityComponentBrowser::setLiveUpdateIntervalMs(int ms)
+void EntityComponentBrowser::setLiveUpdateIntervalMs(int ms) { _liveTimer->setInterval(ms); }
+
+void EntityComponentBrowser::setEntityComponentFilter(const QString& name, bool enabled)
 {
-    _liveTimer->setInterval(ms);
+    _entityList->setRequiredComponent(name, enabled);
+}
+
+void EntityComponentBrowser::setEditPolicy(EditPolicy p)
+{
+    _propertyEditor->setEditPolicy(p);
+    _writeCheck->setChecked(p == EditPolicy::WriteBack);
+}
+
+void EntityComponentBrowser::_onWriteToggled(bool on)
+{
+    _propertyEditor->setEditPolicy(on ? EditPolicy::WriteBack : EditPolicy::Override);
+}
+
+void* EntityComponentBrowser::_liveComponentPtr() const
+{
+    if (!_world || !_selectedEntity.is_alive() || !_selectedComponent.rttrType.is_valid())
+        return nullptr;
+    return _selectedEntity.get_mut(_selectedComponent.id.raw_id());
 }
 
 void EntityComponentBrowser::_onEntitySelected(flecs::entity e)
 {
     _selectedEntity = e;
     _liveTimer->stop();
-    _componentList->setEntity(_world, e);
-    _propertyEditor->unbind();
+    _componentList->setEntity(_world, e);   // auto-selects first component
 }
 
 void EntityComponentBrowser::_onEntityDeselected()
 {
     _liveTimer->stop();
+    _selectedEntity = {};
     _componentList->clearEntity();
     _propertyEditor->unbind();
-    _selectedEntity = {};
 }
 
 void EntityComponentBrowser::_onComponentSelected(ComponentInfo info)
 {
     _selectedComponent = info;
-    if (!info.rttrType.is_valid() || !info.ptr) return;
+    if (!info.rttrType.is_valid()) return;
 
     _propertyEditor->bindType(info.rttrType);
-
-    rttr::instance inst(info.rttrType, info.ptr);
-    _propertyEditor->refresh(inst);
-
+    if (void* p = _liveComponentPtr()) {
+        _liveWrapper = RttrVariantWrapper::makeLinked(info.rttrType, p);
+        _propertyEditor->refresh(_liveWrapper.instance());
+    }
     _liveTimer->start();
 }
 
 void EntityComponentBrowser::_onComponentDeselected()
 {
     _liveTimer->stop();
-    _propertyEditor->unbind();
     _selectedComponent = {};
+    _propertyEditor->unbind();
 }
 
 void EntityComponentBrowser::_onLiveUpdate()
 {
-    if (!_world || !_selectedEntity.is_alive()) return;
-    if (!_selectedComponent.rttrType.is_valid()) return;
-
-    // Re-fetch the component pointer (stable within a frame in Flecs)
-    void* ptr = _selectedEntity.get_mut_w_id(_selectedComponent.id);
-    if (!ptr) return;
-
-    rttr::instance inst(_selectedComponent.rttrType, ptr);
-    _propertyEditor->refresh(inst);
+    if (void* p = _liveComponentPtr()) {
+        _liveWrapper.relink(p);
+        _propertyEditor->refresh(_liveWrapper.instance());
+    }
 }
 
 } // namespace rpe

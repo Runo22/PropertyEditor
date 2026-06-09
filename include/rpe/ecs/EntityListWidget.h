@@ -1,0 +1,54 @@
+#pragma once
+
+#include <QWidget>
+
+#include "rpe/ecs/flecs_prelude.h"
+
+class QListWidget;
+class QLineEdit;
+class QCheckBox;
+class QTimer;
+
+namespace rpe {
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  EntityListWidget — lists named entities of a flecs::world.
+//
+//  Supports an optional "required component" filter: when set (e.g. a Transform
+//  component), the list shows only entities that have that component — this is
+//  the "list the ones with a transform" behaviour. Refreshes on a slow timer
+//  since the entity set rarely changes at frame rate.
+// ─────────────────────────────────────────────────────────────────────────────
+class EntityListWidget : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit EntityListWidget(QWidget* parent = nullptr);
+
+    void setWorld(flecs::world* world);
+    void setRefreshIntervalMs(int ms);
+
+    // Name of a component to filter by (flecs component name). Empty = no filter.
+    // `enabledByDefault` checks the toggle so the filter is active immediately.
+    void setRequiredComponent(const QString& componentName, bool enabledByDefault = true);
+
+signals:
+    void entitySelected(flecs::entity e);
+    void entityDeselected();
+
+private slots:
+    void _refresh();
+    void _onSelectionChanged();
+
+private:
+    void _setupUi();
+
+    flecs::world* _world        = nullptr;
+    QListWidget*  _list         = nullptr;
+    QLineEdit*    _filterEdit    = nullptr;
+    QCheckBox*    _requiredCheck = nullptr;
+    QTimer*       _timer         = nullptr;
+    QString       _requiredComponent;
+};
+
+} // namespace rpe
