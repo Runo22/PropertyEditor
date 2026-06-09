@@ -50,7 +50,11 @@ QWidget* PropertyDelegate::createEditor(QWidget* parent, const QStyleOptionViewI
     if (!index.isValid()) return nullptr;
 
     // Pin the row while the editor is open so live refresh can't clobber it.
-    _model->overrideNode(index.data(PropertyPathRole).toString());
+    // Remember the prior pin state so a cancelled edit can restore it.
+    _editPath          = index.data(PropertyPathRole).toString();
+    _editWasOverridden = index.data(IsOverriddenRole).toBool();
+    _editCommitted     = false;
+    _model->overrideNode(_editPath);
 
     const rttr::variant cur = index.data(RttrVariantRole).value<rttr::variant>();
     const rttr::type    t   = TypeRenderer::rawType(cur.get_type());
@@ -193,14 +197,26 @@ void PropertyDelegate::setModelData(QWidget* editor, QAbstractItemModel* model,
         newVal = sb->value();
     }
 
-    if (newVal.is_valid())
+    if (newVal.is_valid()) {
+        _editCommitted = true;
         model->setData(index, QVariant::fromValue(newVal), Qt::EditRole);
+    }
 }
 
 void PropertyDelegate::updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option,
                                             const QModelIndex&) const
 {
     editor->setGeometry(option.rect);
+}
+
+void PropertyDelegate::destroyEditor(QWidget* editor, const QModelIndex& index) const
+{
+    // If the edit was cancelled (no commit) and the row was not pinned before we
+    // opened the editor, release the implicit pin so live updates resume.
+    if (!_editCommitted && !_editWasOverridden && !_editPath.isEmpty())
+        _model->resetNode(_editPath);
+    _editPath.clear();
+    QStyledItemDelegate::destroyEditor(editor, index);
 }
 
 void PropertyDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,

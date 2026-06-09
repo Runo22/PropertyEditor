@@ -30,11 +30,17 @@ public:
                       const QModelIndex& index) const override;
     void updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option,
                               const QModelIndex& index) const override;
+    void destroyEditor(QWidget* editor, const QModelIndex& index) const override;
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override;
 
 private:
     PropertyModel* _model;
+    // Track the in-progress edit so a cancelled edit (Esc / focus loss without
+    // commit) un-pins a row we pinned in createEditor.
+    mutable QString _editPath;
+    mutable bool    _editWasOverridden = false;
+    mutable bool    _editCommitted     = false;
 };
 
 } // namespace rpe

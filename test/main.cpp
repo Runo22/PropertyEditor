@@ -89,7 +89,8 @@ RTTR_REGISTRATION
         .property("forces",   &Physics::forces);
 }
 
-// ── Tab 1: ECS browser ─────────────────────────────────────────────────────────
+// ── Tab 1: ECS browser (only when the flecs layer is built) ───────────────────
+#if defined(RPE_WITH_FLECS)
 static QWidget* makeEcsTab(QWidget* parent)
 {
     static flecs::world world;
@@ -133,6 +134,7 @@ static QWidget* makeEcsTab(QWidget* parent)
     timer->start();
     return browser;
 }
+#endif // RPE_WITH_FLECS
 
 // ── Tab 2: standalone write-back editor ────────────────────────────────────────
 static QWidget* makePropertyEditorTab(QWidget* parent)
@@ -188,7 +190,9 @@ int main(int argc, char* argv[])
     window.resize(1080, 680);
 
     auto* tabs = new QTabWidget(&window);
+#if defined(RPE_WITH_FLECS)
     tabs->addTab(makeEcsTab(tabs),            QStringLiteral("ECS Browser"));
+#endif
     tabs->addTab(makePropertyEditorTab(tabs), QStringLiteral("Property Editor"));
     tabs->addTab(makeVariantTab(tabs),        QStringLiteral("Variant Editor"));
     window.setCentralWidget(tabs);

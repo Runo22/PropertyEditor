@@ -37,6 +37,7 @@ bool TypeRenderer::isInlineEditable(rttr::type t)
     if (r == rttr::type::get<std::string>()) return true;
     if (r == rttr::type::get<QString>())     return true;
     if (r == rttr::type::get<bool>())        return true;
+    if (r == rttr::type::get<QColor>())      return true;
     return false;
 }
 

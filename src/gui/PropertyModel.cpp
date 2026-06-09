@@ -198,15 +198,20 @@ void PropertyModel::_rebuildArrayChildren(PropertyNode* node, const rttr::varian
             elem->setExpandable(expand);
             node->children().append(elem);
             _nodeByPath.insert(elemPath, elem);
-            if (expand && !TypeRenderer::isSequential(elemType)) {
-                // Build nested struct rows for the element.
+            // Static nested-struct rows belong to the inserted subtree and can be
+            // built here. Values (and any nested *sequential* element, which would
+            // start its own begin/endInsertRows) are populated below — never while
+            // this insert is still open, which would violate the model protocol.
+            if (expand && !TypeRenderer::isSequential(elemType))
                 _buildTree(elem, elemType, elemPath);
-            }
-            _refreshNode(elem, view.get_value(static_cast<size_t>(i)));
         }
         endInsertRows();
     }
     node->setArraySize(newSz);
+
+    // Populate element values after the insert window has closed.
+    for (int i = 0; i < newSz; ++i)
+        _refreshNode(node->children()[i], view.get_value(static_cast<size_t>(i)));
 }
 
 // ── thread-safe injection ────────────────────────────────────────────────────────

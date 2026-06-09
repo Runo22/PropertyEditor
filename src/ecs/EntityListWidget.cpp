@@ -64,6 +64,8 @@ void EntityListWidget::setRequiredComponent(const QString& componentName, bool e
         _requiredCheck->setVisible(false);
     } else {
         _requiredCheck->setText(tr("Only entities with %1").arg(componentName));
+        // Block the toggled→_refresh signal so we refresh exactly once below.
+        QSignalBlocker block(_requiredCheck);
         _requiredCheck->setChecked(enabledByDefault);
         _requiredCheck->setVisible(true);
     }
