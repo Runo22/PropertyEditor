@@ -1,13 +1,12 @@
-#include "rttr_property_editor/core/PropertyNode.h"
+#include "rpe/core/PropertyNode.h"
 
 namespace rpe {
 
-PropertyNode::PropertyNode(
-    QString         name,
-    QString         path,
-    rttr::type      type,
-    rttr::property  prop,
-    PropertyNode*   parent)
+PropertyNode::PropertyNode(QString        name,
+                           QString        path,
+                           rttr::type     type,
+                           rttr::property prop,
+                           PropertyNode*  parent)
     : _name(std::move(name))
     , _path(std::move(path))
     , _type(type)
@@ -31,13 +30,14 @@ void PropertyNode::setLiveValue(const rttr::variant& v)
 {
     _liveValue     = v;
     _isDirty       = true;
-    _cachedDisplay = QString(); // invalidate; will be recomputed lazily or by caller
+    _cachedDisplay = QString();   // invalidate; recomputed lazily by data()
 }
 
 void PropertyNode::setOverrideValue(const rttr::variant& v)
 {
     _overrideValue = v;
     _isDirty       = true;
+    _cachedDisplay = QString();
 }
 
 } // namespace rpe

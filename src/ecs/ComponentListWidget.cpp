@@ -1,11 +1,11 @@
-#include "rttr_property_editor/ecs/ComponentListWidget.h"
+#include "rpe/ecs/ComponentListWidget.h"
+
+#include "rpe/core/TypeBridge.h"
 
 #include <QLabel>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QVBoxLayout>
-
-#include <rttr/type>
 
 namespace rpe {
 
@@ -21,70 +21,60 @@ void ComponentListWidget::_setupUi()
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(2);
 
-    auto* header = new QLabel(QStringLiteral("Components"), this);
+    auto* header = new QLabel(tr("Components"), this);
     header->setStyleSheet(QStringLiteral("font-weight: bold; padding: 2px 4px;"));
     layout->addWidget(header);
 
-    _listWidget = new QListWidget(this);
-    layout->addWidget(_listWidget, 1);
+    _list = new QListWidget(this);
+    layout->addWidget(_list, 1);
 
-    connect(_listWidget, &QListWidget::currentItemChanged,
-            this,        &ComponentListWidget::_onSelectionChanged);
+    connect(_list, &QListWidget::currentItemChanged,
+            this,  &ComponentListWidget::_onSelectionChanged);
 }
 
 void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
 {
     _components.clear();
-    _listWidget->blockSignals(true);
-    _listWidget->clear();
+    _list->blockSignals(true);
+    _list->clear();
 
-    if (!world || !e.is_alive()) {
-        _listWidget->blockSignals(false);
-        return;
+    if (world && e.is_alive()) {
+        e.each([&](flecs::id id) {
+            if (!id.is_entity()) return;
+            flecs::entity comp = id.entity();
+            const char* raw = comp.name();
+            if (!raw || raw[0] == '\0') return;
+
+            const rttr::type t = rttr::type::get_by_name(raw);
+            if (!t.is_valid()) return;
+            // Only components we can actually inspect/edit (a TypeBridge wrapper
+            // turns the raw component pointer into an RTTR instance).
+            if (!TypeBridge::has(t)) return;
+
+            _components.append(ComponentInfo{ id, t });
+            auto* item = new QListWidgetItem(QString::fromUtf8(raw), _list);
+            item->setData(Qt::UserRole, static_cast<int>(_components.size() - 1));
+        });
     }
 
-    e.each([&](flecs::id id) {
-        if (!id.is_entity()) return;
-
-        flecs::entity compEntity = id.entity();
-        const char*   rawName   = compEntity.name();
-        if (!rawName || rawName[0] == '\0') return;
-
-        const QString qname = QString::fromUtf8(rawName);
-
-        // Auto-discovery: match component name to rttr type name
-        rttr::type t = rttr::type::get_by_name(qname.toStdString());
-        if (!t.is_valid()) return;
-
-        // Get mutable pointer to component data
-        void* ptr = e.get_mut_w_id(id);
-        if (!ptr) return;
-
-        ComponentInfo info{ id, t, ptr };
-        _components.append(info);
-
-        auto* item = new QListWidgetItem(qname);
-        item->setData(Qt::UserRole, static_cast<int>(_components.size() - 1));
-        _listWidget->addItem(item);
-    });
-
-    _listWidget->blockSignals(false);
+    _list->blockSignals(false);
+    if (_list->count() > 0)
+        _list->setCurrentRow(0);          // auto-select first → drives the editor
+    else
+        emit componentDeselected();
 }
 
 void ComponentListWidget::clearEntity()
 {
     _components.clear();
-    _listWidget->clear();
+    _list->clear();
     emit componentDeselected();
 }
 
 void ComponentListWidget::_onSelectionChanged()
 {
-    auto* item = _listWidget->currentItem();
-    if (!item) {
-        emit componentDeselected();
-        return;
-    }
+    auto* item = _list->currentItem();
+    if (!item) { emit componentDeselected(); return; }
     const int idx = item->data(Qt::UserRole).toInt();
     if (idx >= 0 && idx < _components.size())
         emit componentSelected(_components[idx]);
