@@ -129,8 +129,10 @@ QWidget* PropertyDelegate::createEditor(QWidget* parent, const QStyleOptionViewI
         // edit so 64-bit / large unsigned values are never silently clamped.
         if (isWideIntType(t)) {
             auto* le = new QLineEdit(parent);
-            static const QRegularExpression reUnsigned(QStringLiteral("\\d{1,20}"));
-            static const QRegularExpression reSigned(QStringLiteral("-?\\d{1,19}"));
+            // Allow empty / lone "-" as intermediate states so the field can be
+            // cleared and negatives typed; setModelData's parse check gates commit.
+            static const QRegularExpression reUnsigned(QStringLiteral("\\d{0,20}"));
+            static const QRegularExpression reSigned(QStringLiteral("-?\\d{0,19}"));
             le->setValidator(new QRegularExpressionValidator(
                 isUnsigned ? reUnsigned : reSigned, le));
             return le;

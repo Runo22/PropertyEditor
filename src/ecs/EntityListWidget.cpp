@@ -116,10 +116,10 @@ void EntityListWidget::_refresh()
     _list->clear();
 
     bool reselected = false;
-    for (const auto& [id, label] : entries) {
-        auto* item = new QListWidgetItem(label, _list);
-        item->setData(Qt::UserRole, id);
-        if (id == selectedId) { _list->setCurrentItem(item); reselected = true; }
+    for (const auto& entry : entries) {   // .first/.second: Qt 5.12 has no QPair bindings
+        auto* item = new QListWidgetItem(entry.second, _list);
+        item->setData(Qt::UserRole, entry.first);
+        if (entry.first == selectedId) { _list->setCurrentItem(item); reselected = true; }
     }
 
     _list->blockSignals(false);

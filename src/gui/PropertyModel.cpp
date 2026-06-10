@@ -401,8 +401,10 @@ QVariant PropertyModel::data(const QModelIndex& index, int role) const
 
     case Qt::DecorationRole:
         // QColor leaves get a swatch via Qt's standard decoration handling.
-        if (index.column() == 1 && node->type() == rttr::type::get<QColor>()) {
-            const rttr::variant& v = node->effectiveValue();
+        // Use the raw/unwrapped type so wrapped QColor properties match too.
+        if (index.column() == 1
+            && TypeRenderer::rawType(node->type()) == rttr::type::get<QColor>()) {
+            const rttr::variant v = TypeRenderer::unwrap(node->effectiveValue());
             if (v.is_valid() && v.get_type() == rttr::type::get<QColor>())
                 return v.get_value<QColor>();
         }
