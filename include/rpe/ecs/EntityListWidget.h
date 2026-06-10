@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QPair>
+#include <QVector>
 #include <QWidget>
 
 #include "rpe/ecs/flecs_prelude.h"
@@ -49,6 +51,8 @@ private:
     QCheckBox*    _requiredCheck = nullptr;
     QTimer*       _timer         = nullptr;
     QString       _requiredComponent;
+    // Last visible (id, label) set — refresh skips the rebuild when unchanged.
+    QVector<QPair<qulonglong, QString>> _lastEntries;
 };
 
 } // namespace rpe

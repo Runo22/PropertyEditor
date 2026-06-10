@@ -74,18 +74,10 @@ void EntityListWidget::setRequiredComponent(const QString& componentName, bool e
 
 void EntityListWidget::_refresh()
 {
-    if (!_world) { _list->clear(); return; }
+    if (!_world) { _list->clear(); _lastEntries.clear(); return; }
 
     const QString filter = _filterEdit->text().trimmed().toLower();
     const bool filterByComp = !_requiredComponent.isEmpty() && _requiredCheck->isChecked();
-
-    // Remember current selection so it survives the rebuild.
-    flecs::entity_t selectedId = 0;
-    if (auto* cur = _list->currentItem())
-        selectedId = static_cast<flecs::entity_t>(cur->data(Qt::UserRole).toULongLong());
-
-    _list->blockSignals(true);
-    _list->clear();
 
     // Query all *named* entities (those carrying the (Identifier, Name) pair),
     // optionally constrained to those having the required component.
@@ -98,7 +90,7 @@ void EntityListWidget::_refresh()
     }
     flecs::query<> q = qb.build();
 
-    bool reselected = false;
+    QVector<QPair<qulonglong, QString>> entries;
     q.each([&](flecs::entity e) {
         if (!e.is_alive()) return;
         const char* rawName = e.name();
@@ -106,11 +98,29 @@ void EntityListWidget::_refresh()
         const QString label = QStringLiteral("%1  %2").arg(e.id()).arg(name);
         if (!filter.isEmpty() && !label.toLower().contains(filter))
             return;
-
-        auto* item = new QListWidgetItem(label, _list);
-        item->setData(Qt::UserRole, static_cast<qulonglong>(e.id()));
-        if (e.id() == selectedId) { _list->setCurrentItem(item); reselected = true; }
+        entries.append({ static_cast<qulonglong>(e.id()), label });
     });
+
+    // Timer-driven refresh: skip the widget rebuild entirely when the visible
+    // set hasn't changed — avoids selection flicker and wasted repaints.
+    if (entries == _lastEntries)
+        return;
+    _lastEntries = entries;
+
+    // Remember current selection so it survives the rebuild.
+    flecs::entity_t selectedId = 0;
+    if (auto* cur = _list->currentItem())
+        selectedId = static_cast<flecs::entity_t>(cur->data(Qt::UserRole).toULongLong());
+
+    _list->blockSignals(true);
+    _list->clear();
+
+    bool reselected = false;
+    for (const auto& entry : entries) {   // .first/.second: Qt 5.12 has no QPair bindings
+        auto* item = new QListWidgetItem(entry.second, _list);
+        item->setData(Qt::UserRole, entry.first);
+        if (entry.first == selectedId) { _list->setCurrentItem(item); reselected = true; }
+    }
 
     _list->blockSignals(false);
 

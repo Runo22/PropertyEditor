@@ -9,8 +9,9 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLineEdit>
-#include <QPainter>
 #include <QPlainTextEdit>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QSpinBox>
 
 #include <limits>
@@ -36,6 +37,25 @@ int roleInt(const QModelIndex& i, int role, int def)
 bool isFloatType(rttr::type t)
 {
     return t == rttr::type::get<float>() || t == rttr::type::get<double>();
+}
+
+bool isUnsignedIntType(rttr::type t)
+{
+    return t == rttr::type::get<unsigned char>()
+        || t == rttr::type::get<unsigned short>()
+        || t == rttr::type::get<unsigned int>()
+        || t == rttr::type::get<unsigned long>()
+        || t == rttr::type::get<unsigned long long>();
+}
+
+// Types whose value range exceeds QSpinBox's int range.
+bool isWideIntType(rttr::type t)
+{
+    return t == rttr::type::get<long>()
+        || t == rttr::type::get<unsigned long>()
+        || t == rttr::type::get<long long>()
+        || t == rttr::type::get<unsigned long long>()
+        || t == rttr::type::get<unsigned int>();
 }
 
 } // namespace
@@ -104,11 +124,19 @@ QWidget* PropertyDelegate::createEditor(QWidget* parent, const QStyleOptionViewI
 
     // integral
     if (t.is_arithmetic()) {
-        const bool isUnsigned = (t == rttr::type::get<unsigned int>()
-                              || t == rttr::type::get<unsigned long>()
-                              || t == rttr::type::get<unsigned long long>()
-                              || t == rttr::type::get<unsigned char>()
-                              || t == rttr::type::get<unsigned short>());
+        const bool isUnsigned = isUnsignedIntType(t);
+        // Wide integers don't fit QSpinBox's int range — use a validated line
+        // edit so 64-bit / large unsigned values are never silently clamped.
+        if (isWideIntType(t)) {
+            auto* le = new QLineEdit(parent);
+            // Allow empty / lone "-" as intermediate states so the field can be
+            // cleared and negatives typed; setModelData's parse check gates commit.
+            static const QRegularExpression reUnsigned(QStringLiteral("\\d{0,20}"));
+            static const QRegularExpression reSigned(QStringLiteral("-?\\d{0,19}"));
+            le->setValidator(new QRegularExpressionValidator(
+                isUnsigned ? reUnsigned : reSigned, le));
+            return le;
+        }
         auto* sb = new QSpinBox(parent);
         const int lo = isUnsigned ? 0 : std::numeric_limits<int>::min();
         sb->setRange(roleInt(index, MinRole, lo),
@@ -132,7 +160,11 @@ void PropertyDelegate::setEditorData(QWidget* editor, const QModelIndex& index) 
         return;
     }
     if (auto* ce = qobject_cast<ColorEditor*>(editor)) {
-        if (t == rttr::type::get<QColor>()) ce->setColor(v.get_value<QColor>());
+        if (t == rttr::type::get<QColor>())
+            ce->setColor(v.get_value<QColor>());
+        else
+            // Color hint on a string property: parse "#AARRGGBB" / named colors.
+            ce->setColor(QColor(TypeRenderer::toDisplayString(v)));
         return;
     }
     if (auto* te = qobject_cast<QPlainTextEdit*>(editor)) {
@@ -177,7 +209,12 @@ void PropertyDelegate::setModelData(QWidget* editor, QAbstractItemModel* model,
     if (auto* cb = qobject_cast<QCheckBox*>(editor)) {
         newVal = cb->isChecked();
     } else if (auto* ce = qobject_cast<ColorEditor*>(editor)) {
-        newVal = ce->color();
+        if (t == rttr::type::get<QColor>())
+            newVal = ce->color();
+        else if (t == rttr::type::get<QString>())
+            newVal = ce->color().name(QColor::HexArgb);
+        else if (t == rttr::type::get<std::string>())
+            newVal = ce->color().name(QColor::HexArgb).toStdString();
     } else if (auto* te = qobject_cast<QPlainTextEdit*>(editor)) {
         if (t == rttr::type::get<QString>()) newVal = te->toPlainText();
         else                                 newVal = te->toPlainText().toStdString();
@@ -185,8 +222,21 @@ void PropertyDelegate::setModelData(QWidget* editor, QAbstractItemModel* model,
         if (t == rttr::type::get<QString>()) newVal = fe->path();
         else                                 newVal = fe->path().toStdString();
     } else if (auto* le = qobject_cast<QLineEdit*>(editor)) {
-        if (t == rttr::type::get<QString>()) newVal = le->text();
-        else                                 newVal = le->text().toStdString();
+        if (t == rttr::type::get<QString>()) {
+            newVal = le->text();
+        } else if (t == rttr::type::get<std::string>()) {
+            newVal = le->text().toStdString();
+        } else if (t.is_arithmetic()) {
+            // Wide-integer editor: parse exactly, never clamp through int.
+            bool ok = false;
+            if (isUnsignedIntType(t)) {
+                const qulonglong v = le->text().toULongLong(&ok);
+                if (ok) newVal = static_cast<uint64_t>(v);
+            } else {
+                const qlonglong v = le->text().toLongLong(&ok);
+                if (ok) newVal = static_cast<int64_t>(v);
+            }
+        }
     } else if (auto* cb = qobject_cast<QComboBox*>(editor)) {
         if (t.is_enumeration())
             newVal = t.get_enumeration().name_to_value(cb->currentText().toStdString());
@@ -217,30 +267,6 @@ void PropertyDelegate::destroyEditor(QWidget* editor, const QModelIndex& index) 
         _model->resetNode(_editPath);
     _editPath.clear();
     QStyledItemDelegate::destroyEditor(editor, index);
-}
-
-void PropertyDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option,
-                             const QModelIndex& index) const
-{
-    QStyleOptionViewItem opt = option;
-    initStyleOption(&opt, index);
-
-    // Draw a small swatch for QColor leaves so they read at a glance.
-    const rttr::variant v = index.data(RttrVariantRole).value<rttr::variant>();
-    if (index.column() == 1 && v.is_valid()
-        && TypeRenderer::rawType(v.get_type()) == rttr::type::get<QColor>()) {
-        const QColor c = TypeRenderer::unwrap(v).get_value<QColor>();
-        QStyledItemDelegate::paint(painter, opt, index); // background/selection
-        QRect r = opt.rect.adjusted(4, 3, -4, -3);
-        r.setWidth(qMin(r.width(), 36));
-        painter->save();
-        painter->setPen(QColor(0x55, 0x55, 0x55));
-        painter->setBrush(c);
-        painter->drawRect(r);
-        painter->restore();
-        return;
-    }
-    QStyledItemDelegate::paint(painter, opt, index);
 }
 
 } // namespace rpe

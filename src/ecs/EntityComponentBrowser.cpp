@@ -119,6 +119,7 @@ void EntityComponentBrowser::_onEntitySelected(flecs::entity e)
     _selectedEntity = e;
     _liveTimer->stop();
     _componentList->setEntity(_world, e);   // auto-selects first component
+    emit entitySelected(e);
 }
 
 void EntityComponentBrowser::_onEntityDeselected()
@@ -127,6 +128,7 @@ void EntityComponentBrowser::_onEntityDeselected()
     _selectedEntity = {};
     _componentList->clearEntity();
     _propertyEditor->unbind();
+    emit entityDeselected();
 }
 
 void EntityComponentBrowser::_onComponentSelected(ComponentInfo info)
@@ -140,6 +142,7 @@ void EntityComponentBrowser::_onComponentSelected(ComponentInfo info)
         _propertyEditor->refresh(_liveWrapper.instance());
     }
     _liveTimer->start();
+    emit componentSelected(info);
 }
 
 void EntityComponentBrowser::_onComponentDeselected()
@@ -147,6 +150,7 @@ void EntityComponentBrowser::_onComponentDeselected()
     _liveTimer->stop();
     _selectedComponent = {};
     _propertyEditor->unbind();
+    emit componentDeselected();
 }
 
 void EntityComponentBrowser::_onLiveUpdate()

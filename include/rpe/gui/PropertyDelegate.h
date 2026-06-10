@@ -31,8 +31,6 @@ public:
     void updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option,
                               const QModelIndex& index) const override;
     void destroyEditor(QWidget* editor, const QModelIndex& index) const override;
-    void paint(QPainter* painter, const QStyleOptionViewItem& option,
-               const QModelIndex& index) const override;
 
 private:
     PropertyModel* _model;

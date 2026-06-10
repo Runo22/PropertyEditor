@@ -25,9 +25,13 @@ VariantEditor::VariantEditor(QWidget* parent)
 
     connect(_editor, &PropertyEditor::propertyEdited, this,
             [this](const QString& path, const rttr::variant& v) {
-                // The write already landed in _wrapper; refresh dependent rows
-                // (e.g. parent struct summaries) and notify listeners.
-                _editor->refresh(_wrapper.instance());
+                // The write already landed in _wrapper. Refresh dependent rows
+                // (parent struct summaries, array siblings) on the next event-loop
+                // turn: doing it synchronously would re-enter the model while
+                // setData is still on the stack, and an array-size change would
+                // then nest beginInsertRows inside the active edit.
+                QMetaObject::invokeMethod(this, [this] { refreshFromSource(); },
+                                          Qt::QueuedConnection);
                 emit valueChanged(path, v);
             });
 }
