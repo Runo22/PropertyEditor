@@ -52,6 +52,13 @@ public:
 signals:
     void propertyEdited(const QString& path, const rttr::variant& newValue);
 
+    // Selection pass-throughs so a host application can react to what the user
+    // is inspecting (e.g. highlight the entity in a 3D view).
+    void entitySelected(flecs::entity e);
+    void entityDeselected();
+    void componentSelected(const ComponentInfo& info);
+    void componentDeselected();
+
 private slots:
     void _onEntitySelected(flecs::entity e);
     void _onEntityDeselected();

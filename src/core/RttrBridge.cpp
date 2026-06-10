@@ -22,14 +22,63 @@ static bool isIndexSegment(const QString& seg, int& outIndex)
     return ok;
 }
 
+namespace {
+
+// Exact arithmetic re-typing. RTTR 0.9.6's built-in converter table is keyed on
+// the fixed-width typedefs, so e.g. `long` (= int64_t on LP64) ↔ `long long`
+// conversion FAILS even though both are 64-bit — and set_value then silently
+// rejects the write. Route integers through to_int64/to_uint64 and cast to the
+// target's precise C++ type instead.
+rttr::variant coerceArithmetic(const rttr::variant& valueIn, rttr::type raw)
+{
+    using rttr::type;
+    bool ok = false;
+
+    // Normalize sources the converter table doesn't know either (long long /
+    // unsigned long long are distinct from the fixed-width typedefs on LP64).
+    rttr::variant value = valueIn;
+    if (value.get_type() == type::get<long long>())
+        value = static_cast<int64_t>(valueIn.get_value<long long>());
+    else if (value.get_type() == type::get<unsigned long long>())
+        value = static_cast<uint64_t>(valueIn.get_value<unsigned long long>());
+
+    if (raw == type::get<bool>())   { const auto v = value.to_int64(&ok);  return ok ? rttr::variant(v != 0) : rttr::variant(); }
+    if (raw == type::get<float>())  { const auto v = value.to_double(&ok); return ok ? rttr::variant(static_cast<float>(v)) : rttr::variant(); }
+    if (raw == type::get<double>()) { const auto v = value.to_double(&ok); return ok ? rttr::variant(v) : rttr::variant(); }
+
+    if (raw == type::get<char>())               { const auto v = value.to_int64(&ok);  return ok ? rttr::variant(static_cast<char>(v)) : rttr::variant(); }
+    if (raw == type::get<signed char>())        { const auto v = value.to_int64(&ok);  return ok ? rttr::variant(static_cast<signed char>(v)) : rttr::variant(); }
+    if (raw == type::get<short>())              { const auto v = value.to_int64(&ok);  return ok ? rttr::variant(static_cast<short>(v)) : rttr::variant(); }
+    if (raw == type::get<int>())                { const auto v = value.to_int64(&ok);  return ok ? rttr::variant(static_cast<int>(v)) : rttr::variant(); }
+    if (raw == type::get<long>())               { const auto v = value.to_int64(&ok);  return ok ? rttr::variant(static_cast<long>(v)) : rttr::variant(); }
+    if (raw == type::get<long long>())          { const auto v = value.to_int64(&ok);  return ok ? rttr::variant(static_cast<long long>(v)) : rttr::variant(); }
+    if (raw == type::get<unsigned char>())      { const auto v = value.to_uint64(&ok); return ok ? rttr::variant(static_cast<unsigned char>(v)) : rttr::variant(); }
+    if (raw == type::get<unsigned short>())     { const auto v = value.to_uint64(&ok); return ok ? rttr::variant(static_cast<unsigned short>(v)) : rttr::variant(); }
+    if (raw == type::get<unsigned int>())       { const auto v = value.to_uint64(&ok); return ok ? rttr::variant(static_cast<unsigned int>(v)) : rttr::variant(); }
+    if (raw == type::get<unsigned long>())      { const auto v = value.to_uint64(&ok); return ok ? rttr::variant(static_cast<unsigned long>(v)) : rttr::variant(); }
+    if (raw == type::get<unsigned long long>()) { const auto v = value.to_uint64(&ok); return ok ? rttr::variant(static_cast<unsigned long long>(v)) : rttr::variant(); }
+
+    return {};
+}
+
+} // namespace
+
 rttr::variant coerce(rttr::variant value, rttr::type target)
 {
     const rttr::type raw = TypeRenderer::rawType(target);
     if (!value.is_valid() || value.get_type() == raw)
         return value;
+
     rttr::variant copy = value;
     if (copy.convert(raw))
         return copy;
+
+    if (raw.is_arithmetic() && value.get_type().is_arithmetic()) {
+        rttr::variant exact = coerceArithmetic(value, raw);
+        if (exact.is_valid())
+            return exact;
+    }
+
     return value; // let set_value attempt its own conversion
 }
 

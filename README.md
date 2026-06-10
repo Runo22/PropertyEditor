@@ -45,7 +45,42 @@ cmake --build build -j
 ./build/rpe_demo          # three tabs: ECS browser, property editor, variant editor
 ```
 
-Options: `-DRPE_WITH_FLECS=OFF` (drop the ECS layer), `-DRPE_BUILD_DEMO=OFF`.
+Options: `-DRPE_WITH_FLECS=OFF` (drop the ECS layer), `-DRPE_BUILD_DEMO=OFF`,
+`-DRPE_USE_SYSTEM_DEPS=ON` (resolve rttr/flecs via `find_package` instead of
+FetchContent).
+
+## Integrating into an existing application
+
+The intended embedding is `add_subdirectory` (or FetchContent) + linking
+`rpe::rpe`:
+
+```cmake
+add_subdirectory(external/PropertyEditor)
+target_link_libraries(my_app PRIVATE rpe::rpe)
+```
+
+Dependency resolution is integration-friendly: if your build already defines the
+`RTTR::Core_Lib`/`RTTR::Core` or `flecs::flecs_static`/`flecs::flecs` targets
+(because your system builds them itself), rpe links those and skips its own
+FetchContent. Otherwise set `RPE_USE_SYSTEM_DEPS=ON` to use installed packages,
+or leave it OFF to let rpe fetch pinned versions.
+
+The widgets are plain `QWidget`s — embed them in a `QDockWidget`, a side panel,
+a tab, or a standalone window. `EntityComponentBrowser` additionally emits
+`entitySelected` / `componentSelected` so the host can mirror the inspector's
+selection (e.g. highlight the entity in a viewport).
+
+### Threading rules
+
+* All widget/model APIs are GUI-thread only, **except**
+  `PropertyEditor::setPropertyValue` / `PropertyModel::setPropertyValue`, which
+  may be called from any thread (values are coalesced and applied on the GUI
+  thread).
+* **WriteBack edits run on the GUI thread** and write directly into the bound
+  object. If a simulation thread owns that data, don't hand the editor a raw
+  pointer into it — either keep the editor in Override mode and apply the
+  `propertyEdited(path, value)` signal on your sim thread yourself, or make the
+  instance-provider/dispatch arrangement safe for your threading model.
 
 ## Using the property editor
 

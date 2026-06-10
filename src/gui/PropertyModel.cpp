@@ -399,6 +399,15 @@ QVariant PropertyModel::data(const QModelIndex& index, int role) const
             return QVariant::fromValue(node->effectiveValue());
         break;
 
+    case Qt::DecorationRole:
+        // QColor leaves get a swatch via Qt's standard decoration handling.
+        if (index.column() == 1 && node->type() == rttr::type::get<QColor>()) {
+            const rttr::variant& v = node->effectiveValue();
+            if (v.is_valid() && v.get_type() == rttr::type::get<QColor>())
+                return v.get_value<QColor>();
+        }
+        break;
+
     case Qt::ToolTipRole:
         if (node->isOverridden())
             return QStringLiteral("Overridden — right-click to reset to live");
