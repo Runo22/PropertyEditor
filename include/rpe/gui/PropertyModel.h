@@ -2,6 +2,7 @@
 
 #include "rpe/core/rttr_prelude.h"
 
+#include "rpe/core/AccessGuard.h"
 #include "rpe/core/PropertyNode.h"
 
 #include <QAbstractItemModel>
@@ -79,6 +80,10 @@ public:
     // for refreshing after a write). May be empty.
     void setInstanceProvider(std::function<rttr::instance()> provider);
 
+    // Optional guard wrapped around WriteBack writes (instance provider + set),
+    // for objects owned by another thread. See rpe/core/AccessGuard.h.
+    void setWriteGuard(AccessGuard guard);
+
     // ── Override / reset ─────────────────────────────────────────────────────
     void overrideNode(const QString& path);
     void resetNode(const QString& path);
@@ -126,6 +131,7 @@ private:
     bool                          _readOnly   = false;
     EditPolicy                    _editPolicy = EditPolicy::Override;
     std::function<rttr::instance()> _instanceProvider;
+    AccessGuard                   _writeGuard;
 };
 
 } // namespace rpe

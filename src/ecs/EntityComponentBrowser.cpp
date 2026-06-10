@@ -91,6 +91,16 @@ void EntityComponentBrowser::setWorld(flecs::world* world)
 
 void EntityComponentBrowser::setLiveUpdateIntervalMs(int ms) { _liveTimer->setInterval(ms); }
 
+void EntityComponentBrowser::setWorldAccess(AccessGuard guard)
+{
+    _guard = guard;
+    _entityList->setWorldAccess(guard);
+    _componentList->setWorldAccess(guard);
+    // WriteBack edits run provider + write under the same guard. The provider
+    // (_liveComponentPtr) is therefore NOT guarded itself — guards don't nest.
+    _propertyEditor->setWriteGuard(std::move(guard));
+}
+
 void EntityComponentBrowser::setEntityComponentFilter(const QString& name, bool enabled)
 {
     _entityList->setRequiredComponent(name, enabled);
@@ -107,6 +117,10 @@ void EntityComponentBrowser::_onWriteToggled(bool on)
     _propertyEditor->setEditPolicy(on ? EditPolicy::WriteBack : EditPolicy::Override);
 }
 
+// NOTE: touches the world; callers must already hold the world guard (the
+// model's write path holds it when invoking the instance provider, and the
+// browser's own call sites wrap it explicitly). Not guarded here so that
+// guards never nest — a plain mutex stays sufficient.
 void* EntityComponentBrowser::_liveComponentPtr() const
 {
     if (!_world || !_selectedEntity.is_alive() || !_selectedComponent.rttrType.is_valid())
@@ -137,10 +151,12 @@ void EntityComponentBrowser::_onComponentSelected(ComponentInfo info)
     if (!info.rttrType.is_valid()) return;
 
     _propertyEditor->bindType(info.rttrType);
-    if (void* p = _liveComponentPtr()) {
-        _liveWrapper = RttrVariantWrapper::makeLinked(info.rttrType, p);
-        _propertyEditor->refresh(_liveWrapper.instance());
-    }
+    withGuard(_guard, [&] {
+        if (void* p = _liveComponentPtr()) {
+            _liveWrapper = RttrVariantWrapper::makeLinked(info.rttrType, p);
+            _propertyEditor->refresh(_liveWrapper.instance());
+        }
+    });
     _liveTimer->start();
     emit componentSelected(info);
 }
@@ -155,10 +171,15 @@ void EntityComponentBrowser::_onComponentDeselected()
 
 void EntityComponentBrowser::_onLiveUpdate()
 {
-    if (void* p = _liveComponentPtr()) {
-        _liveWrapper.relink(p);
-        _propertyEditor->refresh(_liveWrapper.instance());
-    }
+    // Pointer lookup AND the value read (refresh) stay inside one guarded
+    // section: the component could move or be removed between the two
+    // otherwise. Painting later reads only the model's cached values.
+    withGuard(_guard, [&] {
+        if (void* p = _liveComponentPtr()) {
+            _liveWrapper.relink(p);
+            _propertyEditor->refresh(_liveWrapper.instance());
+        }
+    });
 }
 
 } // namespace rpe

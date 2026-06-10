@@ -5,6 +5,7 @@
 #include <QVector>
 #include <QWidget>
 
+#include "rpe/core/AccessGuard.h"
 #include "rpe/ecs/flecs_prelude.h"
 
 class QListWidget;
@@ -33,6 +34,10 @@ public:
     void setEntity(flecs::world* world, flecs::entity e);
     void clearEntity();
 
+    // Guard wrapped around world reads when the world is owned by another
+    // thread (see rpe/core/AccessGuard.h).
+    void setWorldAccess(AccessGuard guard);
+
 signals:
     void componentSelected(ComponentInfo info);
     void componentDeselected();
@@ -45,6 +50,7 @@ private:
 
     QListWidget*           _list = nullptr;
     QVector<ComponentInfo> _components;
+    AccessGuard            _guard;
 };
 
 } // namespace rpe

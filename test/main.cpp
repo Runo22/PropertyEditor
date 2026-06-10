@@ -16,8 +16,12 @@
 
 #include <rttr/registration.h>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ── Demo types ────────────────────────────────────────────────────────────────
@@ -90,10 +94,15 @@ RTTR_REGISTRATION
 }
 
 // ── Tab 1: ECS browser (only when the flecs layer is built) ───────────────────
+// The world is animated by a real simulation THREAD (not a GUI timer) to mirror
+// the common embedding: a Qt GUI thread plus a separate flecs thread, made safe
+// with browser->setWorldAccess + one mutex shared with the sim loop.
 #if defined(RPE_WITH_FLECS)
 static QWidget* makeEcsTab(QWidget* parent)
 {
-    static flecs::world world;
+    static flecs::world      world;
+    static std::mutex        worldMutex;
+    static std::atomic<bool> simRunning{true};
 
     // Register the (void* -> typed instance) bridges so the ECS browser can edit
     // components referenced by raw pointer.
@@ -117,21 +126,37 @@ static QWidget* makeEcsTab(QWidget* parent)
     browser->setEntityComponentFilter(QStringLiteral("Transform"), /*enabled*/ true);
     browser->setLiveUpdateIntervalMs(20);
 
-    auto* timer = new QTimer(parent);
-    timer->setInterval(20);
-    QObject::connect(timer, &QTimer::timeout, [] {
-        static double t = 0.0;
-        t += 0.02;
-        if (auto* tc = player.get_mut<Transform>()) {
-            tc->position.x = std::sin(t) * 5.0;
-            tc->position.y = std::cos(t) * 2.0;
-        }
-        if (auto* pc = enemy.get_mut<Physics>()) {
-            pc->velocity.x = std::cos(t) * 3.0;
-            pc->mass       = 90.0 + std::sin(t);
+    // Every world touch by the GUI goes through this guard.
+    browser->setWorldAccess([](const std::function<void()>& work) {
+        std::lock_guard<std::mutex> lock(worldMutex);
+        work();
+    });
+
+    // Simulation thread: mutates the world under the same mutex at ~50 Hz.
+    static std::thread simThread([] {
+        double t = 0.0;
+        while (simRunning.load(std::memory_order_relaxed)) {
+            {
+                std::lock_guard<std::mutex> lock(worldMutex);
+                t += 0.02;
+                if (auto* tc = player.get_mut<Transform>()) {
+                    tc->position.x = std::sin(t) * 5.0;
+                    tc->position.y = std::cos(t) * 2.0;
+                }
+                if (auto* pc = enemy.get_mut<Physics>()) {
+                    pc->velocity.x = std::cos(t) * 3.0;
+                    pc->mass       = 90.0 + std::sin(t);
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     });
-    timer->start();
+    QObject::connect(qApp, &QCoreApplication::aboutToQuit, [] {
+        simRunning.store(false, std::memory_order_relaxed);
+        if (simThread.joinable())
+            simThread.join();
+    });
+
     return browser;
 }
 #endif // RPE_WITH_FLECS

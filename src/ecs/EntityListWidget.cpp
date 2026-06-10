@@ -57,6 +57,8 @@ void EntityListWidget::setWorld(flecs::world* world)
 
 void EntityListWidget::setRefreshIntervalMs(int ms) { _timer->setInterval(ms); }
 
+void EntityListWidget::setWorldAccess(AccessGuard guard) { _guard = std::move(guard); }
+
 void EntityListWidget::setRequiredComponent(const QString& componentName, bool enabledByDefault)
 {
     _requiredComponent = componentName;
@@ -80,25 +82,28 @@ void EntityListWidget::_refresh()
     const bool filterByComp = !_requiredComponent.isEmpty() && _requiredCheck->isChecked();
 
     // Query all *named* entities (those carrying the (Identifier, Name) pair),
-    // optionally constrained to those having the required component.
-    auto qb = _world->query_builder().with<flecs::Identifier>(flecs::Name);
-    flecs::entity requiredComp;
-    if (filterByComp) {
-        requiredComp = _world->lookup(_requiredComponent.toUtf8().constData());
-        if (requiredComp.is_valid())
-            qb.with(requiredComp);
-    }
-    flecs::query<> q = qb.build();
-
+    // optionally constrained to those having the required component. All world
+    // reads happen under the guard; the widget rebuild below does not need it.
     QVector<QPair<qulonglong, QString>> entries;
-    q.each([&](flecs::entity e) {
-        if (!e.is_alive()) return;
-        const char* rawName = e.name();
-        const QString name  = rawName ? QString::fromUtf8(rawName) : QStringLiteral("(unnamed)");
-        const QString label = QStringLiteral("%1  %2").arg(e.id()).arg(name);
-        if (!filter.isEmpty() && !label.toLower().contains(filter))
-            return;
-        entries.append({ static_cast<qulonglong>(e.id()), label });
+    withGuard(_guard, [&] {
+        auto qb = _world->query_builder().with<flecs::Identifier>(flecs::Name);
+        flecs::entity requiredComp;
+        if (filterByComp) {
+            requiredComp = _world->lookup(_requiredComponent.toUtf8().constData());
+            if (requiredComp.is_valid())
+                qb.with(requiredComp);
+        }
+        flecs::query<> q = qb.build();
+
+        q.each([&](flecs::entity e) {
+            if (!e.is_alive()) return;
+            const char* rawName = e.name();
+            const QString name  = rawName ? QString::fromUtf8(rawName) : QStringLiteral("(unnamed)");
+            const QString label = QStringLiteral("%1  %2").arg(e.id()).arg(name);
+            if (!filter.isEmpty() && !label.toLower().contains(filter))
+                return;
+            entries.append({ static_cast<qulonglong>(e.id()), label });
+        });
     });
 
     // Timer-driven refresh: skip the widget rebuild entirely when the visible
@@ -134,8 +139,13 @@ void EntityListWidget::_onSelectionChanged()
     if (!item) { emit entityDeselected(); return; }
     const auto id = static_cast<flecs::entity_t>(item->data(Qt::UserRole).toULongLong());
     if (_world) {
-        flecs::entity e = _world->entity(id);
-        if (e.is_alive())
+        flecs::entity e;
+        bool alive = false;
+        withGuard(_guard, [&] {
+            e     = _world->entity(id);
+            alive = e.is_alive();
+        });
+        if (alive)
             emit entitySelected(e);
     }
 }

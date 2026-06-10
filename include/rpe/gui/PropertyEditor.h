@@ -47,6 +47,10 @@ public:
     // Object that WriteBack edits target (and that refresh() reads after a write).
     void setInstanceProvider(std::function<rttr::instance()> provider);
 
+    // Guard wrapped around WriteBack writes when the target object is owned by
+    // another thread (see rpe/core/AccessGuard.h).
+    void setWriteGuard(AccessGuard guard);
+
     // Convenience for static objects: bind the type and continuously edit `obj`.
     template <class T>
     void editObject(T& obj)

@@ -329,13 +329,28 @@ void PropertyModel::setInstanceProvider(std::function<rttr::instance()> provider
     _instanceProvider = std::move(provider);
 }
 
+void PropertyModel::setWriteGuard(AccessGuard guard)
+{
+    _writeGuard = std::move(guard);
+}
+
 bool PropertyModel::_applyEdit(PropertyNode* node, const rttr::variant& newVal)
 {
     if (_editPolicy == EditPolicy::WriteBack && _instanceProvider) {
-        rttr::instance inst = _instanceProvider();
-        if (inst.is_valid() && bridge::setValueByPath(inst, node->path(), newVal)) {
-            // Read back so the display reflects any coercion the object applied.
-            const rttr::variant actual = bridge::getValueByPath(inst, node->path());
+        bool          wrote = false;
+        rttr::variant actual;
+        // The provider may hand back a pointer into data owned by another
+        // thread; the whole provider+write+read-back sequence runs under the
+        // guard so it can't race the owner.
+        withGuard(_writeGuard, [&] {
+            rttr::instance inst = _instanceProvider();
+            if (inst.is_valid() && bridge::setValueByPath(inst, node->path(), newVal)) {
+                // Read back so the display reflects any coercion the object applied.
+                actual = bridge::getValueByPath(inst, node->path());
+                wrote  = true;
+            }
+        });
+        if (wrote) {
             node->setOverridden(false);
             node->setLiveValue(actual.is_valid() ? actual : newVal);
             emit propertyEdited(node->path(), node->liveValue());

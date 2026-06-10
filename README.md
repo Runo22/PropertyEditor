@@ -76,11 +76,38 @@ selection (e.g. highlight the entity in a viewport).
   `PropertyEditor::setPropertyValue` / `PropertyModel::setPropertyValue`, which
   may be called from any thread (values are coalesced and applied on the GUI
   thread).
-* **WriteBack edits run on the GUI thread** and write directly into the bound
-  object. If a simulation thread owns that data, don't hand the editor a raw
-  pointer into it — either keep the editor in Override mode and apply the
-  `propertyEdited(path, value)` signal on your sim thread yourself, or make the
-  instance-provider/dispatch arrangement safe for your threading model.
+* Painting never touches your data: the model caches all values, so Qt repaints
+  read only the cache. The world/object is touched only while refreshing,
+  enumerating entities/components, and committing WriteBack edits.
+
+**flecs world on a separate simulation thread** — a flecs world must not be
+accessed concurrently from two threads, so install a world-access guard; the
+browser then routes every world touch (entity list query, component
+enumeration, the live refresh, WriteBack edits) through it:
+
+```cpp
+std::mutex worldMutex;   // shared with your sim loop
+
+browser->setWorldAccess([&](const std::function<void()>& work) {
+    std::lock_guard<std::mutex> lock(worldMutex);
+    work();
+});
+
+// simulation thread:
+while (running) {
+    { std::lock_guard<std::mutex> lock(worldMutex); world.progress(dt); }
+    ...
+}
+```
+
+The guard must run `work` synchronously, exactly once; guards are never nested,
+so a plain mutex suffices. If pausing the sim with a mutex is unacceptable, the
+guard can instead marshal `work` onto the sim thread (command queue) and block
+until it ran. The demo's ECS tab runs exactly this setup: a real `std::thread`
+mutating the world under the shared mutex. For a standalone `PropertyEditor` in
+WriteBack mode targeting sim-owned data, use `setWriteGuard` the same way — or
+stay in Override mode and apply `propertyEdited(path, value)` on the sim thread
+yourself.
 
 ## Using the property editor
 

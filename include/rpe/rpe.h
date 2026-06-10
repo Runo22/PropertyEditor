@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // core
+#include "rpe/core/AccessGuard.h"
 #include "rpe/core/EditorHints.h"
 #include "rpe/core/PropertyNode.h"
 #include "rpe/core/RttrBridge.h"

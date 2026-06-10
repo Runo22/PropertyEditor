@@ -4,6 +4,7 @@
 #include <QVector>
 #include <QWidget>
 
+#include "rpe/core/AccessGuard.h"
 #include "rpe/ecs/flecs_prelude.h"
 
 class QListWidget;
@@ -34,6 +35,10 @@ public:
     // `enabledByDefault` checks the toggle so the filter is active immediately.
     void setRequiredComponent(const QString& componentName, bool enabledByDefault = true);
 
+    // Guard wrapped around world reads when the world is owned by another
+    // thread (see rpe/core/AccessGuard.h).
+    void setWorldAccess(AccessGuard guard);
+
 signals:
     void entitySelected(flecs::entity e);
     void entityDeselected();
@@ -51,6 +56,7 @@ private:
     QCheckBox*    _requiredCheck = nullptr;
     QTimer*       _timer         = nullptr;
     QString       _requiredComponent;
+    AccessGuard   _guard;
     // Last visible (id, label) set — refresh skips the rebuild when unchanged.
     QVector<QPair<qulonglong, QString>> _lastEntries;
 };

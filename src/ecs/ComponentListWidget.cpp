@@ -35,10 +35,12 @@ void ComponentListWidget::_setupUi()
 void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
 {
     _components.clear();
-    _list->blockSignals(true);
-    _list->clear();
 
-    if (world && e.is_alive()) {
+    // Collect under the guard (entity/component reads touch the world);
+    // populate the widget afterwards without holding it.
+    QStringList names;
+    withGuard(_guard, [&] {
+        if (!world || !e.is_alive()) return;
         e.each([&](flecs::id id) {
             if (!id.is_entity()) return;
             flecs::entity comp = id.entity();
@@ -52,17 +54,24 @@ void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
             if (!TypeBridge::has(t)) return;
 
             _components.append(ComponentInfo{ id, t });
-            auto* item = new QListWidgetItem(QString::fromUtf8(raw), _list);
-            item->setData(Qt::UserRole, static_cast<int>(_components.size() - 1));
+            names.append(QString::fromUtf8(raw));
         });
-    }
+    });
 
+    _list->blockSignals(true);
+    _list->clear();
+    for (int i = 0; i < names.size(); ++i) {
+        auto* item = new QListWidgetItem(names[i], _list);
+        item->setData(Qt::UserRole, i);
+    }
     _list->blockSignals(false);
     if (_list->count() > 0)
         _list->setCurrentRow(0);          // auto-select first → drives the editor
     else
         emit componentDeselected();
 }
+
+void ComponentListWidget::setWorldAccess(AccessGuard guard) { _guard = std::move(guard); }
 
 void ComponentListWidget::clearEntity()
 {

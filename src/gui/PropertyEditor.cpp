@@ -103,6 +103,9 @@ EditPolicy PropertyEditor::editPolicy() const    { return _model->editPolicy(); 
 void PropertyEditor::setInstanceProvider(std::function<rttr::instance()> provider)
 { _model->setInstanceProvider(std::move(provider)); }
 
+void PropertyEditor::setWriteGuard(AccessGuard guard)
+{ _model->setWriteGuard(std::move(guard)); }
+
 // ── chrome ──────────────────────────────────────────────────────────────────
 
 void PropertyEditor::setToolbarVisible(bool visible) { _toolbar->setVisible(visible); }

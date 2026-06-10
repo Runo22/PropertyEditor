@@ -39,6 +39,13 @@ public:
     void setWorld(flecs::world* world);
     void setLiveUpdateIntervalMs(int ms);
 
+    // Install when the flecs world is advanced by another thread (simulation
+    // thread). Every world touch — entity/component enumeration, the 50Hz live
+    // refresh, and WriteBack edits — then runs through this guard. Typical
+    // implementation: lock a mutex the sim loop also takes around progress().
+    // See rpe/core/AccessGuard.h for the contract and an example.
+    void setWorldAccess(AccessGuard guard);
+
     // Restrict the entity list to entities having this component (e.g. "Transform").
     void setEntityComponentFilter(const QString& componentName, bool enabledByDefault = true);
 
@@ -81,6 +88,7 @@ private:
     flecs::entity        _selectedEntity;
     ComponentInfo        _selectedComponent;
     RttrVariantWrapper   _liveWrapper;   // persistent storage backing the editor's instance
+    AccessGuard          _guard;
 };
 
 } // namespace rpe
