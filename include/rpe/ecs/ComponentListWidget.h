@@ -2,6 +2,7 @@
 
 #include "rpe/core/rttr_prelude.h"
 
+#include <QStringList>
 #include <QVector>
 #include <QWidget>
 
@@ -38,8 +39,13 @@ public:
     // thread (see rpe/core/AccessGuard.h).
     void setWorldAccess(AccessGuard guard);
 
+    // Externally provided component names (mirror mode); selection is reported
+    // via componentNameSelected.
+    void setComponentNames(const QStringList& names);
+
 signals:
-    void componentSelected(ComponentInfo info);
+    void componentSelected(ComponentInfo info);   // direct mode (world available)
+    void componentNameSelected(const QString& name);   // mirror mode
     void componentDeselected();
 
 private slots:
@@ -50,6 +56,7 @@ private:
 
     QListWidget*           _list = nullptr;
     QVector<ComponentInfo> _components;
+    QStringList            _mirrorNames;   // last externally-fed name set (dedup)
     AccessGuard            _guard;
 };
 

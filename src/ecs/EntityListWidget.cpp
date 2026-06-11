@@ -59,6 +59,8 @@ void EntityListWidget::setRefreshIntervalMs(int ms) { _timer->setInterval(ms); }
 
 void EntityListWidget::setWorldAccess(AccessGuard guard) { _guard = std::move(guard); }
 
+void EntityListWidget::stopAutoRefresh() { _timer->stop(); }
+
 void EntityListWidget::setRequiredComponent(const QString& componentName, bool enabledByDefault)
 {
     _requiredComponent = componentName;
@@ -106,16 +108,35 @@ void EntityListWidget::_refresh()
         });
     });
 
-    // Timer-driven refresh: skip the widget rebuild entirely when the visible
-    // set hasn't changed — avoids selection flicker and wasted repaints.
+    _applyEntries(entries);
+}
+
+void EntityListWidget::setEntries(const QVector<QPair<qulonglong, QString>>& entries)
+{
+    // External feed (mirror mode): apply the optional text filter, then rebuild.
+    const QString filter = _filterEdit->text().trimmed().toLower();
+    if (filter.isEmpty()) {
+        _applyEntries(entries);
+    } else {
+        QVector<QPair<qulonglong, QString>> filtered;
+        for (const auto& e : entries)
+            if (e.second.toLower().contains(filter))
+                filtered.append(e);
+        _applyEntries(filtered);
+    }
+}
+
+void EntityListWidget::_applyEntries(const QVector<QPair<qulonglong, QString>>& entries)
+{
+    // Skip the rebuild when the visible set is unchanged — avoids flicker.
     if (entries == _lastEntries)
         return;
     _lastEntries = entries;
 
     // Remember current selection so it survives the rebuild.
-    flecs::entity_t selectedId = 0;
+    qulonglong selectedId = 0;
     if (auto* cur = _list->currentItem())
-        selectedId = static_cast<flecs::entity_t>(cur->data(Qt::UserRole).toULongLong());
+        selectedId = cur->data(Qt::UserRole).toULongLong();
 
     _list->blockSignals(true);
     _list->clear();
@@ -137,12 +158,13 @@ void EntityListWidget::_onSelectionChanged()
 {
     auto* item = _list->currentItem();
     if (!item) { emit entityDeselected(); return; }
-    const auto id = static_cast<flecs::entity_t>(item->data(Qt::UserRole).toULongLong());
+    const auto id = item->data(Qt::UserRole).toULongLong();
+    emit entityIdSelected(id);   // world-free; used by mirror mode
     if (_world) {
         flecs::entity e;
         bool alive = false;
         withGuard(_guard, [&] {
-            e     = _world->entity(id);
+            e     = _world->entity(static_cast<flecs::entity_t>(id));
             alive = e.is_alive();
         });
         if (alive)

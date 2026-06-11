@@ -94,18 +94,18 @@ RTTR_REGISTRATION
 }
 
 // ── Tab 1: ECS browser (only when the flecs layer is built) ───────────────────
-// The world is animated by a real simulation THREAD (not a GUI timer) to mirror
-// the common embedding: a Qt GUI thread plus a separate flecs thread, made safe
-// with browser->setWorldAccess + one mutex shared with the sim loop.
+// Mirror mode: the world runs on a real simulation THREAD with NO lock in its
+// loop. EcsMirror registers a per-frame system that snapshots watched values and
+// applies edits on the sim thread; the GUI only reads those snapshots.
 #if defined(RPE_WITH_FLECS)
 static QWidget* makeEcsTab(QWidget* parent)
 {
     static flecs::world      world;
-    static std::mutex        worldMutex;
+    static rpe::EcsMirror    mirror;
     static std::atomic<bool> simRunning{true};
 
-    // Register the (void* -> typed instance) bridges so the ECS browser can edit
-    // components referenced by raw pointer.
+    // Register the bridges (void* -> typed instance + value clone). In a plugin
+    // build this lives next to each plugin's RTTR registration.
     rpe::TypeBridge::registerTypes<Transform, Physics, Material>();
 
     static auto player   = world.entity("Player");
@@ -121,40 +121,34 @@ static QWidget* makeEcsTab(QWidget* parent)
 
     noXform.set<Physics>({});
 
+    mirror.attach(&world);                                   // registers the system
+    mirror.setRequiredComponent(QStringLiteral("Transform")); // entity-list filter
+
     auto* browser = new rpe::EntityComponentBrowser(parent);
-    browser->setWorld(&world);
-    browser->setEntityComponentFilter(QStringLiteral("Transform"), /*enabled*/ true);
-    browser->setLiveUpdateIntervalMs(20);
+    browser->setMirror(&mirror);   // instead of setWorld — GUI never touches world
 
-    // Every world touch by the GUI goes through this guard.
-    browser->setWorldAccess([](const std::function<void()>& work) {
-        std::lock_guard<std::mutex> lock(worldMutex);
-        work();
-    });
-
-    // Simulation thread: mutates the world under the same mutex at ~50 Hz.
+    // Simulation thread: NO mutex around the loop.
     static std::thread simThread([] {
         double t = 0.0;
         while (simRunning.load(std::memory_order_relaxed)) {
-            {
-                std::lock_guard<std::mutex> lock(worldMutex);
+            if (auto* tc = player.get_mut<Transform>()) {
                 t += 0.02;
-                if (auto* tc = player.get_mut<Transform>()) {
-                    tc->position.x = std::sin(t) * 5.0;
-                    tc->position.y = std::cos(t) * 2.0;
-                }
-                if (auto* pc = enemy.get_mut<Physics>()) {
-                    pc->velocity.x = std::cos(t) * 3.0;
-                    pc->mass       = 90.0 + std::sin(t);
-                }
+                tc->position.x = std::sin(t) * 5.0;
+                tc->position.y = std::cos(t) * 2.0;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (auto* pc = enemy.get_mut<Physics>()) {
+                pc->velocity.x = std::cos(t) * 3.0;
+                pc->mass       = 90.0 + std::sin(t);
+            }
+            world.progress(0.016f);   // mirror's system runs here, on this thread
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
     });
     QObject::connect(qApp, &QCoreApplication::aboutToQuit, [] {
         simRunning.store(false, std::memory_order_relaxed);
         if (simThread.joinable())
             simThread.join();
+        mirror.detach();
     });
 
     return browser;

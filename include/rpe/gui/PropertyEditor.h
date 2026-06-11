@@ -51,6 +51,13 @@ public:
     // another thread (see rpe/core/AccessGuard.h).
     void setWriteGuard(AccessGuard guard);
 
+    // Route committed edits to `sink` (mirror mode) — see PropertyModel::setEditSink.
+    void setEditSink(std::function<void(const QString&, const rttr::variant&)> sink);
+
+    // Leaf dot-paths that are currently visible (all ancestors expanded). With
+    // `onlyExpanded == false`, returns every leaf path regardless of expansion.
+    QStringList visibleLeafPaths(bool onlyExpanded = true) const;
+
     // Convenience for static objects: bind the type and continuously edit `obj`.
     template <class T>
     void editObject(T& obj)

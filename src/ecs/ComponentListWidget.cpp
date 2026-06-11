@@ -35,6 +35,7 @@ void ComponentListWidget::_setupUi()
 void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
 {
     _components.clear();
+    _mirrorNames.clear();
 
     // Collect under the guard (entity/component reads touch the world);
     // populate the widget afterwards without holding it.
@@ -73,9 +74,32 @@ void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
 
 void ComponentListWidget::setWorldAccess(AccessGuard guard) { _guard = std::move(guard); }
 
+void ComponentListWidget::setComponentNames(const QStringList& names)
+{
+    if (names == _mirrorNames) return;   // unchanged → keep selection, no flicker
+    _mirrorNames = names;
+    _components.clear();                  // mirror mode has no world-backed infos
+
+    const QString prevSel = _list->currentItem() ? _list->currentItem()->text() : QString();
+
+    _list->blockSignals(true);
+    _list->clear();
+    QListWidgetItem* reselect = nullptr;
+    for (const QString& n : names) {
+        auto* item = new QListWidgetItem(n, _list);
+        if (n == prevSel) reselect = item;
+    }
+    _list->blockSignals(false);
+
+    if (reselect)            _list->setCurrentItem(reselect);
+    else if (_list->count()) _list->setCurrentRow(0);
+    else                     emit componentDeselected();
+}
+
 void ComponentListWidget::clearEntity()
 {
     _components.clear();
+    _mirrorNames.clear();
     _list->clear();
     emit componentDeselected();
 }
@@ -84,6 +108,7 @@ void ComponentListWidget::_onSelectionChanged()
 {
     auto* item = _list->currentItem();
     if (!item) { emit componentDeselected(); return; }
+    emit componentNameSelected(item->text());   // world-free; mirror mode
     const int idx = item->data(Qt::UserRole).toInt();
     if (idx >= 0 && idx < _components.size())
         emit componentSelected(_components[idx]);

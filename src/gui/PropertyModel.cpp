@@ -334,8 +334,33 @@ void PropertyModel::setWriteGuard(AccessGuard guard)
     _writeGuard = std::move(guard);
 }
 
+void PropertyModel::setEditSink(std::function<void(const QString&, const rttr::variant&)> sink)
+{
+    _editSink = std::move(sink);
+}
+
+QStringList PropertyModel::allLeafPaths() const
+{
+    QStringList out;
+    for (auto it = _nodeByPath.cbegin(); it != _nodeByPath.cend(); ++it)
+        if (it.value()->isLeaf())
+            out.append(it.key());
+    return out;
+}
+
 bool PropertyModel::_applyEdit(PropertyNode* node, const rttr::variant& newVal)
 {
+    if (_editSink) {
+        // Mirror mode: hand the edit off, show it optimistically, and resume
+        // live updates (the sim thread will echo the applied value back).
+        node->setOverridden(false);
+        node->setLiveValue(newVal);
+        _editSink(node->path(), newVal);
+        emit propertyEdited(node->path(), newVal);
+        return true;
+    }
+
+
     if (_editPolicy == EditPolicy::WriteBack && _instanceProvider) {
         bool          wrote = false;
         rttr::variant actual;

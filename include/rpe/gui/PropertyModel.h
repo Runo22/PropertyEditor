@@ -84,6 +84,14 @@ public:
     // for objects owned by another thread. See rpe/core/AccessGuard.h.
     void setWriteGuard(AccessGuard guard);
 
+    // When set, committed edits are routed here instead of being written or
+    // pinned, and the row resumes live updates immediately (used by mirror mode:
+    // the edit is queued to the sim thread, which echoes the new value back).
+    void setEditSink(std::function<void(const QString&, const rttr::variant&)> sink);
+
+    // Dot-paths of every directly-editable leaf in the current schema.
+    QStringList allLeafPaths() const;
+
     // ── Override / reset ─────────────────────────────────────────────────────
     void overrideNode(const QString& path);
     void resetNode(const QString& path);
@@ -132,6 +140,7 @@ private:
     EditPolicy                    _editPolicy = EditPolicy::Override;
     std::function<rttr::instance()> _instanceProvider;
     AccessGuard                   _writeGuard;
+    std::function<void(const QString&, const rttr::variant&)> _editSink;
 };
 
 } // namespace rpe

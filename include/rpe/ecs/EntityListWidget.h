@@ -39,8 +39,14 @@ public:
     // thread (see rpe/core/AccessGuard.h).
     void setWorldAccess(AccessGuard guard);
 
+    // Stop the world-polling timer (mirror mode feeds the list via setEntries).
+    void stopAutoRefresh();
+    // Externally provided (id, label) entries — used by EcsMirror integration.
+    void setEntries(const QVector<QPair<qulonglong, QString>>& entries);
+
 signals:
-    void entitySelected(flecs::entity e);
+    void entitySelected(flecs::entity e);   // direct mode (world available)
+    void entityIdSelected(qulonglong id);   // always; mirror mode uses this
     void entityDeselected();
 
 private slots:
@@ -49,6 +55,7 @@ private slots:
 
 private:
     void _setupUi();
+    void _applyEntries(const QVector<QPair<qulonglong, QString>>& entries);
 
     flecs::world* _world        = nullptr;
     QListWidget*  _list         = nullptr;

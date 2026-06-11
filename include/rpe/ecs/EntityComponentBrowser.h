@@ -18,6 +18,7 @@ namespace rpe {
 
 class EntityListWidget;
 class PropertyEditor;
+class EcsMirror;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  EntityComponentBrowser — UE5-style three-level inspector:
@@ -38,6 +39,18 @@ public:
 
     void setWorld(flecs::world* world);
     void setLiveUpdateIntervalMs(int ms);
+
+    // ── Mirror mode (recommended for a separate simulation thread) ───────────
+    // Drive the browser entirely from an EcsMirror instead of touching the world
+    // from the GUI thread. The mirror's per-frame system runs inside your
+    // world.progress() on the sim thread, so neither thread blocks and no mutex
+    // is needed in your loop. Call instead of setWorld. See rpe/ecs/EcsMirror.h.
+    void setMirror(EcsMirror* mirror);
+
+    // When mirroring, copy/poll only the fields currently expanded in the tree
+    // (default true) — collapsed/large fields cost nothing until opened.
+    void setSnapshotOpenFieldsOnly(bool on) { _openFieldsOnly = on; }
+    bool snapshotOpenFieldsOnly() const     { return _openFieldsOnly; }
 
     // Install when the flecs world is advanced by another thread (simulation
     // thread). Every world touch — entity/component enumeration, the 50Hz live
@@ -74,9 +87,15 @@ private slots:
     void _onLiveUpdate();
     void _onWriteToggled(bool on);
 
+    // mirror mode
+    void _onMirrorPoll();
+    void _onEntityIdSelected(qulonglong id);
+    void _onComponentNameSelected(const QString& name);
+
 private:
     void  _setupUi();
     void* _liveComponentPtr() const;
+    void  _pushInterest();
 
     flecs::world*        _world          = nullptr;
     EntityListWidget*    _entityList     = nullptr;
@@ -89,6 +108,13 @@ private:
     ComponentInfo        _selectedComponent;
     RttrVariantWrapper   _liveWrapper;   // persistent storage backing the editor's instance
     AccessGuard          _guard;
+
+    // mirror mode
+    EcsMirror*           _mirror         = nullptr;
+    QTimer*              _mirrorTimer    = nullptr;
+    qulonglong           _mirrorEntity   = 0;
+    QString              _mirrorComponent;
+    bool                 _openFieldsOnly = true;
 };
 
 } // namespace rpe

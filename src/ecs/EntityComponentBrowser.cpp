@@ -1,5 +1,6 @@
 #include "rpe/ecs/EntityComponentBrowser.h"
 
+#include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityListWidget.h"
 #include "rpe/gui/PropertyEditor.h"
 
@@ -19,6 +20,10 @@ EntityComponentBrowser::EntityComponentBrowser(QWidget* parent)
     _liveTimer = new QTimer(this);
     _liveTimer->setInterval(20);   // 50 Hz default
     connect(_liveTimer, &QTimer::timeout, this, &EntityComponentBrowser::_onLiveUpdate);
+
+    _mirrorTimer = new QTimer(this);
+    _mirrorTimer->setInterval(33);  // ~30 Hz GUI poll of the mirror
+    connect(_mirrorTimer, &QTimer::timeout, this, &EntityComponentBrowser::_onMirrorPoll);
 }
 
 void EntityComponentBrowser::_setupUi()
@@ -70,8 +75,12 @@ void EntityComponentBrowser::_setupUi()
             this, &EntityComponentBrowser::_onEntitySelected);
     connect(_entityList, &EntityListWidget::entityDeselected,
             this, &EntityComponentBrowser::_onEntityDeselected);
+    connect(_entityList, &EntityListWidget::entityIdSelected,
+            this, &EntityComponentBrowser::_onEntityIdSelected);
     connect(_componentList, &ComponentListWidget::componentSelected,
             this, &EntityComponentBrowser::_onComponentSelected);
+    connect(_componentList, &ComponentListWidget::componentNameSelected,
+            this, &EntityComponentBrowser::_onComponentNameSelected);
     connect(_componentList, &ComponentListWidget::componentDeselected,
             this, &EntityComponentBrowser::_onComponentDeselected);
     connect(_propertyEditor, &PropertyEditor::propertyEdited,
@@ -180,6 +189,81 @@ void EntityComponentBrowser::_onLiveUpdate()
             _propertyEditor->refresh(_liveWrapper.instance());
         }
     });
+}
+
+// ── mirror mode ──────────────────────────────────────────────────────────────
+
+void EntityComponentBrowser::setMirror(EcsMirror* mirror)
+{
+    _mirror = mirror;
+    _world  = nullptr;              // mirror mode never touches the world directly
+    _liveTimer->stop();
+
+    // Editor edits are queued to the sim thread; values flow back via the mirror.
+    if (_mirror) {
+        _propertyEditor->setEditPolicy(EditPolicy::Override);
+        _propertyEditor->setEditSink([this](const QString& path, const rttr::variant& v) {
+            _mirror->queueEdit(path, v);
+        });
+        _entityList->stopAutoRefresh();
+        _mirrorTimer->start();
+    } else {
+        _propertyEditor->setEditSink({});
+        _mirrorTimer->stop();
+    }
+}
+
+void EntityComponentBrowser::_pushInterest()
+{
+    if (!_mirror) return;
+    const QStringList paths = _mirrorComponent.isEmpty()
+        ? QStringList()
+        : _propertyEditor->visibleLeafPaths(_openFieldsOnly);
+    _mirror->setInterest(_mirrorEntity, _mirrorComponent, paths);
+}
+
+void EntityComponentBrowser::_onMirrorPoll()
+{
+    if (!_mirror) return;
+
+    QVector<EcsMirror::EntityEntry> ents;
+    if (_mirror->pollEntities(ents)) {
+        QVector<QPair<qulonglong, QString>> rows;
+        rows.reserve(ents.size());
+        for (const auto& e : ents) rows.append({ e.id, e.label });
+        _entityList->setEntries(rows);
+    }
+
+    QStringList comps;
+    if (_mirror->pollComponents(comps))
+        _componentList->setComponentNames(comps);
+
+    for (auto& u : _mirror->pollValues())
+        _propertyEditor->setPropertyValue(u.path, u.value);
+
+    // Re-send interest each tick so newly expanded fields start mirroring.
+    _pushInterest();
+}
+
+void EntityComponentBrowser::_onEntityIdSelected(qulonglong id)
+{
+    if (!_mirror) return;          // direct mode uses _onEntitySelected
+    _mirrorEntity = id;
+    _mirrorComponent.clear();
+    _propertyEditor->unbind();
+    _pushInterest();
+}
+
+void EntityComponentBrowser::_onComponentNameSelected(const QString& name)
+{
+    if (!_mirror) return;          // direct mode uses _onComponentSelected
+    _mirrorComponent = name;
+    const rttr::type t = rttr::type::get_by_name(name.toStdString());
+    if (t.is_valid()) {
+        _propertyEditor->bindType(t);   // schema only — no instance/world touch
+        _propertyEditor->expandAll();
+    }
+    _pushInterest();
 }
 
 } // namespace rpe

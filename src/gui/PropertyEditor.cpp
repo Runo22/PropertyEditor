@@ -106,6 +106,34 @@ void PropertyEditor::setInstanceProvider(std::function<rttr::instance()> provide
 void PropertyEditor::setWriteGuard(AccessGuard guard)
 { _model->setWriteGuard(std::move(guard)); }
 
+void PropertyEditor::setEditSink(std::function<void(const QString&, const rttr::variant&)> sink)
+{ _model->setEditSink(std::move(sink)); }
+
+QStringList PropertyEditor::visibleLeafPaths(bool onlyExpanded) const
+{
+    if (!onlyExpanded)
+        return _model->allLeafPaths();
+
+    // Walk the proxy tree, descending only into expanded rows, collecting leaves.
+    QStringList out;
+    QList<QModelIndex> stack;
+    const int topRows = _proxy->rowCount({});
+    for (int r = topRows - 1; r >= 0; --r)
+        stack.append(_proxy->index(r, 0, {}));
+
+    while (!stack.isEmpty()) {
+        const QModelIndex idx = stack.takeLast();
+        const int rows = _proxy->rowCount(idx);
+        if (rows == 0) {
+            out.append(idx.data(PropertyPathRole).toString());
+        } else if (_view->isExpanded(idx)) {
+            for (int r = rows - 1; r >= 0; --r)
+                stack.append(_proxy->index(r, 0, idx));
+        }
+    }
+    return out;
+}
+
 // ── chrome ──────────────────────────────────────────────────────────────────
 
 void PropertyEditor::setToolbarVisible(bool visible) { _toolbar->setVisible(visible); }
