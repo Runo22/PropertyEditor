@@ -163,6 +163,13 @@ advancing the world with no lock.
   from another thread. `attach()` *may* be called from inside `progress()` — e.g.
   a system that loads the plugin at runtime — it detects readonly mode and defers
   the install to frame-end automatically.
+* **Destruction order is safe in any order.** The GUI (`EntityComponentBrowser`)
+  holds a `std::shared_ptr<MirrorChannel>`, not the `EcsMirror`. So you may
+  destroy the `EcsMirror` on the sim thread *before* the GUI tears down (the
+  usual shutdown / plugin-unload order): the browser keeps polling the channel,
+  which just returns nothing once the producer is gone — no dangling pointer. The
+  channel owns no flecs resources, so its final release on the GUI thread is
+  safe.
 
 #### Guard mode — simpler, if you can serialize world access
 

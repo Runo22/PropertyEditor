@@ -3,16 +3,14 @@
 #include "rpe/core/rttr_prelude.h"
 
 #include <QHash>
-#include <QPair>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 
-#include <mutex>
-#include <utility>
-#include <vector>
+#include <memory>
 
 #include "rpe/ecs/flecs_prelude.h"
+#include "rpe/ecs/MirrorChannel.h"
 
 namespace rpe
 {
@@ -41,26 +39,11 @@ namespace rpe
     class EcsMirror
     {
     public:
-        struct EntityEntry
-        {
-            qulonglong id = 0;
-            QString label;
-            bool operator==(const EntityEntry& o) const
-            {
-                return id == o.id && label == o.label;
-            }
-            bool operator!=(const EntityEntry& o) const
-            {
-                return !(*this == o);
-            }
-        };
-        struct ValueUpdate
-        {
-            QString path;
-            rttr::variant value;
-        };
+        // The shared data channel carries these (re-exported for convenience).
+        using EntityEntry = MirrorChannel::EntityEntry;
+        using ValueUpdate = MirrorChannel::ValueUpdate;
 
-        EcsMirror() = default;
+        EcsMirror();
         ~EcsMirror();
 
         EcsMirror(const EcsMirror&) = delete;
@@ -92,29 +75,25 @@ namespace rpe
         bool pollComponents(QStringList& out);        // true if changed since last poll
         std::vector<ValueUpdate> pollValues();        // leaf values that changed
 
+        // The shared channel. The GUI (EntityComponentBrowser) keeps its own
+        // shared_ptr to this, so it stays valid even if this EcsMirror is
+        // destroyed first (see MirrorChannel).
+        std::shared_ptr<MirrorChannel> channel() const
+        {
+            return _ch;
+        }
+
     private:
         void _install();
         static void _installTrampoline(ecs_world_t* world, void* ctx);
 
+        std::shared_ptr<MirrorChannel> _ch; // shared with the GUI consumer
+
         flecs::world* _world = nullptr;
         flecs::system _system {};
-        flecs::query<> _entityQuery {};   // cached: built once at attach, never in pump()
+        flecs::query<> _entityQuery {}; // cached: built once at attach, never in pump()
         bool _haveSystem = false;
         bool _haveQuery = false;
-
-        // Shared state guarded by _m.
-        mutable std::mutex _m;
-        qulonglong _inEntity = 0;
-        QString _inComponent;
-        QStringList _inPaths;
-        QString _required;
-        std::vector<std::pair<QString, rttr::variant>> _edits;
-
-        QVector<EntityEntry> _outEntities;
-        bool _outEntitiesDirty = false;
-        QStringList _outComponents;
-        bool _outComponentsDirty = false;
-        std::vector<ValueUpdate> _outValues;
 
         // Simulation-thread-only state (no lock needed).
         QVector<EntityEntry> _lastEntities;

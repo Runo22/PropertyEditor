@@ -202,16 +202,20 @@ namespace rpe
 
     void EntityComponentBrowser::setMirror(EcsMirror* mirror)
     {
-        _mirror = mirror;
+        // Hold the shared channel, not the EcsMirror itself: the mirror may be
+        // destroyed on the sim thread before this widget; the channel survives via
+        // this shared_ptr so polling stays valid.
+        _channel = mirror ? mirror->channel() : nullptr;
         _world = nullptr; // mirror mode never touches the world directly
         _liveTimer->stop();
 
-        // Editor edits are queued to the sim thread; values flow back via the mirror.
-        if (_mirror)
+        // Editor edits are queued to the sim thread; values flow back via the channel.
+        if (_channel)
         {
             _propertyEditor->setEditPolicy(EditPolicy::Override);
-            _propertyEditor->setEditSink([this](const QString& path, const rttr::variant& v) {
-                _mirror->queueEdit(path, v);
+            auto ch = _channel; // capture the shared_ptr (not 'this' indirection)
+            _propertyEditor->setEditSink([ch](const QString& path, const rttr::variant& v) {
+                ch->queueEdit(path, v);
             });
             _entityList->stopAutoRefresh();
             _mirrorTimer->start();
@@ -225,25 +229,25 @@ namespace rpe
 
     void EntityComponentBrowser::_pushInterest()
     {
-        if (!_mirror)
+        if (!_channel)
         {
             return;
         }
         const QStringList paths = _mirrorComponent.isEmpty()
             ? QStringList()
             : _propertyEditor->visibleLeafPaths(_openFieldsOnly);
-        _mirror->setInterest(_mirrorEntity, _mirrorComponent, paths);
+        _channel->setInterest(_mirrorEntity, _mirrorComponent, paths);
     }
 
     void EntityComponentBrowser::_onMirrorPoll()
     {
-        if (!_mirror)
+        if (!_channel)
         {
             return;
         }
 
-        QVector<EcsMirror::EntityEntry> ents;
-        if (_mirror->pollEntities(ents))
+        QVector<MirrorChannel::EntityEntry> ents;
+        if (_channel->pollEntities(ents))
         {
             QVector<QPair<qulonglong, QString>> rows;
             rows.reserve(ents.size());
@@ -255,12 +259,12 @@ namespace rpe
         }
 
         QStringList comps;
-        if (_mirror->pollComponents(comps))
+        if (_channel->pollComponents(comps))
         {
             _componentList->setComponentNames(comps);
         }
 
-        for (auto& u : _mirror->pollValues())
+        for (auto& u : _channel->pollValues())
         {
             _propertyEditor->setPropertyValue(u.path, u.value);
         }
@@ -271,7 +275,7 @@ namespace rpe
 
     void EntityComponentBrowser::_onEntityIdSelected(qulonglong id)
     {
-        if (!_mirror)
+        if (!_channel)
         {
             return; // direct mode uses _onEntitySelected
         }
@@ -283,7 +287,7 @@ namespace rpe
 
     void EntityComponentBrowser::_onComponentNameSelected(const QString& name)
     {
-        if (!_mirror)
+        if (!_channel)
         {
             return; // direct mode uses _onComponentSelected
         }

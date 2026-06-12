@@ -128,6 +128,7 @@ if(RPE_WITH_FLECS)
         src/ecs/ComponentListWidget.cpp
         src/ecs/EntityComponentBrowser.cpp
         src/ecs/EcsMirror.cpp
+        src/ecs/MirrorChannel.cpp
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
         include/rpe/ecs/EntityComponentBrowser.h)
@@ -164,4 +165,7 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_mirror_runtime_attach_test test/mirror_runtime_attach_test.cpp)
     target_link_libraries(rpe_mirror_runtime_attach_test PRIVATE rpe_gui)
+
+    add_executable(rpe_mirror_lifetime_test test/mirror_lifetime_test.cpp)
+    target_link_libraries(rpe_mirror_lifetime_test PRIVATE rpe_gui)
 endif()

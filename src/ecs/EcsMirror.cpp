@@ -7,9 +7,18 @@
 namespace rpe
 {
 
+    EcsMirror::EcsMirror()
+        : _ch(std::make_shared<MirrorChannel>())
+    {
+    }
+
     EcsMirror::~EcsMirror()
     {
         detach();
+        // Tell any GUI consumer still holding the channel that no more data is
+        // coming; its shared_ptr keeps the channel alive, so its poll*() calls
+        // stay valid (they just return nothing) instead of touching freed memory.
+        _ch->markProducerGone();
     }
 
     void EcsMirror::attach(flecs::world* world)
@@ -88,68 +97,41 @@ namespace rpe
         _haveSystem = true;
     }
 
-    // ── GUI thread: intent ──────────────────────────────────────────────────────
+    // ── GUI thread: intent / results — delegate to the shared channel ───────────
 
     void EcsMirror::setRequiredComponent(const QString& componentName)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        _required = componentName;
+        _ch->setRequiredComponent(componentName);
     }
 
     void EcsMirror::setInterest(qulonglong entity, const QString& componentName, const QStringList& leafPaths)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        _inEntity = entity;
-        _inComponent = componentName;
-        _inPaths = leafPaths;
+        _ch->setInterest(entity, componentName, leafPaths);
     }
 
     void EcsMirror::clearInterest()
     {
-        std::lock_guard<std::mutex> lk(_m);
-        _inEntity = 0;
-        _inComponent.clear();
-        _inPaths.clear();
+        _ch->clearInterest();
     }
 
     void EcsMirror::queueEdit(const QString& path, rttr::variant value)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        _edits.emplace_back(path, std::move(value));
+        _ch->queueEdit(path, std::move(value));
     }
-
-    // ── GUI thread: results ─────────────────────────────────────────────────────
 
     bool EcsMirror::pollEntities(QVector<EntityEntry>& out)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        if (!_outEntitiesDirty)
-        {
-            return false;
-        }
-        out = _outEntities;
-        _outEntitiesDirty = false;
-        return true;
+        return _ch->pollEntities(out);
     }
 
     bool EcsMirror::pollComponents(QStringList& out)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        if (!_outComponentsDirty)
-        {
-            return false;
-        }
-        out = _outComponents;
-        _outComponentsDirty = false;
-        return true;
+        return _ch->pollComponents(out);
     }
 
     std::vector<EcsMirror::ValueUpdate> EcsMirror::pollValues()
     {
-        std::lock_guard<std::mutex> lk(_m);
-        std::vector<ValueUpdate> v;
-        v.swap(_outValues);
-        return v;
+        return _ch->pollValues();
     }
 
     // ── simulation thread ───────────────────────────────────────────────────────
@@ -161,19 +143,13 @@ namespace rpe
             return;
         }
 
-        // Snapshot GUI intent.
-        qulonglong entity;
-        QString component, required;
-        QStringList paths;
-        std::vector<std::pair<QString, rttr::variant>> edits;
-        {
-            std::lock_guard<std::mutex> lk(_m);
-            entity = _inEntity;
-            component = _inComponent;
-            required = _required;
-            paths = _inPaths;
-            edits.swap(_edits);
-        }
+        // Snapshot GUI intent from the shared channel.
+        MirrorChannel::Intent in = _ch->takeIntent();
+        const qulonglong entity = in.entity;
+        const QString& component = in.component;
+        const QString& required = in.required;
+        const QStringList& paths = in.paths;
+        auto& edits = in.edits;
 
         // Interest changed → reset per-leaf dedup so the new selection refreshes fully.
         if (entity != _lastInterestEntity || component != _lastInterestComponent)
@@ -216,9 +192,7 @@ namespace rpe
         if (ents != _lastEntities)
         {
             _lastEntities = ents;
-            std::lock_guard<std::mutex> lk(_m);
-            _outEntities = ents;
-            _outEntitiesDirty = true;
+            _ch->publishEntities(ents);
         }
 
         if (entity == 0)
@@ -262,9 +236,7 @@ namespace rpe
         if (comps != _lastComponents)
         {
             _lastComponents = comps;
-            std::lock_guard<std::mutex> lk(_m);
-            _outComponents = comps;
-            _outComponentsDirty = true;
+            _ch->publishComponents(comps);
         }
 
         if (!haveSel)
@@ -314,11 +286,7 @@ namespace rpe
         }
         if (!updates.empty())
         {
-            std::lock_guard<std::mutex> lk(_m);
-            for (auto& u : updates)
-            {
-                _outValues.push_back(std::move(u));
-            }
+            _ch->publishValues(std::move(updates));
         }
     }
 

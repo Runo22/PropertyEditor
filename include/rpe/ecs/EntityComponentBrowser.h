@@ -4,9 +4,12 @@
 
 #include "rpe/core/RttrVariantWrapper.h"
 #include "rpe/ecs/ComponentListWidget.h"
+#include "rpe/ecs/MirrorChannel.h"
 #include "rpe/gui/PropertyModel.h"
 
 #include <QWidget>
+
+#include <memory>
 
 #include "rpe/ecs/flecs_prelude.h"
 
@@ -126,8 +129,10 @@ namespace rpe
         RttrVariantWrapper _liveWrapper; // persistent storage backing the editor's instance
         AccessGuard _guard;
 
-        // mirror mode
-        EcsMirror* _mirror = nullptr;
+        // mirror mode — hold the shared channel (not the EcsMirror), so the GUI
+        // keeps it alive and never dereferences a mirror destroyed on the sim
+        // thread first. See MirrorChannel.
+        std::shared_ptr<MirrorChannel> _channel;
         QTimer* _mirrorTimer = nullptr;
         qulonglong _mirrorEntity = 0;
         QString _mirrorComponent;
