@@ -61,7 +61,7 @@ if(RPE_WITH_FLECS)
         else()
             FetchContent_Declare(flecs
                 GIT_REPOSITORY https://github.com/SanderMertens/flecs.git
-                GIT_TAG        v4.0.3
+                GIT_TAG        v4.1.5
                 GIT_SHALLOW    TRUE)
             set(FLECS_STATIC ON  CACHE BOOL "" FORCE)
             set(FLECS_SHARED OFF CACHE BOOL "" FORCE)

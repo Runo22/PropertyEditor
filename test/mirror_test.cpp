@@ -44,7 +44,7 @@ int main()
     std::thread sim([&] {
         double t = 0.0;
         while (running.load(std::memory_order_relaxed)) {
-            if (auto* c = e.get_mut<Comp>()) {     // sim-thread-only world access
+            if (auto* c = e.try_get_mut<Comp>()) { // sim-thread-only world access
                 t += 0.1;
                 c->mass    = 10.0 + t;
                 c->pos.x   = t * 2.0;
@@ -81,7 +81,7 @@ int main()
     mirror.detach();
 
     // After join it is safe to read the world directly.
-    const int finalEditable = e.get<Comp>()->editable;
+    const int finalEditable = e.try_get<Comp>()->editable;
 
     int fails = 0;
     auto check = [&](const char* n, bool ok) {

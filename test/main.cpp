@@ -19,7 +19,6 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -131,12 +130,12 @@ static QWidget* makeEcsTab(QWidget* parent)
     static std::thread simThread([] {
         double t = 0.0;
         while (simRunning.load(std::memory_order_relaxed)) {
-            if (auto* tc = player.get_mut<Transform>()) {
+            if (auto* tc = player.try_get_mut<Transform>()) {
                 t += 0.02;
                 tc->position.x = std::sin(t) * 5.0;
                 tc->position.y = std::cos(t) * 2.0;
             }
-            if (auto* pc = enemy.get_mut<Physics>()) {
+            if (auto* pc = enemy.try_get_mut<Physics>()) {
                 pc->velocity.x = std::cos(t) * 3.0;
                 pc->mass       = 90.0 + std::sin(t);
             }
