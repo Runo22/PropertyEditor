@@ -9,7 +9,9 @@
 //  through this single header keeps the order correct and prevents include
 //  sorters from re-alphabetising them into a broken order.
 // ─────────────────────────────────────────────────────────────────────────────
+// clang-format off
 #include <rttr/type.h>
 #include <rttr/variant.h>
 #include <rttr/instance.h>
 #include <rttr/property.h>
+// clang-format on

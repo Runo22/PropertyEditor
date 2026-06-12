@@ -11,53 +11,56 @@
 
 class QListWidget;
 
-namespace rpe {
-
-// Resolved component of an entity that has a matching RTTR type.
-struct ComponentInfo {
-    flecs::id  id;
-    rttr::type rttrType = rttr::type::get<void>();   // rttr::type has no default ctor
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  ComponentListWidget — lists the RTTR-discoverable components on an entity.
-//
-//  Auto-discovery: a flecs component is shown when its name resolves to a
-//  registered rttr::type (rttr::type::get_by_name). No manual registration of
-//  the component<->type mapping is required.
-// ─────────────────────────────────────────────────────────────────────────────
-class ComponentListWidget : public QWidget
+namespace rpe
 {
-    Q_OBJECT
-public:
-    explicit ComponentListWidget(QWidget* parent = nullptr);
 
-    void setEntity(flecs::world* world, flecs::entity e);
-    void clearEntity();
+    // Resolved component of an entity that has a matching RTTR type.
+    struct ComponentInfo
+    {
+        flecs::id id;
+        rttr::type rttrType = rttr::type::get<void>(); // rttr::type has no default ctor
+    };
 
-    // Guard wrapped around world reads when the world is owned by another
-    // thread (see rpe/core/AccessGuard.h).
-    void setWorldAccess(AccessGuard guard);
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  ComponentListWidget — lists the RTTR-discoverable components on an entity.
+    //
+    //  Auto-discovery: a flecs component is shown when its name resolves to a
+    //  registered rttr::type (rttr::type::get_by_name). No manual registration of
+    //  the component<->type mapping is required.
+    // ─────────────────────────────────────────────────────────────────────────────
+    class ComponentListWidget : public QWidget
+    {
+        Q_OBJECT
 
-    // Externally provided component names (mirror mode); selection is reported
-    // via componentNameSelected.
-    void setComponentNames(const QStringList& names);
+    public:
+        explicit ComponentListWidget(QWidget* parent = nullptr);
 
-signals:
-    void componentSelected(ComponentInfo info);   // direct mode (world available)
-    void componentNameSelected(const QString& name);   // mirror mode
-    void componentDeselected();
+        void setEntity(flecs::world* world, flecs::entity e);
+        void clearEntity();
 
-private slots:
-    void _onSelectionChanged();
+        // Guard wrapped around world reads when the world is owned by another
+        // thread (see rpe/core/AccessGuard.h).
+        void setWorldAccess(AccessGuard guard);
 
-private:
-    void _setupUi();
+        // Externally provided component names (mirror mode); selection is reported
+        // via componentNameSelected.
+        void setComponentNames(const QStringList& names);
 
-    QListWidget*           _list = nullptr;
-    QVector<ComponentInfo> _components;
-    QStringList            _mirrorNames;   // last externally-fed name set (dedup)
-    AccessGuard            _guard;
-};
+    signals:
+        void componentSelected(ComponentInfo info);      // direct mode (world available)
+        void componentNameSelected(const QString& name); // mirror mode
+        void componentDeselected();
+
+    private slots:
+        void _onSelectionChanged();
+
+    private:
+        void _setupUi();
+
+        QListWidget* _list = nullptr;
+        QVector<ComponentInfo> _components;
+        QStringList _mirrorNames; // last externally-fed name set (dedup)
+        AccessGuard _guard;
+    };
 
 } // namespace rpe
