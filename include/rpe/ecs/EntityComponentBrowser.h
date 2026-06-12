@@ -16,6 +16,7 @@
 class QSplitter;
 class QCheckBox;
 class QTimer;
+class QVBoxLayout;
 
 namespace rpe
 {
@@ -40,10 +41,25 @@ namespace rpe
         Q_OBJECT
 
     public:
+        // Panel arrangement.
+        enum class Layout
+        {
+            Wide,     // entities | (components / properties) — wide docks
+            Vertical, // entities / components / properties stacked — UE-style sidebar
+        };
+
         explicit EntityComponentBrowser(QWidget* parent = nullptr);
 
         void setWorld(flecs::world* world);
         void setLiveUpdateIntervalMs(int ms);
+
+        // Switch panel arrangement (default Wide). Vertical stacks the three
+        // panels top-to-bottom for a narrow Unreal-style sidebar.
+        void setBrowserLayout(Layout layout);
+        Layout browserLayout() const
+        {
+            return _browserLayout;
+        }
 
         // ── Mirror mode (recommended for a separate simulation thread) ───────────
         // Drive the browser entirely from an EcsMirror instead of touching the world
@@ -114,6 +130,7 @@ namespace rpe
 
     private:
         void _setupUi();
+        void _applyLayout(Layout layout);
         void* _liveComponentPtr() const;
         void _pushInterest();
 
@@ -123,6 +140,9 @@ namespace rpe
         PropertyEditor* _propertyEditor = nullptr;
         QCheckBox* _writeCheck = nullptr;
         QTimer* _liveTimer = nullptr;
+        QVBoxLayout* _mainLayout = nullptr; // host layout; _layoutRoot swapped inside
+        QWidget* _layoutRoot = nullptr;     // current splitter tree
+        Layout _browserLayout = Layout::Wide;
 
         flecs::entity _selectedEntity;
         ComponentInfo _selectedComponent;

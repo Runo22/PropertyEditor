@@ -133,6 +133,8 @@ static QWidget* makeEcsTab(QWidget* parent)
     mirror.setRequiredComponent(QStringLiteral("Transform")); // entity-list filter
 
     auto* browser = new rpe::EntityComponentBrowser(parent);
+    // Unreal-style vertical sidebar: entities / components / properties stacked.
+    browser->setBrowserLayout(rpe::EntityComponentBrowser::Layout::Vertical);
     browser->setMirror(&mirror); // instead of setWorld — GUI never touches world
 
     // Simulation thread: NO mutex around the loop.

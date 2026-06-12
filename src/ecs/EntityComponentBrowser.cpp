@@ -29,39 +29,23 @@ namespace rpe
 
     void EntityComponentBrowser::_setupUi()
     {
-        auto* layout = new QVBoxLayout(this);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(2);
+        _mainLayout = new QVBoxLayout(this);
+        _mainLayout->setContentsMargins(0, 0, 0, 0);
+        _mainLayout->setSpacing(2);
 
-        auto* hSplit = new QSplitter(Qt::Horizontal, this);
-
-        _entityList = new EntityListWidget(hSplit);
-        hSplit->addWidget(_entityList);
-
-        auto* right = new QWidget(hSplit);
-        auto* rLayout = new QVBoxLayout(right);
-        rLayout->setContentsMargins(0, 0, 0, 0);
-        rLayout->setSpacing(2);
-
-        _writeCheck = new QCheckBox(tr("Write edits back to world"), right);
+        // Create the panels once, parented to `this`. _applyLayout() re-parents
+        // them into the chosen splitter tree (and can swap it later).
+        _writeCheck = new QCheckBox(tr("Write edits back to world"), this);
         _writeCheck->setToolTip(tr(
             "On: edits modify the live component.\n"
             "Off: edits are pinned as overrides only."));
-        rLayout->addWidget(_writeCheck);
+        _mainLayout->addWidget(_writeCheck);
 
-        auto* vSplit = new QSplitter(Qt::Vertical, right);
-        _componentList = new ComponentListWidget(vSplit);
-        _propertyEditor = new PropertyEditor(vSplit);
-        vSplit->addWidget(_componentList);
-        vSplit->addWidget(_propertyEditor);
-        vSplit->setStretchFactor(0, 1);
-        vSplit->setStretchFactor(1, 3);
-        rLayout->addWidget(vSplit, 1);
+        _entityList = new EntityListWidget(this);
+        _componentList = new ComponentListWidget(this);
+        _propertyEditor = new PropertyEditor(this);
 
-        hSplit->addWidget(right);
-        hSplit->setStretchFactor(0, 1);
-        hSplit->setStretchFactor(1, 2);
-        layout->addWidget(hSplit);
+        _applyLayout(_browserLayout);
 
         // The editor needs the *current* component pointer at read/write time.
         // We relink a persistent wrapper so the returned instance stays valid for
@@ -84,6 +68,59 @@ namespace rpe
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
         connect(_propertyEditor, &PropertyEditor::propertyEdited, this, &EntityComponentBrowser::propertyEdited);
         connect(_writeCheck, &QCheckBox::toggled, this, &EntityComponentBrowser::_onWriteToggled);
+    }
+
+    void EntityComponentBrowser::_applyLayout(Layout layout)
+    {
+        _browserLayout = layout;
+
+        // Build the new splitter tree. addWidget() re-parents the panels out of
+        // the previous tree, so deleting it afterwards won't take them with it.
+        QWidget* root = nullptr;
+        if (layout == Layout::Vertical)
+        {
+            auto* v = new QSplitter(Qt::Vertical);
+            v->addWidget(_entityList);
+            v->addWidget(_componentList);
+            v->addWidget(_propertyEditor);
+            v->setStretchFactor(0, 2);
+            v->setStretchFactor(1, 2);
+            v->setStretchFactor(2, 5);
+            v->setChildrenCollapsible(false);
+            root = v;
+        }
+        else
+        {
+            auto* h = new QSplitter(Qt::Horizontal);
+            h->addWidget(_entityList);
+            auto* vRight = new QSplitter(Qt::Vertical);
+            vRight->addWidget(_componentList);
+            vRight->addWidget(_propertyEditor);
+            vRight->setStretchFactor(0, 1);
+            vRight->setStretchFactor(1, 3);
+            vRight->setChildrenCollapsible(false);
+            h->addWidget(vRight);
+            h->setStretchFactor(0, 1);
+            h->setStretchFactor(1, 2);
+            h->setChildrenCollapsible(false);
+            root = h;
+        }
+
+        if (_layoutRoot)
+        {
+            _mainLayout->removeWidget(_layoutRoot);
+            _layoutRoot->deleteLater(); // panels already re-parented into `root`
+        }
+        _mainLayout->addWidget(root, 1);
+        _layoutRoot = root;
+    }
+
+    void EntityComponentBrowser::setBrowserLayout(Layout layout)
+    {
+        if (layout != _browserLayout || !_layoutRoot)
+        {
+            _applyLayout(layout);
+        }
     }
 
     void EntityComponentBrowser::setWorld(flecs::world* world)
