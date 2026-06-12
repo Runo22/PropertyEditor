@@ -88,11 +88,13 @@ namespace rpe
         std::vector<ValueUpdate> pollValues();        // leaf values that changed
 
     private:
-        void _registerSystem();
+        void _install();
 
         flecs::world* _world = nullptr;
         flecs::system _system {};
+        flecs::query<> _entityQuery {};   // cached: built once at attach, never in pump()
         bool _haveSystem = false;
+        bool _haveQuery = false;
 
         // Shared state guarded by _m.
         mutable std::mutex _m;

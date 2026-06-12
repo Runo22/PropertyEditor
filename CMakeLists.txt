@@ -5,6 +5,10 @@ project(rpe LANGUAGES CXX)
 option(RPE_WITH_FLECS      "Build the flecs ECS integration layer" ON)
 option(RPE_BUILD_DEMO      "Build the demo/test application"       ON)
 option(RPE_USE_SYSTEM_DEPS "Resolve rttr/flecs via find_package instead of FetchContent" OFF)
+# flecs MUST be one shared instance when the world crosses a DLL/plugin boundary
+# (host owns the world, plugin inspects it). Default to shared; set OFF only for
+# a single-binary build.
+option(RPE_FLECS_SHARED    "Build/link flecs as a shared library (DLL)" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,7 +59,7 @@ else()
 endif()
 
 if(RPE_WITH_FLECS)
-    if(NOT TARGET flecs::flecs_static AND NOT TARGET flecs::flecs)
+    if(NOT TARGET flecs::flecs AND NOT TARGET flecs::flecs_static)
         if(RPE_USE_SYSTEM_DEPS)
             find_package(flecs CONFIG REQUIRED)
         else()
@@ -63,15 +67,21 @@ if(RPE_WITH_FLECS)
                 GIT_REPOSITORY https://github.com/SanderMertens/flecs.git
                 GIT_TAG        v4.1.5
                 GIT_SHALLOW    TRUE)
-            set(FLECS_STATIC ON  CACHE BOOL "" FORCE)
-            set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
+            if(RPE_FLECS_SHARED)
+                set(FLECS_SHARED ON  CACHE BOOL "" FORCE)
+                set(FLECS_STATIC OFF CACHE BOOL "" FORCE)
+            else()
+                set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
+                set(FLECS_STATIC ON  CACHE BOOL "" FORCE)
+            endif()
             FetchContent_MakeAvailable(flecs)
         endif()
     endif()
-    if(TARGET flecs::flecs_static)
-        set(RPE_FLECS_TARGET flecs::flecs_static)
-    else()
+    # Prefer the shared target — a single flecs instance across DLL boundaries.
+    if(TARGET flecs::flecs)
         set(RPE_FLECS_TARGET flecs::flecs)
+    else()
+        set(RPE_FLECS_TARGET flecs::flecs_static)
     endif()
 endif()
 

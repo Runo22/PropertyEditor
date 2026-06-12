@@ -14,27 +14,44 @@ namespace rpe
 
     void EcsMirror::attach(flecs::world* world)
     {
+        // MUST run on the simulation thread at a frame boundary (NOT while
+        // world.progress() is executing). Creating the system + query are
+        // structural changes to the world, and a flecs world is not safe for
+        // structural changes concurrent with progress() on another thread.
         detach();
         _world = world;
         if (_world)
         {
-            _registerSystem();
+            _install();
         }
     }
 
     void EcsMirror::detach()
     {
+        // Like attach(): structural — call on the sim thread at a frame boundary.
+        if (_haveQuery && _entityQuery)
+        {
+            _entityQuery.destruct();
+        }
         if (_haveSystem && _system.is_alive())
         {
             _system.destruct();
         }
+        _haveQuery = false;
         _haveSystem = false;
+        _entityQuery = flecs::query<>();
         _system = flecs::system();
         _world = nullptr;
     }
 
-    void EcsMirror::_registerSystem()
+    void EcsMirror::_install()
     {
+        // Build the named-entity query ONCE here (never inside the readonly
+        // system). The optional required-component filter is applied per-frame in
+        // the callback via has(), so the cached query never needs rebuilding.
+        _entityQuery = _world->query_builder().with<flecs::Identifier>(flecs::Name).build();
+        _haveQuery = true;
+
         // A term-less system is a task: its run callback fires once per frame inside
         // world.progress(), on the simulation thread. No change to the caller's loop.
         _system = _world->system("rpe::EcsMirror")
@@ -144,20 +161,26 @@ namespace rpe
         }
 
         // ── Entity list (named entities, optionally filtered by component) ────────
+        // Iterate the CACHED query (never create one here — we're inside the
+        // readonly system). The required-component filter is applied via has().
         QVector<EntityEntry> ents;
+        if (_haveQuery)
         {
-            auto qb = _world->query_builder().with<flecs::Identifier>(flecs::Name);
+            flecs::entity_t reqId = 0;
             if (!required.isEmpty())
             {
                 flecs::entity rc = _world->lookup(required.toUtf8().constData());
                 if (rc.is_valid())
                 {
-                    qb.with(rc);
+                    reqId = rc.id();
                 }
             }
-            flecs::query<> q = qb.build();
-            q.each([&](flecs::entity e) {
+            _entityQuery.each([&](flecs::entity e) {
                 if (!e.is_alive())
+                {
+                    return;
+                }
+                if (reqId && !e.has(reqId))
                 {
                     return;
                 }
