@@ -7,6 +7,7 @@
 #include <QStringList>
 #include <QVector>
 
+#include <atomic>
 #include <memory>
 
 #include "rpe/ecs/flecs_prelude.h"
@@ -86,8 +87,13 @@ namespace rpe
     private:
         void _install();
         static void _installTrampoline(ecs_world_t* world, void* ctx);
+        static void _teardownTrampoline(ecs_world_t* world, void* ctx);
 
         std::shared_ptr<MirrorChannel> _ch; // shared with the GUI consumer
+
+        // Liveness token shared with the system callback and any deferred install,
+        // so they no-op safely if this EcsMirror is destroyed before they run.
+        std::shared_ptr<std::atomic<bool>> _alive;
 
         flecs::world* _world = nullptr;
         flecs::system _system {};

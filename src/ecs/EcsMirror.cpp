@@ -7,13 +7,34 @@
 namespace rpe
 {
 
+    namespace
+    {
+        // Heap contexts for ecs_run_post_frame trampolines (their ctx is a raw
+        // void* that the trampoline frees).
+        struct InstallCtx
+        {
+            std::shared_ptr<std::atomic<bool>> alive;
+            EcsMirror* self;
+        };
+        struct TeardownCtx
+        {
+            flecs::system sys;
+            flecs::query<> query; // ref-counted handle; finalised when this ctx dies
+            bool haveSystem;
+        };
+    } // namespace
+
     EcsMirror::EcsMirror()
         : _ch(std::make_shared<MirrorChannel>())
+        , _alive(std::make_shared<std::atomic<bool>>(true))
     {
     }
 
     EcsMirror::~EcsMirror()
     {
+        // Mark dead first: a deferred install or a late system run will then no-op
+        // instead of touching this (soon-to-be-freed) object.
+        _alive->store(false, std::memory_order_release);
         detach();
         // Tell any GUI consumer still holding the channel that no more data is
         // coming; its shared_ptr keeps the channel alive, so its poll*() calls
@@ -41,7 +62,7 @@ namespace rpe
         ecs_world_t* w = _world->c_ptr();
         if (ecs_stage_is_readonly(w))
         {
-            ecs_run_post_frame(w, &EcsMirror::_installTrampoline, this);
+            ecs_run_post_frame(w, &EcsMirror::_installTrampoline, new InstallCtx { _alive, this });
         }
         else
         {
@@ -51,29 +72,52 @@ namespace rpe
 
     void EcsMirror::_installTrampoline(ecs_world_t*, void* ctx)
     {
-        auto* self = static_cast<EcsMirror*>(ctx);
-        if (self->_world && !self->_haveSystem)
+        auto* c = static_cast<InstallCtx*>(ctx);
+        // alive==false → the EcsMirror was destroyed before frame-end; do not
+        // touch it. Else, skip if it was detached (or already installed) meanwhile.
+        if (c->alive->load(std::memory_order_acquire) && c->self->_world && !c->self->_haveSystem)
         {
-            self->_install();
+            c->self->_install();
         }
+        delete c;
     }
 
     void EcsMirror::detach()
     {
-        // Like attach(): structural — call on the sim thread at a frame boundary.
-        if (_haveQuery && _entityQuery)
+        // Structural teardown. If called while the world is readonly (mid-progress
+        // — e.g. a system removes the plugin), defer it to frame-end via value
+        // handles, so it stays safe even if this object is destroyed in between.
+        if (_haveSystem || _haveQuery)
         {
-            _entityQuery.destruct();
-        }
-        if (_haveSystem && _system.is_alive())
-        {
-            _system.destruct();
+            ecs_world_t* w = _world ? _world->c_ptr() : nullptr;
+            if (w && ecs_stage_is_readonly(w))
+            {
+                ecs_run_post_frame(w, &EcsMirror::_teardownTrampoline, new TeardownCtx { _system, _entityQuery, _haveSystem });
+            }
+            else if (_haveSystem && _system.is_alive())
+            {
+                _system.destruct(); // delete the system entity (safe outside readonly)
+            }
+            // The anonymous _entityQuery is ref-counted: resetting the handle below
+            // releases our reference (it is finalised when the last ref drops — the
+            // TeardownCtx copy in the deferred case, or here directly). We must NOT
+            // call destruct() on it (that asserts; it is only for entity queries).
         }
         _haveQuery = false;
         _haveSystem = false;
         _entityQuery = flecs::query<>();
         _system = flecs::system();
         _world = nullptr;
+    }
+
+    void EcsMirror::_teardownTrampoline(ecs_world_t*, void* ctx)
+    {
+        auto* c = static_cast<TeardownCtx*>(ctx);
+        if (c->haveSystem && c->sys.is_alive())
+        {
+            c->sys.destruct();
+        }
+        delete c; // c->query handle dtor finalises the anonymous query (outside readonly)
     }
 
     void EcsMirror::_install()
@@ -85,12 +129,19 @@ namespace rpe
         _haveQuery = true;
 
         // A term-less system is a task: its run callback fires once per frame inside
-        // world.progress(), on the simulation thread. No change to the caller's loop.
+        // world.progress(), on the simulation thread. The captured 'alive' token
+        // makes the callback a no-op if this EcsMirror has been destroyed (the
+        // system may outlive it briefly until a deferred teardown removes it).
+        auto alive = _alive;
         _system = _world->system("rpe::EcsMirror")
                       .kind(flecs::PostUpdate)
-                      .run([this](flecs::iter& it) {
+                      .run([this, alive](flecs::iter& it) {
                           while (it.next())
                           { /* task: no tables to iterate */
+                          }
+                          if (!alive->load(std::memory_order_acquire))
+                          {
+                              return;
                           }
                           pump();
                       });
