@@ -66,7 +66,12 @@ namespace rpe
         EcsMirror(const EcsMirror&) = delete;
         EcsMirror& operator=(const EcsMirror&) = delete;
 
-        // ── simulation thread (or before progress() starts) ──────────────────────
+        // ── simulation thread ─────────────────────────────────────────────────────
+        // attach()/detach() MUST be called on the thread that runs world.progress()
+        // (structural world changes are not thread-safe). attach() may be called
+        // even from *inside* progress() — e.g. a system that loads a plugin at
+        // runtime: when the world is readonly it auto-defers the install to
+        // frame-end (ecs_run_post_frame), so it is always safe on the sim thread.
         void attach(flecs::world* world); // registers the per-frame system
         void detach();
         void pump(); // one snapshot/apply cycle (sim thread)
@@ -89,6 +94,7 @@ namespace rpe
 
     private:
         void _install();
+        static void _installTrampoline(ecs_world_t* world, void* ctx);
 
         flecs::world* _world = nullptr;
         flecs::system _system {};

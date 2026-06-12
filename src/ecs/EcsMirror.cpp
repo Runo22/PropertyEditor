@@ -14,15 +14,38 @@ namespace rpe
 
     void EcsMirror::attach(flecs::world* world)
     {
-        // MUST run on the simulation thread at a frame boundary (NOT while
-        // world.progress() is executing). Creating the system + query are
-        // structural changes to the world, and a flecs world is not safe for
-        // structural changes concurrent with progress() on another thread.
+        // MUST be called on the simulation thread (the one that runs progress()).
+        // Creating the system + query are structural changes; a flecs world is
+        // not safe for structural changes from another thread, nor while it is in
+        // readonly mode (mid-progress).
+        //
+        // If attach() is called from *inside* progress() — e.g. a system loads the
+        // plugin at runtime — the world is readonly and installing now would
+        // crash. In that case we defer the install to ecs_run_post_frame, which
+        // runs at frame-end on this same thread, after readonly mode is lifted.
         detach();
         _world = world;
-        if (_world)
+        if (!_world)
+        {
+            return;
+        }
+        ecs_world_t* w = _world->c_ptr();
+        if (ecs_stage_is_readonly(w))
+        {
+            ecs_run_post_frame(w, &EcsMirror::_installTrampoline, this);
+        }
+        else
         {
             _install();
+        }
+    }
+
+    void EcsMirror::_installTrampoline(ecs_world_t*, void* ctx)
+    {
+        auto* self = static_cast<EcsMirror*>(ctx);
+        if (self->_world && !self->_haveSystem)
+        {
+            self->_install();
         }
     }
 

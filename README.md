@@ -152,6 +152,18 @@ expanded in the tree, when `setSnapshotOpenFieldsOnly(true)`, the default) and
 ~1 frame of latency. The demo's ECS tab runs exactly this — a real `std::thread`
 advancing the world with no lock.
 
+**Requirements (important for plugin/DLL setups):**
+
+* **Build flecs as one shared instance.** When the world is owned by the host
+  and inspected from a plugin DLL, host + rpe + plugins must link the *same*
+  flecs shared library (CMake default: `RPE_FLECS_SHARED=ON`). Two static flecs
+  copies operating on one world fault inside flecs (e.g. `ecs_get_world`).
+* **Call `attach()`/`detach()` on the simulation thread** (the one running
+  `progress()`). They make structural changes to the world, which are not safe
+  from another thread. `attach()` *may* be called from inside `progress()` — e.g.
+  a system that loads the plugin at runtime — it detects readonly mode and defers
+  the install to frame-end automatically.
+
 #### Guard mode — simpler, if you can serialize world access
 
 If you *can* take a lock (or marshal onto the sim thread) around world access,
