@@ -8,136 +8,224 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
-namespace rpe {
-
-EntityListWidget::EntityListWidget(QWidget* parent)
-    : QWidget(parent)
+namespace rpe
 {
-    _setupUi();
-    _timer = new QTimer(this);
-    _timer->setInterval(500);
-    connect(_timer, &QTimer::timeout, this, &EntityListWidget::_refresh);
-}
 
-void EntityListWidget::_setupUi()
-{
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(2);
-
-    auto* header = new QLabel(tr("Entities"), this);
-    header->setStyleSheet(QStringLiteral("font-weight: bold; padding: 2px 4px;"));
-    layout->addWidget(header);
-
-    _filterEdit = new QLineEdit(this);
-    _filterEdit->setPlaceholderText(tr("Filter entities…"));
-    _filterEdit->setClearButtonEnabled(true);
-    layout->addWidget(_filterEdit);
-
-    _requiredCheck = new QCheckBox(this);
-    _requiredCheck->setVisible(false);     // shown only when a required component is set
-    layout->addWidget(_requiredCheck);
-
-    _list = new QListWidget(this);
-    layout->addWidget(_list, 1);
-
-    connect(_list, &QListWidget::currentItemChanged,
-            this,  &EntityListWidget::_onSelectionChanged);
-    connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
-    connect(_requiredCheck, &QCheckBox::toggled, this, &EntityListWidget::_refresh);
-}
-
-void EntityListWidget::setWorld(flecs::world* world)
-{
-    _world = world;
-    if (_world) _timer->start();
-    else        _timer->stop();
-    _refresh();
-}
-
-void EntityListWidget::setRefreshIntervalMs(int ms) { _timer->setInterval(ms); }
-
-void EntityListWidget::setRequiredComponent(const QString& componentName, bool enabledByDefault)
-{
-    _requiredComponent = componentName;
-    if (componentName.isEmpty()) {
-        _requiredCheck->setVisible(false);
-    } else {
-        _requiredCheck->setText(tr("Only entities with %1").arg(componentName));
-        // Block the toggled→_refresh signal so we refresh exactly once below.
-        QSignalBlocker block(_requiredCheck);
-        _requiredCheck->setChecked(enabledByDefault);
-        _requiredCheck->setVisible(true);
+    EntityListWidget::EntityListWidget(QWidget* parent)
+        : QWidget(parent)
+    {
+        _setupUi();
+        _timer = new QTimer(this);
+        _timer->setInterval(500);
+        connect(_timer, &QTimer::timeout, this, &EntityListWidget::_refresh);
     }
-    _refresh();
-}
 
-void EntityListWidget::_refresh()
-{
-    if (!_world) { _list->clear(); _lastEntries.clear(); return; }
+    void EntityListWidget::_setupUi()
+    {
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(2);
 
-    const QString filter = _filterEdit->text().trimmed().toLower();
-    const bool filterByComp = !_requiredComponent.isEmpty() && _requiredCheck->isChecked();
+        auto* header = new QLabel(tr("Entities"), this);
+        header->setStyleSheet(QStringLiteral("font-weight: bold; padding: 2px 4px;"));
+        layout->addWidget(header);
 
-    // Query all *named* entities (those carrying the (Identifier, Name) pair),
-    // optionally constrained to those having the required component.
-    auto qb = _world->query_builder().with<flecs::Identifier>(flecs::Name);
-    flecs::entity requiredComp;
-    if (filterByComp) {
-        requiredComp = _world->lookup(_requiredComponent.toUtf8().constData());
-        if (requiredComp.is_valid())
-            qb.with(requiredComp);
+        _filterEdit = new QLineEdit(this);
+        _filterEdit->setPlaceholderText(tr("Filter entities…"));
+        _filterEdit->setClearButtonEnabled(true);
+        layout->addWidget(_filterEdit);
+
+        _requiredCheck = new QCheckBox(this);
+        _requiredCheck->setVisible(false); // shown only when a required component is set
+        layout->addWidget(_requiredCheck);
+
+        _list = new QListWidget(this);
+        layout->addWidget(_list, 1);
+
+        connect(_list, &QListWidget::currentItemChanged, this, &EntityListWidget::_onSelectionChanged);
+        connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
+        connect(_requiredCheck, &QCheckBox::toggled, this, &EntityListWidget::_refresh);
     }
-    flecs::query<> q = qb.build();
 
-    QVector<QPair<qulonglong, QString>> entries;
-    q.each([&](flecs::entity e) {
-        if (!e.is_alive()) return;
-        const char* rawName = e.name();
-        const QString name  = rawName ? QString::fromUtf8(rawName) : QStringLiteral("(unnamed)");
-        const QString label = QStringLiteral("%1  %2").arg(e.id()).arg(name);
-        if (!filter.isEmpty() && !label.toLower().contains(filter))
+    void EntityListWidget::setWorld(flecs::world* world)
+    {
+        _world = world;
+        if (_world)
+        {
+            _timer->start();
+        }
+        else
+        {
+            _timer->stop();
+        }
+        _refresh();
+    }
+
+    void EntityListWidget::setRefreshIntervalMs(int ms)
+    {
+        _timer->setInterval(ms);
+    }
+
+    void EntityListWidget::setWorldAccess(AccessGuard guard)
+    {
+        _guard = std::move(guard);
+    }
+
+    void EntityListWidget::stopAutoRefresh()
+    {
+        _timer->stop();
+    }
+
+    void EntityListWidget::setRequiredComponent(const QString& componentName, bool enabledByDefault)
+    {
+        _requiredComponent = componentName;
+        if (componentName.isEmpty())
+        {
+            _requiredCheck->setVisible(false);
+        }
+        else
+        {
+            _requiredCheck->setText(tr("Only entities with %1").arg(componentName));
+            // Block the toggled→_refresh signal so we refresh exactly once below.
+            QSignalBlocker block(_requiredCheck);
+            _requiredCheck->setChecked(enabledByDefault);
+            _requiredCheck->setVisible(true);
+        }
+        _refresh();
+    }
+
+    void EntityListWidget::_refresh()
+    {
+        if (!_world)
+        {
+            _list->clear();
+            _lastEntries.clear();
             return;
-        entries.append({ static_cast<qulonglong>(e.id()), label });
-    });
+        }
 
-    // Timer-driven refresh: skip the widget rebuild entirely when the visible
-    // set hasn't changed — avoids selection flicker and wasted repaints.
-    if (entries == _lastEntries)
-        return;
-    _lastEntries = entries;
+        const QString filter = _filterEdit->text().trimmed().toLower();
+        const bool filterByComp = !_requiredComponent.isEmpty() && _requiredCheck->isChecked();
 
-    // Remember current selection so it survives the rebuild.
-    flecs::entity_t selectedId = 0;
-    if (auto* cur = _list->currentItem())
-        selectedId = static_cast<flecs::entity_t>(cur->data(Qt::UserRole).toULongLong());
+        // Query all *named* entities (those carrying the (Identifier, Name) pair),
+        // optionally constrained to those having the required component. All world
+        // reads happen under the guard; the widget rebuild below does not need it.
+        QVector<QPair<qulonglong, QString>> entries;
+        withGuard(_guard, [&] {
+            auto qb = _world->query_builder().with<flecs::Identifier>(flecs::Name);
+            flecs::entity requiredComp;
+            if (filterByComp)
+            {
+                requiredComp = _world->lookup(_requiredComponent.toUtf8().constData());
+                if (requiredComp.is_valid())
+                {
+                    qb.with(requiredComp);
+                }
+            }
+            flecs::query<> q = qb.build();
 
-    _list->blockSignals(true);
-    _list->clear();
+            q.each([&](flecs::entity e) {
+                if (!e.is_alive())
+                {
+                    return;
+                }
+                const char* rawName = e.name();
+                const QString name = rawName ? QString::fromUtf8(rawName) : QStringLiteral("(unnamed)");
+                const QString label = QStringLiteral("%1  %2").arg(e.id()).arg(name);
+                if (!filter.isEmpty() && !label.toLower().contains(filter))
+                {
+                    return;
+                }
+                entries.append({ static_cast<qulonglong>(e.id()), label });
+            });
+        });
 
-    bool reselected = false;
-    for (const auto& entry : entries) {   // .first/.second: Qt 5.12 has no QPair bindings
-        auto* item = new QListWidgetItem(entry.second, _list);
-        item->setData(Qt::UserRole, entry.first);
-        if (entry.first == selectedId) { _list->setCurrentItem(item); reselected = true; }
+        _applyEntries(entries);
     }
 
-    _list->blockSignals(false);
-
-    if (!reselected && selectedId != 0)
-        emit entityDeselected();
-}
-
-void EntityListWidget::_onSelectionChanged()
-{
-    auto* item = _list->currentItem();
-    if (!item) { emit entityDeselected(); return; }
-    const auto id = static_cast<flecs::entity_t>(item->data(Qt::UserRole).toULongLong());
-    if (_world) {
-        flecs::entity e = _world->entity(id);
-        if (e.is_alive())
-            emit entitySelected(e);
+    void EntityListWidget::setEntries(const QVector<QPair<qulonglong, QString>>& entries)
+    {
+        // External feed (mirror mode): apply the optional text filter, then rebuild.
+        const QString filter = _filterEdit->text().trimmed().toLower();
+        if (filter.isEmpty())
+        {
+            _applyEntries(entries);
+        }
+        else
+        {
+            QVector<QPair<qulonglong, QString>> filtered;
+            for (const auto& e : entries)
+            {
+                if (e.second.toLower().contains(filter))
+                {
+                    filtered.append(e);
+                }
+            }
+            _applyEntries(filtered);
+        }
     }
-}
+
+    void EntityListWidget::_applyEntries(const QVector<QPair<qulonglong, QString>>& entries)
+    {
+        // Skip the rebuild when the visible set is unchanged — avoids flicker.
+        if (entries == _lastEntries)
+        {
+            return;
+        }
+        _lastEntries = entries;
+
+        // Remember current selection so it survives the rebuild.
+        qulonglong selectedId = 0;
+        if (auto* cur = _list->currentItem())
+        {
+            selectedId = cur->data(Qt::UserRole).toULongLong();
+        }
+
+        _list->blockSignals(true);
+        _list->clear();
+
+        bool reselected = false;
+        for (const auto& entry : entries)
+        { // .first/.second: Qt 5.12 has no QPair bindings
+            auto* item = new QListWidgetItem(entry.second, _list);
+            item->setData(Qt::UserRole, entry.first);
+            if (entry.first == selectedId)
+            {
+                _list->setCurrentItem(item);
+                reselected = true;
+            }
+        }
+
+        _list->blockSignals(false);
+
+        if (!reselected && selectedId != 0)
+        {
+            emit entityDeselected();
+        }
+    }
+
+    void EntityListWidget::_onSelectionChanged()
+    {
+        auto* item = _list->currentItem();
+        if (!item)
+        {
+            emit entityDeselected();
+            return;
+        }
+        const auto id = item->data(Qt::UserRole).toULongLong();
+        emit entityIdSelected(id); // world-free; used by mirror mode
+        if (_world)
+        {
+            flecs::entity e;
+            bool alive = false;
+            withGuard(_guard, [&] {
+                e = _world->entity(static_cast<flecs::entity_t>(id));
+                alive = e.is_alive();
+            });
+            if (alive)
+            {
+                emit entitySelected(e);
+            }
+        }
+    }
 
 } // namespace rpe

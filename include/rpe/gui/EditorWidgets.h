@@ -8,63 +8,77 @@ class QLineEdit;
 class QToolButton;
 class QLabel;
 
-namespace rpe {
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  FilePathEditor — line edit + "…" button. Used for file/dir path properties
-//  (driven by the rpe::editor::FilePath / SaveFile / Directory hints).
-// ─────────────────────────────────────────────────────────────────────────────
-class FilePathEditor : public QWidget
+namespace rpe
 {
-    Q_OBJECT
-    Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged USER true)
-public:
-    enum class Mode { OpenFile, SaveFile, Directory };
 
-    explicit FilePathEditor(Mode mode, QWidget* parent = nullptr);
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  FilePathEditor — line edit + "…" button. Used for file/dir path properties
+    //  (driven by the rpe::editor::FilePath / SaveFile / Directory hints).
+    // ─────────────────────────────────────────────────────────────────────────────
+    class FilePathEditor : public QWidget
+    {
+        Q_OBJECT
+        Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged USER true)
 
-    QString path() const;
-    void    setPath(const QString& p);
-    void    setFilter(const QString& f) { _filter = f; }
+    public:
+        enum class Mode
+        {
+            OpenFile,
+            SaveFile,
+            Directory
+        };
 
-signals:
-    void pathChanged();
+        explicit FilePathEditor(Mode mode, QWidget* parent = nullptr);
 
-private slots:
-    void _browse();
+        QString path() const;
+        void setPath(const QString& p);
+        void setFilter(const QString& f)
+        {
+            _filter = f;
+        }
 
-private:
-    Mode         _mode;
-    QString      _filter = QStringLiteral("All files (*)");
-    QLineEdit*   _edit   = nullptr;
-    QToolButton* _button = nullptr;
-};
+    signals:
+        void pathChanged();
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  ColorEditor — swatch button that opens a QColorDialog. Used for QColor
-//  properties (auto-detected) or the rpe::editor::Color hint.
-// ─────────────────────────────────────────────────────────────────────────────
-class ColorEditor : public QWidget
-{
-    Q_OBJECT
-    Q_PROPERTY(QColor color READ color WRITE setColor NOTIFY colorChanged USER true)
-public:
-    explicit ColorEditor(QWidget* parent = nullptr);
+    private slots:
+        void _browse();
 
-    QColor color() const { return _color; }
-    void   setColor(const QColor& c);
+    private:
+        Mode _mode;
+        QString _filter = QStringLiteral("All files (*)");
+        QLineEdit* _edit = nullptr;
+        QToolButton* _button = nullptr;
+    };
 
-signals:
-    void colorChanged();
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  ColorEditor — swatch button that opens a QColorDialog. Used for QColor
+    //  properties (auto-detected) or the rpe::editor::Color hint.
+    // ─────────────────────────────────────────────────────────────────────────────
+    class ColorEditor : public QWidget
+    {
+        Q_OBJECT
+        Q_PROPERTY(QColor color READ color WRITE setColor NOTIFY colorChanged USER true)
 
-private slots:
-    void _pick();
+    public:
+        explicit ColorEditor(QWidget* parent = nullptr);
 
-private:
-    void    _updateSwatch();
-    QColor       _color = Qt::white;
-    QLabel*      _swatch = nullptr;
-    QToolButton* _button = nullptr;
-};
+        QColor color() const
+        {
+            return _color;
+        }
+        void setColor(const QColor& c);
+
+    signals:
+        void colorChanged();
+
+    private slots:
+        void _pick();
+
+    private:
+        void _updateSwatch();
+        QColor _color = Qt::white;
+        QLabel* _swatch = nullptr;
+        QToolButton* _button = nullptr;
+    };
 
 } // namespace rpe

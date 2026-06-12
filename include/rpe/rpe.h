@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // core
+#include "rpe/core/AccessGuard.h"
 #include "rpe/core/EditorHints.h"
 #include "rpe/core/PropertyNode.h"
 #include "rpe/core/RttrBridge.h"
@@ -29,7 +30,8 @@
 
 // ecs (optional)
 #if defined(RPE_WITH_FLECS)
-#  include "rpe/ecs/ComponentListWidget.h"
-#  include "rpe/ecs/EntityComponentBrowser.h"
-#  include "rpe/ecs/EntityListWidget.h"
+#include "rpe/ecs/ComponentListWidget.h"
+#include "rpe/ecs/EcsMirror.h"
+#include "rpe/ecs/EntityComponentBrowser.h"
+#include "rpe/ecs/EntityListWidget.h"
 #endif

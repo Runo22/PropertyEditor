@@ -9,6 +9,8 @@ option(RPE_USE_SYSTEM_DEPS "Resolve rttr/flecs via find_package instead of Fetch
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# Static RTTR/flecs are linked into the SHARED rpe_core, so everything must be PIC.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
@@ -59,7 +61,7 @@ if(RPE_WITH_FLECS)
         else()
             FetchContent_Declare(flecs
                 GIT_REPOSITORY https://github.com/SanderMertens/flecs.git
-                GIT_TAG        v4.0.3
+                GIT_TAG        v4.1.5
                 GIT_SHALLOW    TRUE)
             set(FLECS_STATIC ON  CACHE BOOL "" FORCE)
             set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
@@ -73,22 +75,37 @@ if(RPE_WITH_FLECS)
     endif()
 endif()
 
-# ── Library ──────────────────────────────────────────────────────────────────
-set(RPE_SOURCES
+# ── rpe_core ─────────────────────────────────────────────────────────────────
+# SHARED so the host and every plugin link ONE TypeBridge (and one RTTR) — the
+# single-registry guarantee a plugin architecture needs. Depends only on QtCore/
+# QtGui + RTTR, so a plugin can link this alone (no Widgets/flecs) just to
+# register its component types.
+set(RPE_CORE_SOURCES
     src/core/PropertyNode.cpp
     src/core/TypeRenderer.cpp
     src/core/RttrBridge.cpp
     src/core/RttrVariantWrapper.cpp
-    src/core/TypeBridge.cpp
+    src/core/TypeBridge.cpp)
+
+add_library(rpe_core SHARED ${RPE_CORE_SOURCES})
+add_library(rpe::core ALIAS rpe_core)
+target_include_directories(rpe_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>)
+target_link_libraries(rpe_core PUBLIC Qt5::Core Qt5::Gui ${RPE_RTTR_TARGET})
+set_target_properties(rpe_core PROPERTIES
+    WINDOWS_EXPORT_ALL_SYMBOLS ON   # export everything on MSVC without annotations
+    CXX_VISIBILITY_PRESET default)
+
+# ── rpe_gui ──────────────────────────────────────────────────────────────────
+# The widgets (Qt) + optional flecs ECS layer. Host links this.
+set(RPE_GUI_SOURCES
     src/gui/PropertyModel.cpp
     src/gui/PropertyDelegate.cpp
     src/gui/EditorWidgets.cpp
     src/gui/PropertyEditor.cpp
-    src/gui/VariantEditor.cpp)
-
-# Headers carrying Q_OBJECT are listed so AUTOMOC processes them (they live in a
-# separate include/ tree, so basename auto-detection alone is not enough).
-list(APPEND RPE_SOURCES
+    src/gui/VariantEditor.cpp
+    # Q_OBJECT headers listed so AUTOMOC processes them (separate include/ tree).
     include/rpe/gui/PropertyModel.h
     include/rpe/gui/PropertyDelegate.h
     include/rpe/gui/EditorWidgets.h
@@ -96,38 +113,42 @@ list(APPEND RPE_SOURCES
     include/rpe/gui/VariantEditor.h)
 
 if(RPE_WITH_FLECS)
-    list(APPEND RPE_SOURCES
+    list(APPEND RPE_GUI_SOURCES
         src/ecs/EntityListWidget.cpp
         src/ecs/ComponentListWidget.cpp
         src/ecs/EntityComponentBrowser.cpp
+        src/ecs/EcsMirror.cpp
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
         include/rpe/ecs/EntityComponentBrowser.h)
 endif()
 
-add_library(rpe STATIC ${RPE_SOURCES})
-add_library(rpe::rpe ALIAS rpe)
-
-target_include_directories(rpe PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>)
-
-target_link_libraries(rpe PUBLIC Qt5::Core Qt5::Gui Qt5::Widgets ${RPE_RTTR_TARGET})
+add_library(rpe_gui STATIC ${RPE_GUI_SOURCES})
+add_library(rpe::gui ALIAS rpe_gui)
+add_library(rpe::rpe ALIAS rpe_gui)   # backward-compatible umbrella name
+target_link_libraries(rpe_gui PUBLIC rpe_core Qt5::Widgets)
 
 if(RPE_WITH_FLECS)
-    target_link_libraries(rpe PUBLIC ${RPE_FLECS_TARGET})
-    target_compile_definitions(rpe PUBLIC RPE_WITH_FLECS)
+    target_link_libraries(rpe_gui PUBLIC ${RPE_FLECS_TARGET})
+    target_compile_definitions(rpe_gui PUBLIC RPE_WITH_FLECS)
 endif()
 
-if(MSVC)
-    target_compile_options(rpe PRIVATE /W4 /MP /permissive-)
-    target_compile_definitions(rpe PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-else()
-    target_compile_options(rpe PRIVATE -Wall -Wextra)
-endif()
+foreach(_t rpe_core rpe_gui)
+    if(MSVC)
+        target_compile_options(${_t} PRIVATE /W4 /MP /permissive-)
+        target_compile_definitions(${_t} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(${_t} PRIVATE -Wall -Wextra)
+    endif()
+endforeach()
 
 # ── Demo / test app ──────────────────────────────────────────────────────────
 if(RPE_BUILD_DEMO)
     add_executable(rpe_demo test/main.cpp)
-    target_link_libraries(rpe_demo PRIVATE rpe)
+    target_link_libraries(rpe_demo PRIVATE rpe_gui)
+endif()
+
+if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
+    add_executable(rpe_mirror_test test/mirror_test.cpp)
+    target_link_libraries(rpe_mirror_test PRIVATE rpe_gui)
 endif()
