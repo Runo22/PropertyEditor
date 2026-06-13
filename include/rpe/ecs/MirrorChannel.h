@@ -100,7 +100,9 @@ namespace rpe
         bool _outEntitiesDirty = false;
         QStringList _outComponents;
         bool _outComponentsDirty = false;
-        std::vector<ValueUpdate> _outValues;
+        // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
+        // consumer can't make this grow unbounded.
+        QHash<QString, rttr::variant> _outValues;
 
         std::atomic<bool> _producerAlive { true };
     };

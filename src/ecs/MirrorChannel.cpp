@@ -63,7 +63,12 @@ namespace rpe
     {
         std::lock_guard<std::mutex> lk(_m);
         std::vector<ValueUpdate> v;
-        v.swap(_outValues);
+        v.reserve(static_cast<size_t>(_outValues.size()));
+        for (auto it = _outValues.cbegin(); it != _outValues.cend(); ++it)
+        {
+            v.push_back({ it.key(), it.value() });
+        }
+        _outValues.clear();
         return v;
     }
 
@@ -100,7 +105,7 @@ namespace rpe
         std::lock_guard<std::mutex> lk(_m);
         for (auto& v : values)
         {
-            _outValues.push_back(std::move(v));
+            _outValues.insert(v.path, std::move(v.value)); // coalesce: latest per path
         }
     }
 

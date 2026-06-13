@@ -125,6 +125,15 @@ namespace rpe
 
     void EntityComponentBrowser::setWorld(flecs::world* world)
     {
+        // Leave mirror mode if it was active (the two modes are exclusive).
+        if (_channel)
+        {
+            _channel.reset();
+            _mirrorTimer->stop();
+            _propertyEditor->setEditSink({});
+            _writeCheck->setVisible(true);
+        }
+
         _world = world;
         _entityList->setWorld(world);
         _liveTimer->stop();
@@ -255,11 +264,15 @@ namespace rpe
                 ch->queueEdit(path, v);
             });
             _entityList->stopAutoRefresh();
+            // The "write back to world" toggle is meaningless in mirror mode (edits
+            // always go through the channel's edit queue), so hide it.
+            _writeCheck->setVisible(false);
             _mirrorTimer->start();
         }
         else
         {
             _propertyEditor->setEditSink({});
+            _writeCheck->setVisible(true);
             _mirrorTimer->stop();
         }
     }
