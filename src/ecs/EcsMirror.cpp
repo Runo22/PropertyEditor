@@ -136,6 +136,9 @@ namespace rpe
         _system = _world->system("rpe::EcsMirror")
                       .kind(flecs::PostUpdate)
                       .run([this, alive](flecs::iter& it) {
+                          // Use the iterator's world (the stage) for all entity
+                          // ops, so they're valid under flecs staging / threads.
+                          flecs::world stage = it.world();
                           while (it.next())
                           { /* task: no tables to iterate */
                           }
@@ -143,7 +146,7 @@ namespace rpe
                           {
                               return;
                           }
-                          pump();
+                          _pumpImpl(stage);
                       });
         _haveSystem = true;
     }
@@ -189,11 +192,14 @@ namespace rpe
 
     void EcsMirror::pump()
     {
-        if (!_world)
+        if (_world)
         {
-            return;
+            _pumpImpl(*_world);
         }
+    }
 
+    void EcsMirror::_pumpImpl(const flecs::world& world)
+    {
         // Snapshot GUI intent from the shared channel.
         MirrorChannel::Intent in = _ch->takeIntent();
         const qulonglong entity = in.entity;
@@ -219,7 +225,7 @@ namespace rpe
             flecs::entity_t reqId = 0;
             if (!required.isEmpty())
             {
-                flecs::entity rc = _world->lookup(required.toUtf8().constData());
+                flecs::entity rc = world.lookup(required.toUtf8().constData());
                 if (rc.is_valid())
                 {
                     reqId = rc.id();
@@ -250,7 +256,7 @@ namespace rpe
         {
             return;
         }
-        flecs::entity e = _world->entity(entity);
+        flecs::entity e = world.entity(entity);
         if (!e.is_alive())
         {
             return;

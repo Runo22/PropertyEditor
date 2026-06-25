@@ -58,7 +58,7 @@ namespace rpe
         // frame-end (ecs_run_post_frame), so it is always safe on the sim thread.
         void attach(flecs::world* world); // registers the per-frame system
         void detach();
-        void pump(); // one snapshot/apply cycle (sim thread)
+        void pump(); // one snapshot/apply cycle (sim thread); uses the bound world
         bool isAttached() const
         {
             return _world != nullptr;
@@ -86,6 +86,9 @@ namespace rpe
 
     private:
         void _install();
+        // Core of pump(); `world` is the stage handed in by the system iterator so
+        // entity ops are safe under flecs staging / multi-threaded progress.
+        void _pumpImpl(const flecs::world& world);
         static void _installTrampoline(ecs_world_t* world, void* ctx);
         static void _teardownTrampoline(ecs_world_t* world, void* ctx);
 
