@@ -9,12 +9,29 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 
 #include "rpe/ecs/flecs_prelude.h"
 #include "rpe/ecs/MirrorChannel.h"
 
 namespace rpe
 {
+
+    // Shared control block coordinating the per-frame pump (runs on the simulation
+    // thread, inside progress()) with teardown (may run on another thread). It
+    // outlives the EcsMirror: the pump system captures a shared_ptr to it, so the
+    // system left installed after the mirror is gone reads only valid memory and
+    // simply no-ops.
+    struct MirrorLiveToken
+    {
+        // Held for the whole duration of a pump AND while teardown marks the mirror
+        // dead, so the two never overlap: an in-flight pump can't touch a
+        // half-destroyed mirror, and teardown waits for any running pump to finish.
+        std::mutex pumpMutex;
+        // Cleared when the mirror is destroyed / detached: the pump then no-ops
+        // (checked under pumpMutex) instead of dereferencing a dead `this`.
+        std::atomic<bool> alive { true };
+    };
 
     // ─────────────────────────────────────────────────────────────────────────────
     //  EcsMirror — thread separation between a flecs world (advanced by a simulation
@@ -53,11 +70,20 @@ namespace rpe
         EcsMirror& operator=(const EcsMirror&) = delete;
 
         // ── simulation thread ─────────────────────────────────────────────────────
-        // attach()/detach() MUST be called on the thread that runs world.progress()
+        // attach() MUST be called on the thread that runs world.progress()
         // (structural world changes are not thread-safe). attach() may be called
         // even from *inside* progress() — e.g. a system that loads a plugin at
         // runtime: when the world is readonly it auto-defers the install to
         // frame-end (ecs_run_post_frame), so it is always safe on the sim thread.
+        //
+        // detach() and ~EcsMirror() are safe to call from ANY thread, in ANY world
+        // state (even while the sim thread is mid-progress(), or after the world has
+        // already been destroyed): they NEVER touch the world. They wait out any
+        // in-flight pump, mark the mirror dead so the pump no-ops from then on, and
+        // drop their flecs handles (a no-op on the world). The now-inert system is
+        // left installed; it costs nothing per frame and is reaped at world fini (or
+        // reused if you attach() again). This is what makes "the runtime owning the
+        // world tears down before the editor owning the mirror" safe.
         void attach(flecs::world* world); // registers the per-frame system
         void detach();
         void pump(); // one snapshot/apply cycle (sim thread); uses the bound world
@@ -92,23 +118,14 @@ namespace rpe
         // entity ops are safe under flecs staging / multi-threaded progress.
         void _pumpImpl(const flecs::world& world);
         static void _installTrampoline(ecs_world_t* world, void* ctx);
-        static void _teardownTrampoline(ecs_world_t* world, void* ctx);
-        // ecs_atfini hook: fires if the bound world is destroyed before this mirror,
-        // clearing _worldAlive so detach()/~EcsMirror skip flecs teardown (the world
-        // already deleted our system + query) instead of touching freed memory.
-        static void _worldFiniTrampoline(ecs_world_t* world, void* ctx);
 
         std::shared_ptr<MirrorChannel> _ch; // shared with the GUI consumer
 
-        // Liveness token shared with the system callback and any deferred install,
-        // so they no-op safely if this EcsMirror is destroyed before they run.
-        std::shared_ptr<std::atomic<bool>> _alive;
-
-        // Cleared by an ecs_atfini hook when the bound world is destroyed before
-        // this mirror (e.g. the runtime that owns the world tears down before the
-        // editor that owns the browser). Shared with that hook's heap context, so
-        // it survives even if this EcsMirror is gone when the world finally dies.
-        std::shared_ptr<std::atomic<bool>> _worldAlive;
+        // Liveness/synchronisation token shared with the system callback and any
+        // deferred install, so they no-op safely if this EcsMirror is destroyed
+        // before they run, and so an in-flight pump never overlaps teardown. A
+        // fresh token is created per attach() (see attach()).
+        std::shared_ptr<MirrorLiveToken> _alive;
 
         flecs::world* _world = nullptr;
         flecs::system _system {};

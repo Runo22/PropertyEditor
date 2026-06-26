@@ -4,8 +4,8 @@
 //   #2  destroy the mirror in the SAME frame as a deferred (readonly) attach,
 //       before the deferred install runs.
 //   #3  destroy the WORLD before the mirror (the "runtime tears down before the
-//       editor" case): the mirror's ecs_atfini hook must let detach()/dtor skip
-//       flecs teardown instead of touching the freed world.
+//       editor" case): detach()/the destructor must not touch the freed world
+//       (they are world-free — they only mark the mirror dead and drop handles).
 // All must complete without crashing.
 #include <rpe/core/TypeBridge.h>
 #include <rpe/ecs/EcsMirror.h>

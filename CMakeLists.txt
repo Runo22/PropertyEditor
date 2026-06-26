@@ -174,4 +174,7 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_mirror_threaded_test test/mirror_threaded_test.cpp)
     target_link_libraries(rpe_mirror_threaded_test PRIVATE rpe_gui)
+
+    add_executable(rpe_mirror_concurrent_destroy_test test/mirror_concurrent_destroy_test.cpp)
+    target_link_libraries(rpe_mirror_concurrent_destroy_test PRIVATE rpe_gui)
 endif()

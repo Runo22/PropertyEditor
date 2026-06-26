@@ -9,25 +9,12 @@ namespace rpe
 
     namespace
     {
-        // Heap contexts for ecs_run_post_frame trampolines (their ctx is a raw
-        // void* that the trampoline frees).
+        // Heap context for the deferred-install trampoline (its ctx is a raw void*
+        // that the trampoline frees).
         struct InstallCtx
         {
-            std::shared_ptr<std::atomic<bool>> alive;
+            std::shared_ptr<MirrorLiveToken> alive;
             EcsMirror* self;
-        };
-        struct TeardownCtx
-        {
-            flecs::system sys;
-            flecs::query<> query; // ref-counted handle; finalised when this ctx dies
-            bool haveSystem;
-        };
-        // Heap context for the ecs_atfini hook. Holds a share of the mirror's
-        // _worldAlive flag so it can outlive the mirror (the world may be destroyed
-        // long after) and clear it when the world finally dies.
-        struct WorldFiniCtx
-        {
-            std::shared_ptr<std::atomic<bool>> worldAlive;
         };
 
         // Short (unscoped) form of a name: the segment after the last "::".
@@ -61,15 +48,20 @@ namespace rpe
 
     EcsMirror::EcsMirror()
         : _ch(std::make_shared<MirrorChannel>())
-        , _alive(std::make_shared<std::atomic<bool>>(true))
+        , _alive(std::make_shared<MirrorLiveToken>())
     {
     }
 
     EcsMirror::~EcsMirror()
     {
-        // Mark dead first: a deferred install or a late system run will then no-op
-        // instead of touching this (soon-to-be-freed) object.
-        _alive->store(false, std::memory_order_release);
+        // Mark dead under the pump lock: this blocks until any in-flight pump on the
+        // sim thread finishes (so it never touches this soon-to-be-freed object),
+        // and makes every later pump / deferred install no-op. Only then do we tear
+        // down and free our state.
+        {
+            std::lock_guard<std::mutex> lk(_alive->pumpMutex);
+            _alive->alive.store(false, std::memory_order_release);
+        }
         detach();
         // Tell any GUI consumer still holding the channel that no more data is
         // coming; its shared_ptr keeps the channel alive, so its poll*() calls
@@ -94,9 +86,11 @@ namespace rpe
         {
             return;
         }
-        // Fresh liveness flag for this binding; the atfini hook installed below
-        // clears it if the world dies before us.
-        _worldAlive = std::make_shared<std::atomic<bool>>(true);
+        // Fresh token for this binding. A new MirrorLiveToken means any system left
+        // behind by a previous detach (which stays inert, keyed to the old token)
+        // can never come back to life through this new attach. (The system entity is
+        // reused — same name — so re-attach revives exactly one system per world.)
+        _alive = std::make_shared<MirrorLiveToken>();
         ecs_world_t* w = _world->c_ptr();
         if (ecs_stage_is_readonly(w))
         {
@@ -113,7 +107,7 @@ namespace rpe
         auto* c = static_cast<InstallCtx*>(ctx);
         // alive==false → the EcsMirror was destroyed before frame-end; do not
         // touch it. Else, skip if it was detached (or already installed) meanwhile.
-        if (c->alive->load(std::memory_order_acquire) && c->self->_world && !c->self->_haveSystem)
+        if (c->alive->alive.load(std::memory_order_acquire) && c->self->_world && !c->self->_haveSystem)
         {
             c->self->_install();
         }
@@ -122,32 +116,25 @@ namespace rpe
 
     void EcsMirror::detach()
     {
-        // If the world was already destroyed (atfini cleared _worldAlive), flecs has
-        // deleted our system + query for us — touching them, the world pointer, or
-        // even reading readonly state would dereference freed memory. Just drop our
-        // (now dangling) handles. Resetting them below is safe: the flecs C++ handle
-        // move-assignment only overwrites the pointer, it never calls into the world.
-        const bool worldAlive = _worldAlive && _worldAlive->load(std::memory_order_acquire);
-
-        // Structural teardown. If called while the world is readonly (mid-progress
-        // — e.g. a system removes the plugin), defer it to frame-end via value
-        // handles, so it stays safe even if this object is destroyed in between.
-        if (worldAlive && (_haveSystem || _haveQuery))
+        // Teardown NEVER touches the world — so it is safe from any thread, while the
+        // sim thread is mid-progress(), and even after the world has been destroyed.
+        //
+        // Destructing the system here would be unsafe: it is a structural world
+        // change (races a concurrent progress()) and would free the pump callback's
+        // storage while it may be executing on the sim thread. Instead we just
+        // *neutralise*: take the pump lock — which waits out any in-flight pump and
+        // then blocks future ones — and mark the mirror dead. From then on the system
+        // runs but no-ops (it checks `alive` under the same lock before touching
+        // `this`), costing nothing per frame; the world reaps it at fini, or attach()
+        // revives it (the system has a fixed name, so there is only ever one).
+        if (_haveSystem || _haveQuery)
         {
-            ecs_world_t* w = _world ? _world->c_ptr() : nullptr;
-            if (w && ecs_stage_is_readonly(w))
-            {
-                ecs_run_post_frame(w, &EcsMirror::_teardownTrampoline, new TeardownCtx { _system, _entityQuery, _haveSystem });
-            }
-            else if (_haveSystem && _system.is_alive())
-            {
-                _system.destruct(); // delete the system entity (safe outside readonly)
-            }
-            // The anonymous _entityQuery is ref-counted: resetting the handle below
-            // releases our reference (it is finalised when the last ref drops — the
-            // TeardownCtx copy in the deferred case, or here directly). We must NOT
-            // call destruct() on it (that asserts; it is only for entity queries).
+            std::lock_guard<std::mutex> lk(_alive->pumpMutex);
+            _alive->alive.store(false, std::memory_order_release);
         }
+        // Drop our handles. The flecs C++ handle move-assignment only overwrites the
+        // stored pointer — it never calls into the world — so this is safe even if
+        // the world is already gone or owned by another (busy) thread.
         _haveQuery = false;
         _haveSystem = false;
         _entityQuery = flecs::query<>();
@@ -155,50 +142,20 @@ namespace rpe
         _world = nullptr;
     }
 
-    void EcsMirror::_worldFiniTrampoline(ecs_world_t*, void* ctx)
-    {
-        auto* c = static_cast<WorldFiniCtx*>(ctx);
-        // The world is being destroyed: signal any still-living mirror to skip its
-        // flecs teardown. Safe even if the mirror is already gone — worldAlive is a
-        // shared_ptr this context co-owns.
-        if (c->worldAlive)
-        {
-            c->worldAlive->store(false, std::memory_order_release);
-        }
-        delete c;
-    }
-
-    void EcsMirror::_teardownTrampoline(ecs_world_t*, void* ctx)
-    {
-        auto* c = static_cast<TeardownCtx*>(ctx);
-        if (c->haveSystem && c->sys.is_alive())
-        {
-            c->sys.destruct();
-        }
-        delete c; // c->query handle dtor finalises the anonymous query (outside readonly)
-    }
-
     void EcsMirror::_install()
     {
-        // Build the named-entity query ONCE here (never inside the readonly
-        // system). It matches *all* entities (flecs::Any); pump() filters to those
-        // with a bridged component (and the optional required filter), so the
-        // cached query never needs rebuilding.
+        // Build the entity query ONCE here (never inside the readonly system). It
+        // matches *all* entities (flecs::Any); pump() filters to those with a
+        // bridged component (and the optional required filter), so the cached query
+        // never needs rebuilding.
         _entityQuery = _world->query_builder().with(flecs::Any).build();
         _haveQuery = true;
 
-        // Learn when the world is destroyed. If the runtime that owns the world
-        // tears down before the editor that owns this mirror, this hook clears
-        // _worldAlive so our detach()/destructor skip flecs teardown (the world
-        // has already deleted our system + query) instead of crashing on freed
-        // memory. The context carries a share of _worldAlive, so it stays valid
-        // even if this EcsMirror is long gone when the world finally dies.
-        ecs_atfini(_world->c_ptr(), &EcsMirror::_worldFiniTrampoline, new WorldFiniCtx { _worldAlive });
-
         // A term-less system is a task: its run callback fires once per frame inside
         // world.progress(), on the simulation thread. The captured 'alive' token
-        // makes the callback a no-op if this EcsMirror has been destroyed (the
-        // system may outlive it briefly until a deferred teardown removes it).
+        // makes the callback a no-op once this EcsMirror is detached/destroyed — the
+        // system is intentionally left installed after teardown (it just no-ops) and
+        // is reaped at world fini, so it never destructs itself mid-run.
         //
         // immediate(): the system declares no components, so under multi-threaded
         // progress (world.set_threads) flecs would otherwise run it CONCURRENTLY
@@ -206,18 +163,24 @@ namespace rpe
         // nothing) — pump() would then read components while workers write them.
         // Running immediate forces a sync point and runs the task single-threaded
         // on a merged, consistent world, so reads are race-free.
-        auto alive = _alive;
+        auto token = _alive;
         _system = _world->system("rpe::EcsMirror")
                       .kind(flecs::PostUpdate)
                       .immediate()
-                      .run([this, alive](flecs::iter& it) {
+                      .run([this, token](flecs::iter& it) {
                           // In immediate mode it.world() is the real (non-staged)
                           // world; entity ops are valid and consistent here.
                           flecs::world stage = it.world();
                           while (it.next())
                           { /* task: no tables to iterate */
                           }
-                          if (!alive->load(std::memory_order_acquire))
+                          // Hold the pump lock across the whole snapshot/apply: this
+                          // is what makes teardown safe. detach()/~EcsMirror take the
+                          // same lock before marking the mirror dead, so a pump in
+                          // flight finishes first and a later pump sees alive==false
+                          // and bails before touching the dead `this`.
+                          std::lock_guard<std::mutex> lk(token->pumpMutex);
+                          if (!token->alive.load(std::memory_order_acquire))
                           {
                               return;
                           }
@@ -267,10 +230,19 @@ namespace rpe
 
     void EcsMirror::pump()
     {
-        if (_world)
+        if (!_world)
         {
-            _pumpImpl(*_world);
+            return;
         }
+        // Same synchronisation as the registered system: hold the pump lock so a
+        // concurrent detach()/destructor on another thread waits this out and never
+        // marks the mirror dead mid-pump.
+        std::lock_guard<std::mutex> lk(_alive->pumpMutex);
+        if (!_alive->alive.load(std::memory_order_acquire))
+        {
+            return;
+        }
+        _pumpImpl(*_world);
     }
 
     void EcsMirror::_pumpImpl(const flecs::world& world)
