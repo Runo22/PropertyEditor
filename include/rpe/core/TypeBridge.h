@@ -2,7 +2,6 @@
 
 #include "rpe/core/rttr_prelude.h"
 
-#include <functional>
 #include <vector>
 
 namespace rpe
@@ -38,19 +37,47 @@ namespace rpe
     //    and every plugin link the same registry instance. With a static rpe_core
     //    linked separately into each module, each gets its own copy and the browser
     //    won't see types a plugin registered.
+    //
+    //  ── Plugin-unload safety ────────────────────────────────────────────────────
+    //  The wrap/clone hooks are stored as PLAIN FUNCTION POINTERS, not std::function.
+    //  A captureless lambda is just a function pointer, and a function pointer is a
+    //  POD: destroying a registry entry (at process exit, or unregisterType) never
+    //  calls back into the module that registered it. So even if a plugin DLL is
+    //  unloaded while its entries are still in the registry, tearing the registry
+    //  down is safe (no "exception on destruction"). The one rule that remains: do
+    //  not CALL a hook (wrap/clone, i.e. inspect a component) after its plugin has
+    //  unloaded — the code it points at is gone. Call unregisterType() in the
+    //  plugin's unload path, or stop inspecting its components first.
     // ─────────────────────────────────────────────────────────────────────────────
     class TypeBridge
     {
     public:
-        using Wrapper = std::function<rttr::variant(void*)>; // void* -> variant(T*)
-        using Cloner = std::function<rttr::variant(void*)>;  // void* -> variant(T by value)
+        // Plain function pointers (a captureless lambda decays to one). NOT
+        // std::function — see "Plugin-unload safety" above.
+        using Wrapper = rttr::variant (*)(void*); // void* -> variant(T*)
+        using Cloner = rttr::variant (*)(void*);  // void* -> variant(T by value)
 
         static void registerEntry(rttr::type t, Wrapper wrap, Cloner clone);
 
         template <class T>
         static void registerType()
         {
-            registerEntry(rttr::type::get<T>(), [](void* p) { return rttr::variant(static_cast<T*>(p)); }, [](void* p) { return rttr::variant(*static_cast<T*>(p)); });
+            registerEntry(
+                rttr::type::get<T>(),
+                +[](void* p) -> rttr::variant { return rttr::variant(static_cast<T*>(p)); },
+                +[](void* p) -> rttr::variant { return rttr::variant(*static_cast<T*>(p)); });
+        }
+
+        // Same, but also register an explicit flecs component name to resolve to T.
+        // Use when your RTTR type name and the flecs component name don't share a
+        // short name (e.g. you registered RTTR as "game::Transform" but the flecs
+        // component is "TfXform"): resolveByName("TfXform") then finds T. The exact
+        // and short-name matching of the no-arg overload still applies on top.
+        template <class T>
+        static void registerType(const char* flecsName)
+        {
+            registerType<T>();
+            registerAlias(rttr::type::get<T>(), flecsName);
         }
 
         template <class... Ts>
@@ -58,6 +85,9 @@ namespace rpe
         {
             (registerType<Ts>(), ...);
         }
+
+        // Map an explicit flecs component name onto an already-registered type.
+        static void registerAlias(rttr::type t, const char* flecsName);
 
         // Remove only the bridge entry for `t` (RTTR registration is untouched).
         static void unregisterType(rttr::type t);
@@ -67,11 +97,11 @@ namespace rpe
             unregisterType(rttr::type::get<T>());
         }
 
-        // Resolve a flecs component name to a registered bridged type. flecs
-        // component names are the short (unscoped) name, while RTTR types may be
-        // registered scoped or under a different name; this matches by exact name
-        // first, then by short name (the segment after the last "::"). Returns an
-        // invalid type if nothing registered matches.
+        // Resolve a flecs component name to a registered bridged type. Tries, in
+        // order: an explicit alias (registerType<T>(name) / registerAlias), the
+        // exact RTTR name, then the short name (segment after the last "::") — flecs
+        // reports the unscoped component name while RTTR types may be registered
+        // scoped. Returns an invalid type if nothing registered matches.
         static rttr::type resolveByName(const char* flecsName);
 
         // Wrap `obj` as a variant holding a typed pointer (invalid if unregistered).

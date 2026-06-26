@@ -129,6 +129,7 @@ if(RPE_WITH_FLECS)
         src/ecs/EntityComponentBrowser.cpp
         src/ecs/EcsMirror.cpp
         src/ecs/MirrorChannel.cpp
+        src/ecs/ComponentScan.cpp
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
         include/rpe/ecs/EntityComponentBrowser.h)
@@ -180,4 +181,7 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_browser_mirror_gui_test test/browser_mirror_gui_test.cpp)
     target_link_libraries(rpe_browser_mirror_gui_test PRIVATE rpe_gui)
+
+    add_executable(rpe_typebridge_test test/typebridge_test.cpp)
+    target_link_libraries(rpe_typebridge_test PRIVATE rpe_gui)
 endif()

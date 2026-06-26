@@ -13,14 +13,17 @@ namespace rpe
         struct Entry
         {
             rttr::type type = rttr::type::get<void>();
-            TypeBridge::Wrapper wrap;
-            TypeBridge::Cloner clone;
+            TypeBridge::Wrapper wrap = nullptr;
+            TypeBridge::Cloner clone = nullptr;
         };
 
         struct Registry
         {
             std::mutex mutex;
             std::unordered_map<rttr::type::type_id, Entry> map;
+            // Explicit flecs-name → type aliases. The std::string keys live here in
+            // rpe_core (never in a plugin), so destroying this map is always safe.
+            std::unordered_map<std::string, rttr::type::type_id> aliases;
         };
 
         Registry& registry()
@@ -46,7 +49,18 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        r.map[t.get_id()] = Entry { t, std::move(wrap), std::move(clone) };
+        r.map[t.get_id()] = Entry { t, wrap, clone };
+    }
+
+    void TypeBridge::registerAlias(rttr::type t, const char* flecsName)
+    {
+        if (!t.is_valid() || !flecsName || flecsName[0] == '\0')
+        {
+            return;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        r.aliases[flecsName] = t.get_id();
     }
 
     void TypeBridge::unregisterType(rttr::type t)
@@ -58,6 +72,12 @@ namespace rpe
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
         r.map.erase(t.get_id());
+        // Drop any aliases pointing at this type so a stale name can't resolve to a
+        // freed (unloaded-plugin) entry.
+        for (auto it = r.aliases.begin(); it != r.aliases.end();)
+        {
+            it = (it->second == t.get_id()) ? r.aliases.erase(it) : std::next(it);
+        }
     }
 
     rttr::type TypeBridge::resolveByName(const char* flecsName)
@@ -68,22 +88,32 @@ namespace rpe
         }
         const std::string name = flecsName;
 
-        // Fast path: exact RTTR name that is also bridged.
-        rttr::type direct = rttr::type::get_by_name(name);
-        if (direct.is_valid() && has(direct))
-        {
-            return direct;
-        }
-
-        // Fallback: match a bridged type by exact or short name (handles flecs
-        // short names vs. scoped RTTR registrations, and differing names).
-        const std::string target = shortName(name);
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
+
+        // 1) Explicit alias (registerType<T>(name) / registerAlias) wins.
+        if (const auto a = r.aliases.find(name); a != r.aliases.end())
+        {
+            if (const auto e = r.map.find(a->second); e != r.map.end())
+            {
+                return e->second.type;
+            }
+        }
+
+        // 2) Exact RTTR name that is also bridged.
         for (const auto& [id, entry] : r.map)
         {
-            const std::string rn = entry.type.get_name().to_string();
-            if (rn == name || shortName(rn) == target)
+            if (entry.type.get_name().to_string() == name)
+            {
+                return entry.type;
+            }
+        }
+
+        // 3) Short name match (flecs short names vs. scoped RTTR registrations).
+        const std::string target = shortName(name);
+        for (const auto& [id, entry] : r.map)
+        {
+            if (shortName(entry.type.get_name().to_string()) == target)
             {
                 return entry.type;
             }
