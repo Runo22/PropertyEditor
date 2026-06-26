@@ -9,7 +9,6 @@
 
 class QListWidget;
 class QLineEdit;
-class QCheckBox;
 class QTimer;
 
 namespace rpe
@@ -36,9 +35,10 @@ namespace rpe
         void setWorld(flecs::world* world);
         void setRefreshIntervalMs(int ms);
 
-        // Name of a component to filter by (flecs component name). Empty = no filter.
-        // `enabledByDefault` checks the toggle so the filter is active immediately.
-        void setRequiredComponent(const QString& componentName, bool enabledByDefault = true);
+        // Component to filter the (direct-mode) list by, plus whether the filter is
+        // active. Empty name or enabled=false = no filter. Configured via the
+        // browser's Settings — there is no in-list checkbox.
+        void setRequiredComponent(const QString& componentName, bool enabled = true);
 
         // Guard wrapped around world reads when the world is owned by another
         // thread (see rpe/core/AccessGuard.h).
@@ -53,9 +53,6 @@ namespace rpe
         void entitySelected(flecs::entity e); // direct mode (world available)
         void entityIdSelected(qulonglong id); // always; mirror mode uses this
         void entityDeselected();
-        // The required-component filter checkbox was toggled. Mirror mode listens to
-        // this to apply the filter on the producer (the GUI list has no world).
-        void requiredComponentToggled(bool enabled);
 
     private slots:
         void _refresh();
@@ -71,9 +68,9 @@ namespace rpe
         flecs::world* _world = nullptr;
         QListWidget* _list = nullptr;
         QLineEdit* _filterEdit = nullptr;
-        QCheckBox* _requiredCheck = nullptr;
         QTimer* _timer = nullptr;
         QString _requiredComponent;
+        bool _requiredEnabled = false;
         AccessGuard _guard;
         // Full, unfiltered (id, label) set — from the world query (direct mode) or
         // the mirror feed (mirror mode). The text filter is applied on top of this,

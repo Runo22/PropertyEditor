@@ -66,14 +66,6 @@ namespace rpe
         connect(_entityList, &EntityListWidget::entitySelected, this, &EntityComponentBrowser::_onEntitySelected);
         connect(_entityList, &EntityListWidget::entityDeselected, this, &EntityComponentBrowser::_onEntityDeselected);
         connect(_entityList, &EntityListWidget::entityIdSelected, this, &EntityComponentBrowser::_onEntityIdSelected);
-        connect(_entityList, &EntityListWidget::requiredComponentToggled, this, [this](bool enabled) {
-            _settings.requiredComponentEnabled = enabled;
-            if (_channel)
-            {
-                _channel->setRequiredComponent(enabled ? _settings.requiredComponent : QString());
-                _channel->requestResync();
-            }
-        });
         connect(_componentList, &ComponentListWidget::componentSelected, this, &EntityComponentBrowser::_onComponentSelected);
         connect(_componentList, &ComponentListWidget::componentNameSelected, this, &EntityComponentBrowser::_onComponentNameSelected);
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
@@ -153,6 +145,7 @@ namespace rpe
         _liveTimer->stop();
         _componentList->clearEntity();
         _propertyEditor->unbind();
+        _applyEntityFilter(); // re-apply the configured filter to the new mode
     }
 
     void EntityComponentBrowser::setLiveUpdateIntervalMs(int ms)
@@ -171,10 +164,10 @@ namespace rpe
         _propertyEditor->setWriteGuard(std::move(guard));
     }
 
-    void EntityComponentBrowser::setEntityComponentFilter(const QString& name, bool enabled)
+    void EntityComponentBrowser::_applyEntityFilter()
     {
-        _settings.requiredComponent = name;
-        _settings.requiredComponentEnabled = enabled;
+        const QString name = _settings.requiredComponent;
+        const bool enabled = _settings.requiredComponentEnabled && !name.isEmpty();
         _entityList->setRequiredComponent(name, enabled);
         // In mirror mode the producer does the filtering — push the required
         // component (or clear it when disabled) so the entity list actually narrows.
@@ -210,7 +203,7 @@ namespace rpe
         }
         setEditPolicy(s.editPolicy);
         setComponentEditingEnabled(s.allowComponentEditing);
-        setEntityComponentFilter(s.requiredComponent, s.requiredComponentEnabled);
+        _applyEntityFilter();
     }
 
     void EntityComponentBrowser::_onWriteToggled(bool on)
@@ -328,6 +321,7 @@ namespace rpe
             // always go through the channel's edit queue), so hide it.
             _writeCheck->setVisible(false);
             _mirrorTimer->start();
+            _applyEntityFilter(); // push the configured filter to the producer
         }
         else
         {

@@ -16,6 +16,8 @@
 #include <QPixmap>
 #include <QThread>
 
+#include <vector>
+
 struct Vec3
 {
     double x = 0, y = 0, z = 0;
@@ -30,6 +32,7 @@ struct Health
     int hp = 100;
     int armor = 25;
     bool invulnerable = false;
+    std::vector<int> resistances = { 10, 5, 0 }; // expandable array
 };
 struct Velocity
 {
@@ -44,7 +47,8 @@ RTTR_REGISTRATION
     registration::class_<Health>("Health")
         .property("hp", &Health::hp)(metadata(rpe::hint::Min, 0), metadata(rpe::hint::Max, 100))
         .property("armor", &Health::armor)
-        .property("invulnerable", &Health::invulnerable);
+        .property("invulnerable", &Health::invulnerable)
+        .property("resistances", &Health::resistances);
     registration::class_<Velocity>("Velocity").property("dx", &Velocity::dx).property("dy", &Velocity::dy);
 }
 

@@ -2,7 +2,6 @@
 
 #include "rpe/core/TypeBridge.h"
 
-#include <QCheckBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -68,17 +67,11 @@ namespace rpe
         _filterEdit->setClearButtonEnabled(true);
         layout->addWidget(_filterEdit);
 
-        _requiredCheck = new QCheckBox(this);
-        _requiredCheck->setVisible(false); // shown only when a required component is set
-        layout->addWidget(_requiredCheck);
-
         _list = new QListWidget(this);
         layout->addWidget(_list, 1);
 
         connect(_list, &QListWidget::currentItemChanged, this, &EntityListWidget::_onSelectionChanged);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
-        connect(_requiredCheck, &QCheckBox::toggled, this, &EntityListWidget::_refresh);
-        connect(_requiredCheck, &QCheckBox::toggled, this, &EntityListWidget::requiredComponentToggled);
     }
 
     void EntityListWidget::setWorld(flecs::world* world)
@@ -110,21 +103,13 @@ namespace rpe
         _timer->stop();
     }
 
-    void EntityListWidget::setRequiredComponent(const QString& componentName, bool enabledByDefault)
+    void EntityListWidget::setRequiredComponent(const QString& componentName, bool enabled)
     {
+        // The filter is configured purely through state now (no UI checkbox) — the
+        // host drives it via the browser's Settings. Direct mode applies it in
+        // _refresh(); mirror mode applies it on the producer.
         _requiredComponent = componentName;
-        if (componentName.isEmpty())
-        {
-            _requiredCheck->setVisible(false);
-        }
-        else
-        {
-            _requiredCheck->setText(tr("Only entities with %1").arg(componentName));
-            // Block the toggled→_refresh signal so we refresh exactly once below.
-            QSignalBlocker block(_requiredCheck);
-            _requiredCheck->setChecked(enabledByDefault);
-            _requiredCheck->setVisible(true);
-        }
+        _requiredEnabled = enabled;
         _refresh();
     }
 
@@ -141,7 +126,7 @@ namespace rpe
             return;
         }
 
-        const bool filterByComp = !_requiredComponent.isEmpty() && _requiredCheck->isChecked();
+        const bool filterByComp = !_requiredComponent.isEmpty() && _requiredEnabled;
 
         // Show every entity carrying at least one bridged component (the ones the
         // inspector can actually display), optionally constrained to those having

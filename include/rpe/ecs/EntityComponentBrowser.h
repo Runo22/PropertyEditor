@@ -52,8 +52,9 @@ namespace rpe
         // Lets a host snapshot/restore the inspector's configuration in one call.
         struct Settings
         {
-            // Entity-list filter: only entities carrying this component are listed
-            // (empty = no filter). `requiredComponentEnabled` is the checkbox state.
+            // Entity-list filter: when requiredComponentEnabled is true and the name
+            // is non-empty, only entities carrying that component are listed. This
+            // is the sole control for the filter (there is no in-list checkbox).
             QString requiredComponent;
             bool requiredComponentEnabled = true;
             // Mirror only the property leaves currently expanded in the tree.
@@ -107,9 +108,6 @@ namespace rpe
         // implementation: lock a mutex the sim loop also takes around progress().
         // See rpe/core/AccessGuard.h for the contract and an example.
         void setWorldAccess(AccessGuard guard);
-
-        // Restrict the entity list to entities having this component (e.g. "Transform").
-        void setEntityComponentFilter(const QString& componentName, bool enabledByDefault = true);
 
         // Default edit policy for the property editor (Override or WriteBack).
         void setEditPolicy(EditPolicy p);
@@ -180,6 +178,9 @@ namespace rpe
         void _pushInterest();
         // Recompute the "+" picker list: catalog minus components already present.
         void _updateAddable();
+        // Apply the required-component filter (from _settings) to the entity list and,
+        // in mirror mode, to the producer.
+        void _applyEntityFilter();
 
         flecs::world* _world = nullptr;
         EntityListWidget* _entityList = nullptr;

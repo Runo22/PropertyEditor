@@ -129,13 +129,18 @@ static QWidget* makeEcsTab(QWidget* parent)
 
     noXform.set<Physics>({});
 
-    mirror.attach(&world);                                    // registers the system
-    mirror.setRequiredComponent(QStringLiteral("Transform")); // entity-list filter
+    mirror.attach(&world); // registers the system
 
     auto* browser = new rpe::EntityComponentBrowser(parent);
-    // Unreal-style vertical sidebar: entities / components / properties stacked.
-    browser->setBrowserLayout(rpe::EntityComponentBrowser::Layout::Vertical);
     browser->setMirror(&mirror); // instead of setWorld — GUI never touches world
+
+    // All options live in one Settings struct (filter, layout, editing, …).
+    rpe::EntityComponentBrowser::Settings st = browser->settings();
+    st.layout = rpe::EntityComponentBrowser::Layout::Vertical; // UE-style sidebar
+    st.requiredComponent = QStringLiteral("Transform");        // entity-list filter
+    st.requiredComponentEnabled = true;
+    st.allowComponentEditing = true; // show the "+"/"×" component controls
+    browser->setSettings(st);
 
     // Simulation thread: NO mutex around the loop.
     static std::thread simThread([] {

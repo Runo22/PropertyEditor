@@ -562,16 +562,23 @@ namespace rpe
             }
             if (index.column() == 1)
             {
-                // Expandable rows (structs, arrays) show no value of their own — the
-                // children carry the values. Avoids a bare "<invalid>" on the parent,
+                // Expandable rows (structs, arrays) show no scalar value of their own
+                // — the children carry the values. Show an element count for sized
+                // arrays, else nothing. Avoids a bare "<invalid>" on the parent,
                 // especially in mirror mode where only leaf values are mirrored.
-                if (!node->isLeaf())
+                if (node->isExpandable())
+                {
+                    return node->arraySize() >= 0 ? QStringLiteral("[%1]").arg(node->arraySize()) : QString();
+                }
+                // Leaf with no value yet (e.g. not mirrored): blank, not "<invalid>".
+                const rttr::variant v = node->effectiveValue();
+                if (!v.is_valid())
                 {
                     return QString();
                 }
                 if (node->cachedDisplay().isEmpty())
                 {
-                    node->setCachedDisplay(TypeRenderer::toDisplayString(node->effectiveValue()));
+                    node->setCachedDisplay(TypeRenderer::toDisplayString(v));
                 }
                 return node->cachedDisplay();
             }

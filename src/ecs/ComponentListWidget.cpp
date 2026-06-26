@@ -4,12 +4,14 @@
 
 #include <QApplication>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
 #include <QStyledItemDelegate>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -21,6 +23,25 @@ namespace rpe
 
     namespace
     {
+        // A crisp "+" glyph icon for the add button, drawn to match the row "×".
+        QIcon makePlusIcon(const QColor& color)
+        {
+            const int s = 16;
+            QPixmap pm(s, s);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            QPen pen(color);
+            pen.setWidthF(1.8);
+            pen.setCapStyle(Qt::RoundCap);
+            p.setPen(pen);
+            const int m = 4;
+            p.drawLine(s / 2, m, s / 2, s - m);
+            p.drawLine(m, s / 2, s - m, s / 2);
+            p.end();
+            return QIcon(pm);
+        }
+
         // Draws a right-aligned "×" remove affordance on each component row and
         // reports clicks on it via a callback. No Q_OBJECT/signals (kept to a plain
         // delegate) — the owning widget supplies the callback. The × is only drawn
@@ -53,13 +74,27 @@ namespace rpe
                     return;
                 }
                 const QRect g = glyphRect(opt);
-                const bool hover = opt.state & QStyle::State_MouseOver;
+                const bool rowHover = opt.state & QStyle::State_MouseOver;
                 p->save();
+                p->setRenderHint(QPainter::Antialiasing, true);
+                // A soft rounded square behind the × on row hover, brighter under the
+                // cursor — a clear, professional affordance.
+                if (rowHover)
+                {
+                    QColor bg = opt.palette.color(QPalette::Text);
+                    bg.setAlpha(28);
+                    p->setPen(Qt::NoPen);
+                    p->setBrush(bg);
+                    p->drawRoundedRect(g.adjusted(4, 4, -4, -4), 3, 3);
+                }
                 QColor c = opt.palette.color(QPalette::Text);
-                c.setAlpha(hover ? 230 : 120);
-                p->setPen(c);
-                const int m = g.height() / 3;
-                const QRect x = g.adjusted(m, m, -m, -m);
+                c.setAlpha(rowHover ? 235 : 150);
+                QPen pen(c);
+                pen.setWidthF(1.8);
+                pen.setCapStyle(Qt::RoundCap);
+                p->setPen(pen);
+                const int m = g.height() * 2 / 5;
+                const QRectF x = QRectF(g).adjusted(m, m, -m, -m);
                 p->drawLine(x.topLeft(), x.bottomRight());
                 p->drawLine(x.topRight(), x.bottomLeft());
                 p->restore();
@@ -105,7 +140,7 @@ namespace rpe
         headerRow->addWidget(header, 1);
 
         _addBtn = new QToolButton(this);
-        _addBtn->setText(QStringLiteral("+"));
+        _addBtn->setIcon(makePlusIcon(palette().color(QPalette::Text)));
         _addBtn->setToolTip(tr("Add a component to the selected entity"));
         _addBtn->setAutoRaise(true);
         _addBtn->setVisible(false); // shown only when editing is enabled
