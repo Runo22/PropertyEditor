@@ -6,6 +6,7 @@
 
 #include <QCheckBox>
 #include <QSplitter>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -248,6 +249,17 @@ namespace rpe
 
     void EntityComponentBrowser::setMirror(EcsMirror* mirror)
     {
+        // This touches QTimers / widgets, which is only valid on the widget's GUI
+        // thread. The mirror is typically created on the simulation thread, so
+        // callers often invoke this from there — marshal to the GUI thread.
+        // mirror->channel() (the only thing read off `mirror`) is thread-safe.
+        if (QThread::currentThread() != this->thread())
+        {
+            QMetaObject::invokeMethod(
+                this, [this, mirror] { setMirror(mirror); }, Qt::QueuedConnection);
+            return;
+        }
+
         // Hold the shared channel, not the EcsMirror itself: the mirror may be
         // destroyed on the sim thread before this widget; the channel survives via
         // this shared_ptr so polling stays valid.
