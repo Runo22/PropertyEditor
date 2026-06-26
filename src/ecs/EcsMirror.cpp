@@ -132,12 +132,20 @@ namespace rpe
         // world.progress(), on the simulation thread. The captured 'alive' token
         // makes the callback a no-op if this EcsMirror has been destroyed (the
         // system may outlive it briefly until a deferred teardown removes it).
+        //
+        // immediate(): the system declares no components, so under multi-threaded
+        // progress (world.set_threads) flecs would otherwise run it CONCURRENTLY
+        // with the systems that mutate components (it thinks the task touches
+        // nothing) — pump() would then read components while workers write them.
+        // Running immediate forces a sync point and runs the task single-threaded
+        // on a merged, consistent world, so reads are race-free.
         auto alive = _alive;
         _system = _world->system("rpe::EcsMirror")
                       .kind(flecs::PostUpdate)
+                      .immediate()
                       .run([this, alive](flecs::iter& it) {
-                          // Use the iterator's world (the stage) for all entity
-                          // ops, so they're valid under flecs staging / threads.
+                          // In immediate mode it.world() is the real (non-staged)
+                          // world; entity ops are valid and consistent here.
                           flecs::world stage = it.world();
                           while (it.next())
                           { /* task: no tables to iterate */
