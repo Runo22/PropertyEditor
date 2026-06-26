@@ -99,10 +99,19 @@ namespace rpe
         void clearInterest();
         void queueEdit(const QString& path, rttr::variant value); // applied next frame
 
+        // Structural component edits. Queued here (GUI thread) and applied on the
+        // simulation thread inside the per-frame system — structural world changes
+        // are never safe from another thread. `component` is the flecs component
+        // name as listed. Adding a component the entity already has, or removing one
+        // it lacks, is a harmless no-op.
+        void addComponent(qulonglong entity, const QString& component);
+        void removeComponent(qulonglong entity, const QString& component);
+
         // ── GUI thread: results (poll on a timer) ────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out); // true if changed since last poll
         bool pollComponents(QStringList& out);        // true if changed since last poll
         std::vector<ValueUpdate> pollValues();        // leaf values that changed
+        bool pollCatalog(QStringList& out); // bridged component names available to add
 
         // The shared channel. The GUI (EntityComponentBrowser) keeps its own
         // shared_ptr to this, so it stays valid even if this EcsMirror is
@@ -141,6 +150,8 @@ namespace rpe
         QString _lastInterestComponent;
         QString _lastRequired;   // entity-list filter, to detect changes
         int _entityScanTick = 0; // the all-entity scan is throttled (set rarely changes)
+        QStringList _lastCatalog; // last published add-component catalog (dedup)
+        int _catalogScanTick = 0; // the catalog scan is throttled too
     };
 
 } // namespace rpe

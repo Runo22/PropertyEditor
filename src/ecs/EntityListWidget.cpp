@@ -78,6 +78,7 @@ namespace rpe
         connect(_list, &QListWidget::currentItemChanged, this, &EntityListWidget::_onSelectionChanged);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
         connect(_requiredCheck, &QCheckBox::toggled, this, &EntityListWidget::_refresh);
+        connect(_requiredCheck, &QCheckBox::toggled, this, &EntityListWidget::requiredComponentToggled);
     }
 
     void EntityListWidget::setWorld(flecs::world* world)

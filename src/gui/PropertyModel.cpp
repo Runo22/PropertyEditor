@@ -562,6 +562,13 @@ namespace rpe
             }
             if (index.column() == 1)
             {
+                // Expandable rows (structs, arrays) show no value of their own — the
+                // children carry the values. Avoids a bare "<invalid>" on the parent,
+                // especially in mirror mode where only leaf values are mirrored.
+                if (!node->isLeaf())
+                {
+                    return QString();
+                }
                 if (node->cachedDisplay().isEmpty())
                 {
                     node->setCachedDisplay(TypeRenderer::toDisplayString(node->effectiveValue()));

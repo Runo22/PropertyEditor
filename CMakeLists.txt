@@ -184,4 +184,10 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_typebridge_test test/typebridge_test.cpp)
     target_link_libraries(rpe_typebridge_test PRIVATE rpe_gui)
+
+    add_executable(rpe_component_edit_test test/component_edit_test.cpp)
+    target_link_libraries(rpe_component_edit_test PRIVATE rpe_gui)
+
+    add_executable(rpe_screenshot test/screenshot_tool.cpp)
+    target_link_libraries(rpe_screenshot PRIVATE rpe_gui)
 endif()

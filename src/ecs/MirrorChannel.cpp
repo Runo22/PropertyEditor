@@ -39,6 +39,12 @@ namespace rpe
         _resync = true;
     }
 
+    void MirrorChannel::queueStructural(StructuralKind kind, qulonglong entity, const QString& component)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _structurals.push_back(StructuralEdit { kind, entity, component });
+    }
+
     // ── GUI thread: results ─────────────────────────────────────────────────────
 
     bool MirrorChannel::pollEntities(QVector<EntityEntry>& out)
@@ -62,6 +68,18 @@ namespace rpe
         }
         out = _outComponents;
         _outComponentsDirty = false;
+        return true;
+    }
+
+    bool MirrorChannel::pollCatalog(QStringList& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outCatalogDirty)
+        {
+            return false;
+        }
+        out = _outCatalog;
+        _outCatalogDirty = false;
         return true;
     }
 
@@ -89,6 +107,7 @@ namespace rpe
         in.required = _required;
         in.paths = _inPaths;
         in.edits.swap(_edits);
+        in.structurals.swap(_structurals);
         in.resync = _resync;
         _resync = false;
         return in;
@@ -106,6 +125,13 @@ namespace rpe
         std::lock_guard<std::mutex> lk(_m);
         _outComponents = components;
         _outComponentsDirty = true;
+    }
+
+    void MirrorChannel::publishCatalog(const QStringList& catalog)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _outCatalog = catalog;
+        _outCatalogDirty = true;
     }
 
     void MirrorChannel::publishValues(std::vector<ValueUpdate>&& values)

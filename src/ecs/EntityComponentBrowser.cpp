@@ -1,6 +1,7 @@
 #include "rpe/ecs/EntityComponentBrowser.h"
 
 #include "rpe/core/TypeBridge.h"
+#include "rpe/ecs/ComponentScan.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityListWidget.h"
 #include "rpe/gui/PropertyEditor.h"
@@ -65,9 +66,19 @@ namespace rpe
         connect(_entityList, &EntityListWidget::entitySelected, this, &EntityComponentBrowser::_onEntitySelected);
         connect(_entityList, &EntityListWidget::entityDeselected, this, &EntityComponentBrowser::_onEntityDeselected);
         connect(_entityList, &EntityListWidget::entityIdSelected, this, &EntityComponentBrowser::_onEntityIdSelected);
+        connect(_entityList, &EntityListWidget::requiredComponentToggled, this, [this](bool enabled) {
+            _settings.requiredComponentEnabled = enabled;
+            if (_channel)
+            {
+                _channel->setRequiredComponent(enabled ? _settings.requiredComponent : QString());
+                _channel->requestResync();
+            }
+        });
         connect(_componentList, &ComponentListWidget::componentSelected, this, &EntityComponentBrowser::_onComponentSelected);
         connect(_componentList, &ComponentListWidget::componentNameSelected, this, &EntityComponentBrowser::_onComponentNameSelected);
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
+        connect(_componentList, &ComponentListWidget::addComponentRequested, this, &EntityComponentBrowser::_onAddComponent);
+        connect(_componentList, &ComponentListWidget::removeComponentRequested, this, &EntityComponentBrowser::_onRemoveComponent);
         connect(_propertyEditor, &PropertyEditor::propertyEdited, this, &EntityComponentBrowser::propertyEdited);
         connect(_writeCheck, &QCheckBox::toggled, this, &EntityComponentBrowser::_onWriteToggled);
     }
@@ -119,6 +130,7 @@ namespace rpe
 
     void EntityComponentBrowser::setBrowserLayout(Layout layout)
     {
+        _settings.layout = layout;
         if (layout != _browserLayout || !_layoutRoot)
         {
             _applyLayout(layout);
@@ -146,6 +158,7 @@ namespace rpe
     void EntityComponentBrowser::setLiveUpdateIntervalMs(int ms)
     {
         _liveTimer->setInterval(ms);
+        _settings.liveUpdateIntervalMs = ms;
     }
 
     void EntityComponentBrowser::setWorldAccess(AccessGuard guard)
@@ -160,13 +173,44 @@ namespace rpe
 
     void EntityComponentBrowser::setEntityComponentFilter(const QString& name, bool enabled)
     {
+        _settings.requiredComponent = name;
+        _settings.requiredComponentEnabled = enabled;
         _entityList->setRequiredComponent(name, enabled);
+        // In mirror mode the producer does the filtering — push the required
+        // component (or clear it when disabled) so the entity list actually narrows.
+        if (_channel)
+        {
+            _channel->setRequiredComponent(enabled ? name : QString());
+            _channel->requestResync();
+        }
     }
 
     void EntityComponentBrowser::setEditPolicy(EditPolicy p)
     {
+        _settings.editPolicy = p;
         _propertyEditor->setEditPolicy(p);
         _writeCheck->setChecked(p == EditPolicy::WriteBack);
+    }
+
+    void EntityComponentBrowser::setComponentEditingEnabled(bool on)
+    {
+        _settings.allowComponentEditing = on;
+        _componentList->setComponentEditingEnabled(on);
+    }
+
+    void EntityComponentBrowser::setSettings(const Settings& s)
+    {
+        _settings = s;
+        setBrowserLayout(s.layout);
+        setSnapshotOpenFieldsOnly(s.snapshotOpenFieldsOnly);
+        setLiveUpdateIntervalMs(s.liveUpdateIntervalMs);
+        if (_mirrorTimer)
+        {
+            _mirrorTimer->setInterval(s.mirrorPollIntervalMs);
+        }
+        setEditPolicy(s.editPolicy);
+        setComponentEditingEnabled(s.allowComponentEditing);
+        setEntityComponentFilter(s.requiredComponent, s.requiredComponentEnabled);
     }
 
     void EntityComponentBrowser::_onWriteToggled(bool on)
@@ -328,6 +372,15 @@ namespace rpe
         if (_channel->pollComponents(comps))
         {
             _componentList->setComponentNames(comps);
+            _currentComps = comps;
+            _updateAddable();
+        }
+
+        QStringList catalog;
+        if (_channel->pollCatalog(catalog))
+        {
+            _catalog = catalog;
+            _updateAddable();
         }
 
         for (auto& u : _channel->pollValues())
@@ -337,6 +390,70 @@ namespace rpe
 
         // Re-send interest each tick so newly expanded fields start mirroring.
         _pushInterest();
+    }
+
+    void EntityComponentBrowser::_updateAddable()
+    {
+        // Offer every catalogued component the entity does not already have.
+        QStringList addable;
+        for (const QString& n : _catalog)
+        {
+            if (!_currentComps.contains(n))
+            {
+                addable.append(n);
+            }
+        }
+        _componentList->setAddableComponents(addable);
+    }
+
+    void EntityComponentBrowser::_onAddComponent(const QString& name)
+    {
+        if (_mirrorEntity == 0 || name.isEmpty())
+        {
+            return;
+        }
+        if (_channel)
+        {
+            // Mirror mode: queue the structural change to the simulation thread.
+            _channel->queueStructural(MirrorChannel::StructuralKind::AddComponent, _mirrorEntity, name);
+            _channel->requestResync();
+        }
+        else if (_world)
+        {
+            // Direct mode: apply under the world guard (the GUI owns the world here).
+            withGuard(_guard, [&] {
+                flecs::entity comp = findComponentEntity(*_world, name);
+                if (comp.is_valid() && _selectedEntity.is_alive())
+                {
+                    _selectedEntity.add(comp);
+                }
+            });
+            _componentList->setEntity(_world, _selectedEntity);
+        }
+    }
+
+    void EntityComponentBrowser::_onRemoveComponent(const QString& name)
+    {
+        if (name.isEmpty())
+        {
+            return;
+        }
+        if (_channel && _mirrorEntity != 0)
+        {
+            _channel->queueStructural(MirrorChannel::StructuralKind::RemoveComponent, _mirrorEntity, name);
+            _channel->requestResync();
+        }
+        else if (_world && _selectedEntity.is_alive())
+        {
+            withGuard(_guard, [&] {
+                flecs::entity comp = findComponentEntity(*_world, name, /*bridgedOnly=*/false);
+                if (comp.is_valid())
+                {
+                    _selectedEntity.remove(comp);
+                }
+            });
+            _componentList->setEntity(_world, _selectedEntity);
+        }
     }
 
     void EntityComponentBrowser::_onEntityIdSelected(qulonglong id)

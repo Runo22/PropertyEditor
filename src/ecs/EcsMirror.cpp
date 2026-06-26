@@ -3,6 +3,7 @@
 #include "rpe/core/RttrBridge.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/core/TypeRenderer.h"
+#include "rpe/ecs/ComponentScan.h"
 
 namespace rpe
 {
@@ -211,6 +212,16 @@ namespace rpe
         _ch->queueEdit(path, std::move(value));
     }
 
+    void EcsMirror::addComponent(qulonglong entity, const QString& component)
+    {
+        _ch->queueStructural(MirrorChannel::StructuralKind::AddComponent, entity, component);
+    }
+
+    void EcsMirror::removeComponent(qulonglong entity, const QString& component)
+    {
+        _ch->queueStructural(MirrorChannel::StructuralKind::RemoveComponent, entity, component);
+    }
+
     bool EcsMirror::pollEntities(QVector<EntityEntry>& out)
     {
         return _ch->pollEntities(out);
@@ -219,6 +230,11 @@ namespace rpe
     bool EcsMirror::pollComponents(QStringList& out)
     {
         return _ch->pollComponents(out);
+    }
+
+    bool EcsMirror::pollCatalog(QStringList& out)
+    {
+        return _ch->pollCatalog(out);
     }
 
     std::vector<EcsMirror::ValueUpdate> EcsMirror::pollValues()
@@ -254,6 +270,52 @@ namespace rpe
         const QString& required = in.required;
         const QStringList& paths = in.paths;
         auto& edits = in.edits;
+
+        // ── Structural edits (add/remove components) ───────────────────────────────
+        // Applied here on the simulation thread, where structural world changes are
+        // safe. The system is immediate(), so the world is non-readonly at this
+        // point. Adding/removing changes the entity's archetype, so we then force a
+        // fresh scan/publish of the component list, entity list and catalog.
+        bool structuralApplied = false;
+        for (const MirrorChannel::StructuralEdit& s : in.structurals)
+        {
+            flecs::entity e = world.entity(s.entity);
+            if (!e.is_alive())
+            {
+                continue;
+            }
+            if (s.kind == MirrorChannel::StructuralKind::AddComponent)
+            {
+                flecs::entity comp = findComponentEntity(world, s.component);
+                if (comp.is_valid())
+                {
+                    e.add(comp);
+                    structuralApplied = true;
+                }
+            }
+            else // RemoveComponent
+            {
+                // Remove by the component currently on the entity (unambiguous).
+                e.each([&](flecs::id id) {
+                    if (!id.is_entity())
+                    {
+                        return;
+                    }
+                    const char* cn = id.entity().name();
+                    if (cn && s.component == QString::fromUtf8(cn))
+                    {
+                        e.remove(id);
+                        structuralApplied = true;
+                    }
+                });
+            }
+        }
+        if (structuralApplied)
+        {
+            _lastComponents.clear();
+            _lastEntities.clear();
+            _lastCatalog.clear();
+        }
 
         // The GUI reset its view (re-selected the same entity/component, or its
         // selection was cleared and restored). We dedup publishes against what we
@@ -323,6 +385,29 @@ namespace rpe
             {
                 _lastEntities = ents;
                 _ch->publishEntities(ents);
+            }
+        }
+
+        // ── Add-component catalog ──────────────────────────────────────────────────
+        // The set of bridged component names in the world, for the GUI's "add
+        // component" picker. Scanning every component is cheap but not free, so it is
+        // throttled like the entity scan (the catalog rarely changes).
+        const bool scanCatalog = in.resync || structuralApplied || (_catalogScanTick++ % 12 == 0);
+        if (scanCatalog)
+        {
+            QStringList catalog;
+            for (const ComponentResolution& c : scanComponents(world))
+            {
+                if (c.bridged)
+                {
+                    catalog.append(c.name);
+                }
+            }
+            catalog.sort();
+            if (catalog != _lastCatalog)
+            {
+                _lastCatalog = catalog;
+                _ch->publishCatalog(catalog);
             }
         }
 

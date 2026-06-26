@@ -48,6 +48,27 @@ namespace rpe
             Vertical, // entities / components / properties stacked — UE-style sidebar
         };
 
+        // Bundled browser options, with a single setter/getter (see settings()).
+        // Lets a host snapshot/restore the inspector's configuration in one call.
+        struct Settings
+        {
+            // Entity-list filter: only entities carrying this component are listed
+            // (empty = no filter). `requiredComponentEnabled` is the checkbox state.
+            QString requiredComponent;
+            bool requiredComponentEnabled = true;
+            // Mirror only the property leaves currently expanded in the tree.
+            bool snapshotOpenFieldsOnly = true;
+            // How property edits are applied (Override vs WriteBack).
+            EditPolicy editPolicy = EditPolicy::Override;
+            // Show the add/remove-component controls ("+" and per-row "×").
+            bool allowComponentEditing = false;
+            // Panel arrangement.
+            Layout layout = Layout::Wide;
+            // GUI poll cadence (ms) for the mirror and the direct-mode live refresh.
+            int mirrorPollIntervalMs = 33;
+            int liveUpdateIntervalMs = 20;
+        };
+
         explicit EntityComponentBrowser(QWidget* parent = nullptr);
 
         void setWorld(flecs::world* world);
@@ -73,6 +94,7 @@ namespace rpe
         void setSnapshotOpenFieldsOnly(bool on)
         {
             _openFieldsOnly = on;
+            _settings.snapshotOpenFieldsOnly = on;
         }
         bool snapshotOpenFieldsOnly() const
         {
@@ -91,6 +113,25 @@ namespace rpe
 
         // Default edit policy for the property editor (Override or WriteBack).
         void setEditPolicy(EditPolicy p);
+
+        // Allow the user to add/remove components on the selected entity from the
+        // component panel ("+" button and per-row "×"). Off by default. In mirror
+        // mode the change is queued to the simulation thread; in direct mode it is
+        // applied under the world guard. Requires a registered component catalog.
+        void setComponentEditingEnabled(bool on);
+        bool isComponentEditingEnabled() const
+        {
+            return _settings.allowComponentEditing;
+        }
+
+        // Bundled get/set of all the above options. setSettings applies every field
+        // (filter, snapshot policy, edit policy, component-editing, layout, timers);
+        // settings() returns the current configuration.
+        void setSettings(const Settings& s);
+        Settings settings() const
+        {
+            return _settings;
+        }
 
         PropertyEditor* propertyEditor() const
         {
@@ -128,11 +169,17 @@ namespace rpe
         void _onEntityIdSelected(qulonglong id);
         void _onComponentNameSelected(const QString& name);
 
+        // component add/remove
+        void _onAddComponent(const QString& name);
+        void _onRemoveComponent(const QString& name);
+
     private:
         void _setupUi();
         void _applyLayout(Layout layout);
         void* _liveComponentPtr() const;
         void _pushInterest();
+        // Recompute the "+" picker list: catalog minus components already present.
+        void _updateAddable();
 
         flecs::world* _world = nullptr;
         EntityListWidget* _entityList = nullptr;
@@ -157,6 +204,11 @@ namespace rpe
         qulonglong _mirrorEntity = 0;
         QString _mirrorComponent;
         bool _openFieldsOnly = true;
+
+        // Add/remove-component state (mirror mode).
+        QStringList _catalog;       // all bridged component names in the world
+        QStringList _currentComps;  // components on the selected entity
+        Settings _settings;
     };
 
 } // namespace rpe

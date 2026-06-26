@@ -32,4 +32,11 @@ namespace rpe
     std::vector<ComponentResolution> scanComponents(const flecs::world& world,
                                                     bool includeBuiltins = false);
 
+    // Find the flecs component entity whose name matches `name`. With bridgedOnly
+    // (default) only a component that resolves to a registered RTTR type is
+    // returned. Used to apply add/remove-component edits given the listed name.
+    // Returns an invalid entity if none matches. Touches the world — sim thread.
+    flecs::entity findComponentEntity(const flecs::world& world, const QString& name,
+                                      bool bridgedOnly = true);
+
 } // namespace rpe

@@ -48,4 +48,30 @@ namespace rpe
         return out;
     }
 
+    flecs::entity findComponentEntity(const flecs::world& world, const QString& name, bool bridgedOnly)
+    {
+        flecs::entity found;
+        flecs::query<> q = const_cast<flecs::world&>(world)
+                               .query_builder()
+                               .with<flecs::Component>()
+                               .build();
+        q.each([&](flecs::entity comp) {
+            if (found.is_valid())
+            {
+                return;
+            }
+            const char* cn = comp.name();
+            if (!cn || name != QString::fromUtf8(cn))
+            {
+                return;
+            }
+            if (bridgedOnly && !TypeBridge::resolveByName(cn).is_valid())
+            {
+                return;
+            }
+            found = comp;
+        });
+        return found;
+    }
+
 } // namespace rpe

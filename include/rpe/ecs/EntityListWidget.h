@@ -53,6 +53,9 @@ namespace rpe
         void entitySelected(flecs::entity e); // direct mode (world available)
         void entityIdSelected(qulonglong id); // always; mirror mode uses this
         void entityDeselected();
+        // The required-component filter checkbox was toggled. Mirror mode listens to
+        // this to apply the filter on the producer (the GUI list has no world).
+        void requiredComponentToggled(bool enabled);
 
     private slots:
         void _refresh();
