@@ -23,7 +23,9 @@ namespace rpe
     //  attach() registers a once-per-frame flecs system, so all world access happens
     //  *inside the caller's existing world.progress()* on the simulation thread —
     //  you don't change your loop. Each frame the system:
-    //    • snapshots the named-entity list (optionally filtered by a component),
+    //    • snapshots the entity list — every entity carrying at least one bridged
+    //      component, labelled by name / prefab name / id (optionally filtered to
+    //      those carrying a required component),
     //    • enumerates the bridged components of the "interest" entity,
     //    • reads the interest leaf values into self-contained value copies, and
     //    • applies any edits the GUI queued.
@@ -91,12 +93,22 @@ namespace rpe
         void _pumpImpl(const flecs::world& world);
         static void _installTrampoline(ecs_world_t* world, void* ctx);
         static void _teardownTrampoline(ecs_world_t* world, void* ctx);
+        // ecs_atfini hook: fires if the bound world is destroyed before this mirror,
+        // clearing _worldAlive so detach()/~EcsMirror skip flecs teardown (the world
+        // already deleted our system + query) instead of touching freed memory.
+        static void _worldFiniTrampoline(ecs_world_t* world, void* ctx);
 
         std::shared_ptr<MirrorChannel> _ch; // shared with the GUI consumer
 
         // Liveness token shared with the system callback and any deferred install,
         // so they no-op safely if this EcsMirror is destroyed before they run.
         std::shared_ptr<std::atomic<bool>> _alive;
+
+        // Cleared by an ecs_atfini hook when the bound world is destroyed before
+        // this mirror (e.g. the runtime that owns the world tears down before the
+        // editor that owns the browser). Shared with that hook's heap context, so
+        // it survives even if this EcsMirror is gone when the world finally dies.
+        std::shared_ptr<std::atomic<bool>> _worldAlive;
 
         flecs::world* _world = nullptr;
         flecs::system _system {};
@@ -110,6 +122,8 @@ namespace rpe
         QHash<QString, QString> _lastValueStr; // path -> last display, for dedup
         qulonglong _lastInterestEntity = 0;
         QString _lastInterestComponent;
+        QString _lastRequired;   // entity-list filter, to detect changes
+        int _entityScanTick = 0; // the all-entity scan is throttled (set rarely changes)
     };
 
 } // namespace rpe

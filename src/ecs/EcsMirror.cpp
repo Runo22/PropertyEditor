@@ -22,6 +22,41 @@ namespace rpe
             flecs::query<> query; // ref-counted handle; finalised when this ctx dies
             bool haveSystem;
         };
+        // Heap context for the ecs_atfini hook. Holds a share of the mirror's
+        // _worldAlive flag so it can outlive the mirror (the world may be destroyed
+        // long after) and clear it when the world finally dies.
+        struct WorldFiniCtx
+        {
+            std::shared_ptr<std::atomic<bool>> worldAlive;
+        };
+
+        // Short (unscoped) form of a name: the segment after the last "::".
+        QString shortName(const QString& s)
+        {
+            const int pos = s.lastIndexOf(QStringLiteral("::"));
+            return pos >= 0 ? s.mid(pos + 2) : s;
+        }
+
+        // Display label for an entity: its name, else its prefab's name + id,
+        // else just the id. (No leading id for named entities.)
+        QString entityLabel(const flecs::entity& e)
+        {
+            const char* n = e.name();
+            if (n && n[0] != '\0')
+            {
+                return QString::fromUtf8(n);
+            }
+            const flecs::entity prefab = e.target(flecs::IsA);
+            if (prefab.is_valid())
+            {
+                const char* pn = prefab.name();
+                if (pn && pn[0] != '\0')
+                {
+                    return QStringLiteral("%1  #%2").arg(QString::fromUtf8(pn)).arg(e.id());
+                }
+            }
+            return QStringLiteral("#%1").arg(e.id());
+        }
     } // namespace
 
     EcsMirror::EcsMirror()
@@ -59,6 +94,9 @@ namespace rpe
         {
             return;
         }
+        // Fresh liveness flag for this binding; the atfini hook installed below
+        // clears it if the world dies before us.
+        _worldAlive = std::make_shared<std::atomic<bool>>(true);
         ecs_world_t* w = _world->c_ptr();
         if (ecs_stage_is_readonly(w))
         {
@@ -84,10 +122,17 @@ namespace rpe
 
     void EcsMirror::detach()
     {
+        // If the world was already destroyed (atfini cleared _worldAlive), flecs has
+        // deleted our system + query for us — touching them, the world pointer, or
+        // even reading readonly state would dereference freed memory. Just drop our
+        // (now dangling) handles. Resetting them below is safe: the flecs C++ handle
+        // move-assignment only overwrites the pointer, it never calls into the world.
+        const bool worldAlive = _worldAlive && _worldAlive->load(std::memory_order_acquire);
+
         // Structural teardown. If called while the world is readonly (mid-progress
         // — e.g. a system removes the plugin), defer it to frame-end via value
         // handles, so it stays safe even if this object is destroyed in between.
-        if (_haveSystem || _haveQuery)
+        if (worldAlive && (_haveSystem || _haveQuery))
         {
             ecs_world_t* w = _world ? _world->c_ptr() : nullptr;
             if (w && ecs_stage_is_readonly(w))
@@ -110,6 +155,19 @@ namespace rpe
         _world = nullptr;
     }
 
+    void EcsMirror::_worldFiniTrampoline(ecs_world_t*, void* ctx)
+    {
+        auto* c = static_cast<WorldFiniCtx*>(ctx);
+        // The world is being destroyed: signal any still-living mirror to skip its
+        // flecs teardown. Safe even if the mirror is already gone — worldAlive is a
+        // shared_ptr this context co-owns.
+        if (c->worldAlive)
+        {
+            c->worldAlive->store(false, std::memory_order_release);
+        }
+        delete c;
+    }
+
     void EcsMirror::_teardownTrampoline(ecs_world_t*, void* ctx)
     {
         auto* c = static_cast<TeardownCtx*>(ctx);
@@ -123,10 +181,19 @@ namespace rpe
     void EcsMirror::_install()
     {
         // Build the named-entity query ONCE here (never inside the readonly
-        // system). The optional required-component filter is applied per-frame in
-        // the callback via has(), so the cached query never needs rebuilding.
-        _entityQuery = _world->query_builder().with<flecs::Identifier>(flecs::Name).build();
+        // system). It matches *all* entities (flecs::Any); pump() filters to those
+        // with a bridged component (and the optional required filter), so the
+        // cached query never needs rebuilding.
+        _entityQuery = _world->query_builder().with(flecs::Any).build();
         _haveQuery = true;
+
+        // Learn when the world is destroyed. If the runtime that owns the world
+        // tears down before the editor that owns this mirror, this hook clears
+        // _worldAlive so our detach()/destructor skip flecs teardown (the world
+        // has already deleted our system + query) instead of crashing on freed
+        // memory. The context carries a share of _worldAlive, so it stays valid
+        // even if this EcsMirror is long gone when the world finally dies.
+        ecs_atfini(_world->c_ptr(), &EcsMirror::_worldFiniTrampoline, new WorldFiniCtx { _worldAlive });
 
         // A term-less system is a task: its run callback fires once per frame inside
         // world.progress(), on the simulation thread. The captured 'alive' token
@@ -224,40 +291,55 @@ namespace rpe
             _lastInterestComponent = component;
         }
 
-        // ── Entity list (named entities, optionally filtered by component) ────────
-        // Iterate the CACHED query (never create one here — we're inside the
-        // readonly system). The required-component filter is applied via has().
-        QVector<EntityEntry> ents;
-        if (_haveQuery)
+        // ── Entity list ──────────────────────────────────────────────────────────
+        // Show every entity (named or not — labelled by name, else prefab name,
+        // else id) that has at least one *bridged* component, so the inspector
+        // lists exactly the entities it can show. Optionally filtered to those
+        // carrying the required component (matched by short name). This scans all
+        // entities, so it is throttled — the visible set rarely changes.
+        const bool requiredChanged = (required != _lastRequired);
+        _lastRequired = required;
+        const bool scanEntities = requiredChanged || (_entityScanTick++ % 6 == 0);
+        if (scanEntities && _haveQuery)
         {
-            flecs::entity_t reqId = 0;
-            if (!required.isEmpty())
-            {
-                flecs::entity rc = world.lookup(required.toUtf8().constData());
-                if (rc.is_valid())
-                {
-                    reqId = rc.id();
-                }
-            }
-            _entityQuery.each([&](flecs::entity e) {
-                if (!e.is_alive())
+            const QString reqShort = required.isEmpty() ? QString() : shortName(required);
+            QVector<EntityEntry> ents;
+            _entityQuery.each([&](flecs::entity ent) {
+                if (!ent.is_alive())
                 {
                     return;
                 }
-                if (reqId && !e.has(reqId))
+                bool hasBridged = false;
+                bool hasReq = reqShort.isEmpty();
+                ent.each([&](flecs::id id) {
+                    if (!id.is_entity())
+                    {
+                        return;
+                    }
+                    const char* cn = id.entity().name();
+                    if (!cn || cn[0] == '\0')
+                    {
+                        return;
+                    }
+                    if (TypeBridge::resolveByName(cn).is_valid())
+                    {
+                        hasBridged = true;
+                    }
+                    if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
+                    {
+                        hasReq = true;
+                    }
+                });
+                if (hasBridged && hasReq)
                 {
-                    return;
+                    ents.append({ static_cast<qulonglong>(ent.id()), entityLabel(ent) });
                 }
-                const char* n = e.name();
-                const QString name = n ? QString::fromUtf8(n) : QStringLiteral("(unnamed)");
-                ents.append({ static_cast<qulonglong>(e.id()),
-                              QStringLiteral("%1  %2").arg(e.id()).arg(name) });
             });
-        }
-        if (ents != _lastEntities)
-        {
-            _lastEntities = ents;
-            _ch->publishEntities(ents);
+            if (ents != _lastEntities)
+            {
+                _lastEntities = ents;
+                _ch->publishEntities(ents);
+            }
         }
 
         if (entity == 0)
@@ -279,14 +361,12 @@ namespace rpe
             {
                 return;
             }
-            flecs::entity ce = id.entity();
-            const char* n = ce.name();
+            const char* n = id.entity().name();
             if (!n || n[0] == '\0')
             {
                 return;
             }
-            const rttr::type t = rttr::type::get_by_name(n);
-            if (!t.is_valid() || !TypeBridge::has(t))
+            if (!TypeBridge::resolveByName(n).is_valid())
             {
                 return;
             }
@@ -308,7 +388,7 @@ namespace rpe
         {
             return;
         }
-        const rttr::type t = rttr::type::get_by_name(component.toStdString());
+        const rttr::type t = TypeBridge::resolveByName(component.toUtf8().constData());
         if (!t.is_valid())
         {
             return;

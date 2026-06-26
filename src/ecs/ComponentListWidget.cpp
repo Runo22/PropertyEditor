@@ -57,14 +57,12 @@ namespace rpe
                     return;
                 }
 
-                const rttr::type t = rttr::type::get_by_name(raw);
-                if (!t.is_valid())
-                {
-                    return;
-                }
                 // Only components we can actually inspect/edit (a TypeBridge wrapper
-                // turns the raw component pointer into an RTTR instance).
-                if (!TypeBridge::has(t))
+                // turns the raw component pointer into an RTTR instance). resolveByName
+                // bridges flecs' short component name to the registered RTTR type, which
+                // may be scoped or registered under a different name.
+                const rttr::type t = TypeBridge::resolveByName(raw);
+                if (!t.is_valid())
                 {
                     return;
                 }

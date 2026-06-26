@@ -16,12 +16,15 @@ namespace rpe
 {
 
     // ─────────────────────────────────────────────────────────────────────────────
-    //  EntityListWidget — lists named entities of a flecs::world.
+    //  EntityListWidget — lists the entities of a flecs::world that carry at least
+    //  one bridged component (the ones the inspector can display), labelled by name,
+    //  else prefab name + id, else id.
     //
-    //  Supports an optional "required component" filter: when set (e.g. a Transform
-    //  component), the list shows only entities that have that component — this is
-    //  the "list the ones with a transform" behaviour. Refreshes on a slow timer
-    //  since the entity set rarely changes at frame rate.
+    //  A text filter box narrows the visible rows by label (live, both modes). An
+    //  optional "required component" filter shows only entities that have a given
+    //  component — the "list the ones with a transform" behaviour. Direct mode
+    //  refreshes on a slow timer (the set rarely changes at frame rate); mirror mode
+    //  is fed via setEntries().
     // ─────────────────────────────────────────────────────────────────────────────
     class EntityListWidget : public QWidget
     {
@@ -58,6 +61,9 @@ namespace rpe
     private:
         void _setupUi();
         void _applyEntries(const QVector<QPair<qulonglong, QString>>& entries);
+        // Re-derive the visible rows from _sourceEntries by applying the text filter.
+        // Used when only the filter text changed (no need to re-query / re-feed).
+        void _applyTextFilter();
 
         flecs::world* _world = nullptr;
         QListWidget* _list = nullptr;
@@ -66,6 +72,10 @@ namespace rpe
         QTimer* _timer = nullptr;
         QString _requiredComponent;
         AccessGuard _guard;
+        // Full, unfiltered (id, label) set — from the world query (direct mode) or
+        // the mirror feed (mirror mode). The text filter is applied on top of this,
+        // so editing/clearing the filter never loses entries.
+        QVector<QPair<qulonglong, QString>> _sourceEntries;
         // Last visible (id, label) set — refresh skips the rebuild when unchanged.
         QVector<QPair<qulonglong, QString>> _lastEntries;
     };

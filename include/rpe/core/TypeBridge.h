@@ -67,6 +67,13 @@ namespace rpe
             unregisterType(rttr::type::get<T>());
         }
 
+        // Resolve a flecs component name to a registered bridged type. flecs
+        // component names are the short (unscoped) name, while RTTR types may be
+        // registered scoped or under a different name; this matches by exact name
+        // first, then by short name (the segment after the last "::"). Returns an
+        // invalid type if nothing registered matches.
+        static rttr::type resolveByName(const char* flecsName);
+
         // Wrap `obj` as a variant holding a typed pointer (invalid if unregistered).
         static rttr::variant wrap(rttr::type t, void* obj);
 

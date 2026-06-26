@@ -1,5 +1,6 @@
 #include "rpe/ecs/EntityComponentBrowser.h"
 
+#include "rpe/core/TypeBridge.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityListWidget.h"
 #include "rpe/gui/PropertyEditor.h"
@@ -275,6 +276,9 @@ namespace rpe
             _propertyEditor->setEditSink([ch](const QString& path, const rttr::variant& v) {
                 ch->queueEdit(path, v);
             });
+            // Mirror mode is fed via setEntries(); make sure the list never queries a
+            // (possibly stale) world, so a filter change re-filters the feed instead.
+            _entityList->setWorld(nullptr);
             _entityList->stopAutoRefresh();
             // The "write back to world" toggle is meaningless in mirror mode (edits
             // always go through the channel's edit queue), so hide it.
@@ -354,7 +358,10 @@ namespace rpe
             return; // direct mode uses _onComponentSelected
         }
         _mirrorComponent = name;
-        const rttr::type t = rttr::type::get_by_name(name.toStdString());
+        // The list shows flecs' short component name; resolveByName bridges it to the
+        // registered RTTR type (which may be scoped or named differently) so the
+        // schema binds. Plain get_by_name would miss those and show no properties.
+        const rttr::type t = TypeBridge::resolveByName(name.toUtf8().constData());
         if (t.is_valid())
         {
             _propertyEditor->bindType(t); // schema only — no instance/world touch

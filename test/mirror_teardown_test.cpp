@@ -3,7 +3,10 @@
 //   #1  detach() an installed mirror while readonly.
 //   #2  destroy the mirror in the SAME frame as a deferred (readonly) attach,
 //       before the deferred install runs.
-// Both must complete without crashing.
+//   #3  destroy the WORLD before the mirror (the "runtime tears down before the
+//       editor" case): the mirror's ecs_atfini hook must let detach()/dtor skip
+//       flecs teardown instead of touching the freed world.
+// All must complete without crashing.
 #include <rpe/core/TypeBridge.h>
 #include <rpe/ecs/EcsMirror.h>
 
@@ -83,6 +86,41 @@ int main()
     progressN(5); // keep advancing; no dangling system may run
 
     printf("[PASS] in-readonly detach + deferred-attach-then-destroy survived\n");
+
+    // ── #3: world destroyed BEFORE the mirror ─────────────────────────────────
+    // The mirror outlives its world (runtime tears down first). detach() and the
+    // destructor must not touch the freed world.
+    {
+        auto m3 = std::make_unique<rpe::EcsMirror>();
+        {
+            flecs::world w2;
+            auto e2 = w2.entity("E2");
+            e2.set<Comp>({});
+            m3->attach(&w2);
+            m3->setInterest(static_cast<qulonglong>(e2.id()), "Comp", { "mass" });
+            w2.progress(0.016f);
+            w2.progress(0.016f);
+        } // w2 destroyed here → ecs_atfini fires → m3 marked world-dead
+
+        m3->detach();    // must be a no-op for flecs teardown (world is gone)
+        m3.reset();      // destructor must also skip flecs teardown
+    }
+    printf("[PASS] mirror survived its world being destroyed first\n");
+
+    // A second mirror that is destroyed while its world is still alive must still
+    // tear down cleanly (proves the world-dead path didn't break the normal one).
+    {
+        flecs::world w3;
+        auto e3 = w3.entity("E3");
+        e3.set<Comp>({});
+        auto m4 = std::make_unique<rpe::EcsMirror>();
+        m4->attach(&w3);
+        w3.progress(0.016f);
+        m4.reset();           // normal teardown (world alive)
+        w3.progress(0.016f);  // no dangling system may run
+    }
+    printf("[PASS] normal teardown (world alive) still works after world-dead path\n");
+
     printf("ALL PASS\n");
     return 0;
 }
