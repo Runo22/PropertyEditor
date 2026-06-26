@@ -400,7 +400,9 @@ namespace rpe
             {
                 if (c.bridged)
                 {
-                    catalog.append(c.name);
+                    // Full scoped path so the GUI's add picker can group by namespace;
+                    // findComponentEntity accepts either the path or the leaf name.
+                    catalog.append(c.path.isEmpty() ? c.name : c.path);
                 }
             }
             catalog.sort();

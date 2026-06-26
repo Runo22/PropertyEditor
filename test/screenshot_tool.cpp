@@ -1,6 +1,6 @@
 // Renders the EntityComponentBrowser (mirror mode, component-editing enabled) to
-// a PNG so the add/remove design can be reviewed. Offscreen; no display needed.
-//   usage: rpe_screenshot <out.png>
+// PNGs so the add/remove design can be reviewed. Offscreen; no display needed.
+//   usage: rpe_screenshot <out-prefix>   → <prefix>_normal.png, _confirm.png, _add.png
 #include <rpe/core/EditorHints.h>
 #include <rpe/core/TypeBridge.h>
 #include <rpe/ecs/ComponentListWidget.h>
@@ -13,10 +13,10 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QListWidget>
+#include <QMouseEvent>
 #include <QPixmap>
 #include <QThread>
-
-#include <vector>
+#include <QToolButton>
 
 struct Vec3
 {
@@ -32,12 +32,30 @@ struct Health
     int hp = 100;
     int armor = 25;
     bool invulnerable = false;
-    std::vector<int> resistances = { 10, 5, 0 }; // expandable array
+    std::vector<int> resistances = { 10, 5, 0 };
 };
-struct Velocity
+namespace physics
 {
-    double dx = 0, dy = 0;
-};
+    struct RigidBody
+    {
+        double mass = 1.0;
+    };
+    struct Collider
+    {
+        double radius = 0.5;
+    };
+} // namespace physics
+namespace render
+{
+    struct Mesh
+    {
+        int lod = 0;
+    };
+    struct Material
+    {
+        double roughness = 0.5;
+    };
+} // namespace render
 
 RTTR_REGISTRATION
 {
@@ -45,45 +63,47 @@ RTTR_REGISTRATION
     registration::class_<Vec3>("Vec3").property("x", &Vec3::x).property("y", &Vec3::y).property("z", &Vec3::z);
     registration::class_<Transform>("Transform").property("position", &Transform::position).property("scale", &Transform::scale);
     registration::class_<Health>("Health")
-        .property("hp", &Health::hp)(metadata(rpe::hint::Min, 0), metadata(rpe::hint::Max, 100))
+        .property("hp", &Health::hp)
         .property("armor", &Health::armor)
         .property("invulnerable", &Health::invulnerable)
         .property("resistances", &Health::resistances);
-    registration::class_<Velocity>("Velocity").property("dx", &Velocity::dx).property("dy", &Velocity::dy);
+    registration::class_<physics::RigidBody>("physics::RigidBody").property("mass", &physics::RigidBody::mass);
+    registration::class_<physics::Collider>("physics::Collider").property("radius", &physics::Collider::radius);
+    registration::class_<render::Mesh>("render::Mesh").property("lod", &render::Mesh::lod);
+    registration::class_<render::Material>("render::Material").property("roughness", &render::Material::roughness);
 }
 
 int main(int argc, char* argv[])
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
-    const QString out = argc > 1 ? QString::fromUtf8(argv[1]) : QStringLiteral("browser.png");
+    const QString prefix = argc > 1 ? QString::fromUtf8(argv[1]) : QStringLiteral("browser");
 
-    rpe::TypeBridge::registerTypes<Transform, Health, Velocity>();
+    rpe::TypeBridge::registerTypes<Transform, Health, physics::RigidBody, physics::Collider, render::Mesh, render::Material>();
 
     flecs::world world;
     world.component<Transform>();
     world.component<Health>();
-    world.component<Velocity>();
+    world.component<physics::RigidBody>();
+    world.component<physics::Collider>();
+    world.component<render::Mesh>();
+    world.component<render::Material>();
 
-    auto player = world.entity("Player");
-    player.set<Transform>({ { 12.5, 3.0, -4.0 }, 1.0 }).set<Health>({ 87, 40, false }).set<Velocity>({ 1.5, 0.0 });
-    world.entity("Enemy").set<Transform>({ { -8.0, 0.0, 2.0 }, 1.2 }).set<Health>({ 50, 10, false });
-    world.entity("Camera").set<Transform>({ { 0, 10, 0 }, 1.0 });
+    world.entity("Player").set<Transform>({ { 12.5, 3.0, -4.0 }, 1.0 }).set<Health>({ 87, 40, false, { 10, 5, 0 } });
+    world.entity("Enemy").set<Transform>({ { -8, 0, 2 }, 1.2 }).set<Health>({ 50, 10, false, {} });
 
     rpe::EcsMirror mirror;
     mirror.attach(&world);
 
     rpe::EntityComponentBrowser browser;
-    browser.setBrowserLayout(rpe::EntityComponentBrowser::Layout::Vertical);
     browser.setMirror(&mirror);
-
     rpe::EntityComponentBrowser::Settings st = browser.settings();
-    st.allowComponentEditing = true;          // show "+" and per-row "×"
+    st.layout = rpe::EntityComponentBrowser::Layout::Vertical;
+    st.allowComponentEditing = true;
     st.requiredComponent = QStringLiteral("Transform");
     st.requiredComponentEnabled = true;
     browser.setSettings(st);
-
-    browser.resize(360, 660);
+    browser.resize(360, 680);
     browser.show();
 
     auto pump = [&](int n) {
@@ -97,25 +117,56 @@ int main(int argc, char* argv[])
 
     pump(25);
     if (auto* el = browser.entityList()->findChild<QListWidget*>())
-    {
         for (int i = 0; i < el->count(); ++i)
             if (el->item(i)->text() == QStringLiteral("Player"))
                 el->setCurrentRow(i);
-    }
     pump(20);
-    if (auto* cl = browser.componentList()->findChild<QListWidget*>())
-    {
+    QListWidget* cl = browser.componentList()->findChild<QListWidget*>();
+    if (cl)
         for (int i = 0; i < cl->count(); ++i)
             if (cl->item(i)->text() == QStringLiteral("Health"))
-                cl->setCurrentRow(i); // show Health properties
-    }
+                cl->setCurrentRow(i);
     pump(30);
 
-    const QPixmap shot = browser.grab();
-    const bool ok = shot.save(out, "PNG");
-    printf("%s screenshot: %s (%dx%d)\n", ok ? "saved" : "FAILED to save",
-           out.toUtf8().constData(), shot.width(), shot.height());
+    auto saveShot = [](QWidget* w, const QString& path) {
+        const QPixmap pm = w->grab();
+        printf("%s %s (%dx%d)\n", pm.save(path, "PNG") ? "saved" : "FAILED", path.toUtf8().constData(), pm.width(), pm.height());
+    };
+
+    // 1) Normal state.
+    saveShot(&browser, prefix + "_normal.png");
+
+    // 2) Delete-confirm: synthesise a click on the trash glyph of the "Transform"
+    //    row to arm it (the delegate consumes the release and shows the confirm).
+    if (cl)
+    {
+        for (int i = 0; i < cl->count(); ++i)
+        {
+            if (cl->item(i)->text() != QStringLiteral("Transform"))
+                continue;
+            const QRect r = cl->visualItemRect(cl->item(i));
+            const QPoint pos(r.right() - r.height() / 2, r.center().y()); // trash glyph
+            for (QEvent::Type t : { QEvent::MouseButtonPress, QEvent::MouseButtonRelease })
+            {
+                QMouseEvent me(t, pos, cl->viewport()->mapToGlobal(pos), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(cl->viewport(), &me);
+            }
+        }
+    }
+    pump(3);
+    saveShot(&browser, prefix + "_confirm.png");
+
+    // 3) Add popup open (grouped by namespace + filter).
+    if (auto* addBtn = browser.componentList()->findChild<QToolButton*>())
+    {
+        addBtn->click();
+        pump(3);
+        if (QWidget* popup = QApplication::activePopupWidget())
+            saveShot(popup, prefix + "_add.png");
+        if (QWidget* popup = QApplication::activePopupWidget())
+            popup->close();
+    }
 
     mirror.detach();
-    return ok ? 0 : 1;
+    return 0;
 }

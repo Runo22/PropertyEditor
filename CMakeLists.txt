@@ -130,6 +130,7 @@ if(RPE_WITH_FLECS)
         src/ecs/EcsMirror.cpp
         src/ecs/MirrorChannel.cpp
         src/ecs/ComponentScan.cpp
+        resources/rpe_resources.qrc
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
         include/rpe/ecs/EntityComponentBrowser.h)
@@ -190,4 +191,8 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_screenshot test/screenshot_tool.cpp)
     target_link_libraries(rpe_screenshot PRIVATE rpe_gui)
+
+    # Dev-only: regenerates resources/icons/*.png (the committed icons the GUI uses).
+    add_executable(rpe_makeicons tools/make_icons.cpp)
+    target_link_libraries(rpe_makeicons PRIVATE Qt5::Gui)
 endif()

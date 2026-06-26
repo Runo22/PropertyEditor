@@ -25,7 +25,8 @@ namespace rpe
             // flecs' own components live under the "flecs" scope (flecs.core, …);
             // they are never inspectable, so skip them unless asked. path() returns
             // an RAII flecs::string (frees itself), implicitly convertible to char*.
-            const flecs::string fullPath = comp.path(".", ".");
+            // path(sep, "") → "ns.Leaf" with no leading separator (init_sep empty).
+            const flecs::string fullPath = comp.path(".", "");
             const char* pc = fullPath.c_str();
             const QString path = pc ? QString::fromUtf8(pc) : QString();
             if (!includeBuiltins && path.startsWith(QStringLiteral("flecs")))
@@ -61,7 +62,21 @@ namespace rpe
                 return;
             }
             const char* cn = comp.name();
-            if (!cn || name != QString::fromUtf8(cn))
+            if (!cn || cn[0] == '\0')
+            {
+                return;
+            }
+            // Match either the short (leaf) name or the full scoped path, so callers
+            // can pass either "Transform" or "game::Transform" / "game.Transform".
+            const QString leaf = QString::fromUtf8(cn);
+            bool nameMatch = (name == leaf);
+            if (!nameMatch)
+            {
+                const flecs::string path = comp.path("::", "");
+                const flecs::string dotPath = comp.path(".", "");
+                nameMatch = (name == QString::fromUtf8(path.c_str())) || (name == QString::fromUtf8(dotPath.c_str()));
+            }
+            if (!nameMatch)
             {
                 return;
             }

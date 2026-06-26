@@ -388,13 +388,23 @@ namespace rpe
 
     void EntityComponentBrowser::_updateAddable()
     {
-        // Offer every catalogued component the entity does not already have.
+        // Offer every catalogued component the entity does not already have. The
+        // catalog carries full scoped paths (for namespace grouping); the entity's
+        // current components are leaf names — compare on the leaf.
         QStringList addable;
-        for (const QString& n : _catalog)
+        for (const QString& full : _catalog)
         {
-            if (!_currentComps.contains(n))
+            int cut = full.lastIndexOf(QStringLiteral("::"));
+            int sep = 2;
+            if (cut < 0)
             {
-                addable.append(n);
+                cut = full.lastIndexOf(QLatin1Char('.'));
+                sep = 1;
+            }
+            const QString leaf = cut >= 0 ? full.mid(cut + sep) : full;
+            if (!_currentComps.contains(leaf))
+            {
+                addable.append(full);
             }
         }
         _componentList->setAddableComponents(addable);

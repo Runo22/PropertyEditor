@@ -29,12 +29,20 @@ struct Health
 {
     int hp = 100;
 };
+namespace game
+{
+    struct Sprite
+    {
+        int layer = 0;
+    };
+}
 
 RTTR_REGISTRATION
 {
     rttr::registration::class_<Position>("Position").property("x", &Position::x).property("y", &Position::y);
     rttr::registration::class_<Velocity>("Velocity").property("dx", &Velocity::dx).property("dy", &Velocity::dy);
     rttr::registration::class_<Health>("Health").property("hp", &Health::hp);
+    rttr::registration::class_<game::Sprite>("game::Sprite").property("layer", &game::Sprite::layer);
 }
 
 static int g_fails = 0;
@@ -61,6 +69,7 @@ int main(int argc, char* argv[])
     rpe::TypeBridge::registerType<Position>();
     rpe::TypeBridge::registerType<Velocity>();
     rpe::TypeBridge::registerType<Health>();
+    rpe::TypeBridge::registerType<game::Sprite>();
 
     flecs::world world;
     // Register the component types with flecs so they exist as components even
@@ -69,6 +78,7 @@ int main(int argc, char* argv[])
     world.component<Position>();
     world.component<Velocity>();
     world.component<Health>();
+    world.component<game::Sprite>();
 
     auto e = world.entity("Hero");
     e.set<Position>({ 1, 2 }); // starts with only Position
@@ -125,6 +135,19 @@ int main(int argc, char* argv[])
                 hasPos = true;
         });
         check("Position actually removed from the entity in the world", !hasPos);
+    }
+
+    // Add a NAMESPACED component by its full path (as the grouped picker emits),
+    // exercising findComponentEntity's path matching.
+    browser.componentList()->addComponentRequested(QStringLiteral("game.Sprite"));
+    pump(25);
+    {
+        bool hasSprite = false;
+        world.entity(static_cast<flecs::entity_t>(e.id())).each([&](flecs::id id) {
+            if (id.is_entity() && id.entity().name() && QString::fromUtf8(id.entity().name()) == QStringLiteral("Sprite"))
+                hasSprite = true;
+        });
+        check("namespaced component added by full path", hasSprite);
     }
 
     mirror.detach();

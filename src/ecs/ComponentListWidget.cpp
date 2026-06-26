@@ -2,119 +2,146 @@
 
 #include "rpe/core/TypeBridge.h"
 
-#include <QApplication>
+#include <QEvent>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
-#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
 #include <QStyledItemDelegate>
 #include <QToolButton>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <functional>
+
+// rpe_gui is a STATIC library; its embedded .qrc is only auto-registered if some
+// referenced symbol pulls in the resource object. Force it once at startup.
+static const bool g_rpeResourcesInited = [] {
+    Q_INIT_RESOURCE(rpe_resources);
+    return true;
+}();
 
 namespace rpe
 {
 
     namespace
     {
-        // A crisp "+" glyph icon for the add button, drawn to match the row "×".
-        QIcon makePlusIcon(const QColor& color)
+        // Cached icons (loaded from the embedded Qt resource — :/rpe/icons/*.png).
+        const QPixmap& removePixmap()
         {
-            const int s = 16;
-            QPixmap pm(s, s);
-            pm.fill(Qt::transparent);
-            QPainter p(&pm);
-            p.setRenderHint(QPainter::Antialiasing, true);
-            QPen pen(color);
-            pen.setWidthF(1.8);
-            pen.setCapStyle(Qt::RoundCap);
-            p.setPen(pen);
-            const int m = 4;
-            p.drawLine(s / 2, m, s / 2, s - m);
-            p.drawLine(m, s / 2, s - m, s / 2);
-            p.end();
-            return QIcon(pm);
+            static const QPixmap pm(QStringLiteral(":/rpe/icons/remove.png"));
+            return pm;
+        }
+        const QPixmap& confirmPixmap()
+        {
+            static const QPixmap pm(QStringLiteral(":/rpe/icons/confirm.png"));
+            return pm;
         }
 
-        // Draws a right-aligned "×" remove affordance on each component row and
-        // reports clicks on it via a callback. No Q_OBJECT/signals (kept to a plain
-        // delegate) — the owning widget supplies the callback. The × is only drawn
-        // and hit-tested when `enabled` is true.
+        // Per-row remove affordance with a two-step confirm. A row's trailing icon
+        // is normally the trash (remove.png). Clicking it once "arms" that row: the
+        // icon becomes a warning-coloured button (confirm.png). Clicking again
+        // removes. Selecting another row, clicking elsewhere, or focus loss reverts
+        // the armed row (handled by the owning widget clearing `confirmName`).
+        // Plain delegate (no Q_OBJECT) — the widget supplies callbacks.
         class RemoveButtonDelegate : public QStyledItemDelegate
         {
         public:
             using QStyledItemDelegate::QStyledItemDelegate;
 
             bool enabled = false;
-            std::function<void(const QModelIndex&)> onRemove;
+            QString confirmName;       // component currently armed for delete
+            QListWidget* list = nullptr;
+            std::function<void(const QString&)> onRemove;
 
             static QRect glyphRect(const QStyleOptionViewItem& opt)
             {
                 const int s = opt.rect.height();
                 return QRect(opt.rect.right() - s, opt.rect.top(), s, s);
             }
+            void repaint() const
+            {
+                if (list)
+                    list->viewport()->update();
+            }
+            void clearConfirm()
+            {
+                if (!confirmName.isEmpty())
+                {
+                    confirmName.clear();
+                    repaint();
+                }
+            }
 
             void paint(QPainter* p, const QStyleOptionViewItem& opt, const QModelIndex& index) const override
             {
-                // Reserve room on the right so the text doesn't run under the ×.
+                // Reserve room on the right so the text doesn't run under the icon.
                 QStyleOptionViewItem o(opt);
                 if (enabled)
-                {
                     o.rect.adjust(0, 0, -o.rect.height(), 0);
-                }
                 QStyledItemDelegate::paint(p, o, index);
                 if (!enabled)
-                {
                     return;
-                }
-                const QRect g = glyphRect(opt);
-                const bool rowHover = opt.state & QStyle::State_MouseOver;
+
+                const QRect btn = glyphRect(opt).adjusted(3, 3, -3, -3);
+                const QRect img = btn.adjusted(2, 2, -2, -2);
+                const QString name = index.data(Qt::DisplayRole).toString();
                 p->save();
                 p->setRenderHint(QPainter::Antialiasing, true);
-                // A soft rounded square behind the × on row hover, brighter under the
-                // cursor — a clear, professional affordance.
-                if (rowHover)
+                p->setRenderHint(QPainter::SmoothPixmapTransform, true);
+                if (name == confirmName)
                 {
-                    QColor bg = opt.palette.color(QPalette::Text);
-                    bg.setAlpha(28);
+                    // Armed: warning-coloured button + white check ("click to confirm").
                     p->setPen(Qt::NoPen);
-                    p->setBrush(bg);
-                    p->drawRoundedRect(g.adjusted(4, 4, -4, -4), 3, 3);
+                    p->setBrush(QColor(0xD9, 0x53, 0x4F));
+                    p->drawRoundedRect(btn, 4, 4);
+                    p->drawPixmap(img, confirmPixmap());
                 }
-                QColor c = opt.palette.color(QPalette::Text);
-                c.setAlpha(rowHover ? 235 : 150);
-                QPen pen(c);
-                pen.setWidthF(1.8);
-                pen.setCapStyle(Qt::RoundCap);
-                p->setPen(pen);
-                const int m = g.height() * 2 / 5;
-                const QRectF x = QRectF(g).adjusted(m, m, -m, -m);
-                p->drawLine(x.topLeft(), x.bottomRight());
-                p->drawLine(x.topRight(), x.bottomLeft());
+                else
+                {
+                    const bool hover = opt.state & QStyle::State_MouseOver;
+                    if (hover)
+                    {
+                        QColor bg = opt.palette.color(QPalette::Text);
+                        bg.setAlpha(28);
+                        p->setPen(Qt::NoPen);
+                        p->setBrush(bg);
+                        p->drawRoundedRect(btn, 4, 4);
+                    }
+                    p->setOpacity(hover ? 1.0 : 0.6);
+                    p->drawPixmap(img, removePixmap());
+                }
                 p->restore();
             }
 
             bool editorEvent(QEvent* ev, QAbstractItemModel*, const QStyleOptionViewItem& opt, const QModelIndex& index) override
             {
                 if (!enabled || ev->type() != QEvent::MouseButtonRelease)
-                {
                     return false;
-                }
                 auto* me = static_cast<QMouseEvent*>(ev);
+                const QString name = index.data(Qt::DisplayRole).toString();
                 if (me->button() == Qt::LeftButton && glyphRect(opt).contains(me->pos()))
                 {
-                    if (onRemove)
+                    if (name == confirmName)
                     {
-                        onRemove(index);
+                        confirmName.clear();
+                        if (onRemove)
+                            onRemove(name); // second click → remove
                     }
-                    return true; // consume — don't also change selection
+                    else
+                    {
+                        confirmName = name; // first click → arm confirm
+                    }
+                    repaint();
+                    return true; // consume — no selection change / edit
                 }
+                clearConfirm(); // clicked a row but not its button → revert
                 return false;
             }
         };
@@ -132,7 +159,7 @@ namespace rpe
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(2);
 
-        // Header row: "Components" + a right-aligned "+" add button.
+        // Header row: "Components" + a labelled "Add" button.
         auto* headerRow = new QHBoxLayout();
         headerRow->setContentsMargins(0, 0, 0, 0);
         auto* header = new QLabel(tr("Components"), this);
@@ -140,7 +167,9 @@ namespace rpe
         headerRow->addWidget(header, 1);
 
         _addBtn = new QToolButton(this);
-        _addBtn->setIcon(makePlusIcon(palette().color(QPalette::Text)));
+        _addBtn->setText(tr("Add"));
+        _addBtn->setIcon(QIcon(QStringLiteral(":/rpe/icons/add.png")));
+        _addBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         _addBtn->setToolTip(tr("Add a component to the selected entity"));
         _addBtn->setAutoRaise(true);
         _addBtn->setVisible(false); // shown only when editing is enabled
@@ -148,29 +177,40 @@ namespace rpe
         layout->addLayout(headerRow);
 
         _list = new QListWidget(this);
-        _list->setMouseTracking(true); // so the × can highlight on hover
+        _list->setMouseTracking(true); // so the row icon can highlight on hover
         auto* del = new RemoveButtonDelegate(_list);
-        del->onRemove = [this](const QModelIndex& idx) {
-            const QString name = idx.data(Qt::DisplayRole).toString();
+        del->list = _list;
+        del->onRemove = [this](const QString& name) {
             if (!name.isEmpty())
-            {
                 emit removeComponentRequested(name);
-            }
         };
         _list->setItemDelegate(del);
         _rowDelegate = del;
+        // Revert a pending delete-confirm when the list loses focus (clicked away).
+        _list->installEventFilter(this);
+        _list->viewport()->installEventFilter(this);
         layout->addWidget(_list, 1);
 
         connect(_list, &QListWidget::currentItemChanged, this, &ComponentListWidget::_onSelectionChanged);
         connect(_addBtn, &QToolButton::clicked, this, &ComponentListWidget::_onAddClicked);
     }
 
+    bool ComponentListWidget::eventFilter(QObject* obj, QEvent* ev)
+    {
+        if ((obj == _list || obj == _list->viewport()) && ev->type() == QEvent::FocusOut)
+        {
+            static_cast<RemoveButtonDelegate*>(_rowDelegate)->clearConfirm();
+        }
+        return QWidget::eventFilter(obj, ev);
+    }
+
     void ComponentListWidget::setComponentEditingEnabled(bool on)
     {
         _editingEnabled = on;
         _addBtn->setVisible(on);
-        // _rowDelegate is always a RemoveButtonDelegate (set in _setupUi).
-        static_cast<RemoveButtonDelegate*>(_rowDelegate)->enabled = on;
+        auto* del = static_cast<RemoveButtonDelegate*>(_rowDelegate);
+        del->enabled = on;
+        del->clearConfirm();
         _list->viewport()->update();
     }
 
@@ -181,19 +221,96 @@ namespace rpe
 
     void ComponentListWidget::_onAddClicked()
     {
-        QMenu menu(this);
+        // A small popup: a filter box over a tree of addable components grouped by
+        // namespace. Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.
+        auto* popup = new QFrame(this, Qt::Popup);
+        popup->setAttribute(Qt::WA_DeleteOnClose);
+        popup->setFrameShape(QFrame::StyledPanel);
+        auto* lay = new QVBoxLayout(popup);
+        lay->setContentsMargins(4, 4, 4, 4);
+        lay->setSpacing(4);
+
+        auto* search = new QLineEdit(popup);
+        search->setPlaceholderText(tr("Filter components…"));
+        search->setClearButtonEnabled(true);
+        lay->addWidget(search);
+
+        auto* tree = new QTreeWidget(popup);
+        tree->setHeaderHidden(true);
+        tree->setRootIsDecorated(true);
+        lay->addWidget(tree);
+
         if (_addable.isEmpty())
         {
-            menu.addAction(tr("(no components available)"))->setEnabled(false);
+            auto* none = new QTreeWidgetItem(tree, { tr("(no components available)") });
+            none->setFlags(Qt::NoItemFlags);
         }
         else
         {
-            for (const QString& n : _addable)
+            // Group by namespace (everything before the last "::" or "."); the leaf
+            // is shown, and the full catalogued name is carried for the add request.
+            QHash<QString, QTreeWidgetItem*> groups;
+            for (const QString& full : _addable)
             {
-                connect(menu.addAction(n), &QAction::triggered, this, [this, n] { emit addComponentRequested(n); });
+                int cut = full.lastIndexOf(QStringLiteral("::"));
+                int sep = 2;
+                if (cut < 0)
+                {
+                    cut = full.lastIndexOf(QLatin1Char('.'));
+                    sep = 1;
+                }
+                const QString ns = cut >= 0 ? full.left(cut) : tr("(global)");
+                const QString leaf = cut >= 0 ? full.mid(cut + sep) : full;
+                QTreeWidgetItem*& g = groups[ns];
+                if (!g)
+                {
+                    g = new QTreeWidgetItem(tree, { ns });
+                    g->setFlags(Qt::ItemIsEnabled);
+                    g->setExpanded(true);
+                }
+                auto* item = new QTreeWidgetItem(g, { leaf });
+                item->setData(0, Qt::UserRole, full);
             }
         }
-        menu.exec(_addBtn->mapToGlobal(_addBtn->rect().bottomLeft()));
+
+        auto activate = [this, popup](QTreeWidgetItem* item) {
+            if (!item)
+                return;
+            const QString full = item->data(0, Qt::UserRole).toString();
+            if (!full.isEmpty())
+            {
+                emit addComponentRequested(full);
+                popup->close();
+            }
+        };
+        connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
+        connect(tree, &QTreeWidget::itemActivated, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
+
+        connect(search, &QLineEdit::textChanged, tree, [tree](const QString& q) {
+            const QString s = q.trimmed();
+            for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            {
+                QTreeWidgetItem* g = tree->topLevelItem(i);
+                int shown = 0;
+                for (int j = 0; j < g->childCount(); ++j)
+                {
+                    QTreeWidgetItem* c = g->child(j);
+                    const bool match = s.isEmpty() || c->text(0).contains(s, Qt::CaseInsensitive);
+                    c->setHidden(!match);
+                    shown += match ? 1 : 0;
+                }
+                // Hide a group header only if it has children and none are showing.
+                g->setHidden(g->childCount() > 0 && shown == 0);
+                if (shown)
+                    g->setExpanded(true);
+            }
+        });
+
+        popup->setMinimumWidth(qMax(200, _list->width()));
+        popup->adjustSize();
+        popup->move(_addBtn->mapToGlobal(_addBtn->rect().bottomLeft()));
+        popup->show();
+        search->setFocus();
     }
 
     void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
@@ -265,6 +382,11 @@ namespace rpe
         {
             return; // unchanged → keep selection, no flicker
         }
+        // Drop a pending delete-confirm if its component is no longer present.
+        if (auto* del = static_cast<RemoveButtonDelegate*>(_rowDelegate); del && !names.contains(del->confirmName))
+        {
+            del->clearConfirm();
+        }
         _mirrorNames = names;
         _components.clear(); // mirror mode has no world-backed infos
 
@@ -313,6 +435,8 @@ namespace rpe
 
     void ComponentListWidget::_onSelectionChanged()
     {
+        // Selecting a different component reverts any pending delete-confirm.
+        static_cast<RemoveButtonDelegate*>(_rowDelegate)->clearConfirm();
         auto* item = _list->currentItem();
         if (!item)
         {

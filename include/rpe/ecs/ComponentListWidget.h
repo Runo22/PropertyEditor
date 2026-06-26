@@ -12,6 +12,7 @@
 class QListWidget;
 class QToolButton;
 class QStyledItemDelegate;
+class QEvent;
 
 namespace rpe
 {
@@ -73,6 +74,10 @@ namespace rpe
         // Structural-edit requests (only emitted when editing is enabled).
         void addComponentRequested(const QString& name);
         void removeComponentRequested(const QString& name);
+
+    protected:
+        // Reverts a pending delete-confirm when the list loses focus.
+        bool eventFilter(QObject* obj, QEvent* ev) override;
 
     private slots:
         void _onSelectionChanged();
