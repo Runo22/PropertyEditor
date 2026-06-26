@@ -108,30 +108,64 @@ int main(int argc, char* argv[])
           leaves.contains(QStringLiteral("isStatic")) && leaves.contains(QStringLiteral("mass")));
 
     // 4) The mirrored values must populate the value column.
-    pump(25);
     QTreeView* tree = browser.propertyEditor()->findChild<QTreeView*>();
-    bool sawMass = false, sawStatic = false;
-    if (tree && tree->model())
-    {
+
+    // Read the displayed value of a named leaf row (empty if absent/blank).
+    auto valueOf = [&](const QString& leaf) -> QString {
+        QString found;
+        if (!tree || !tree->model())
+            return found;
         auto* m = tree->model();
         std::function<void(const QModelIndex&)> walk = [&](const QModelIndex& parent) {
             for (int r = 0; r < m->rowCount(parent); ++r)
             {
                 const QModelIndex name = m->index(r, 0, parent);
-                const QModelIndex val = m->index(r, 1, parent);
-                const QString n = name.data(Qt::DisplayRole).toString();
-                const QString v = val.data(Qt::DisplayRole).toString();
-                if (n == QStringLiteral("mass") && v.contains(QStringLiteral("7.5")))
-                    sawMass = true;
-                if (n == QStringLiteral("isStatic") && (v == QStringLiteral("true") || v == QStringLiteral("True")))
-                    sawStatic = true;
+                if (name.data(Qt::DisplayRole).toString() == leaf)
+                    found = m->index(r, 1, parent).data(Qt::DisplayRole).toString();
                 walk(name);
             }
         };
         walk(QModelIndex());
+        return found;
+    };
+
+    pump(25);
+    check("mirrored value populated: mass == 7.5", valueOf(QStringLiteral("mass")).contains(QStringLiteral("7.5")));
+    check("mirrored value populated: isStatic == true", valueOf(QStringLiteral("isStatic")) == QStringLiteral("true"));
+
+    // 5) Re-select the SAME component after clearing the selection — the property
+    //    values must repopulate (the reported "shows once, blank the second time").
+    compList->setCurrentRow(-1); // clear selection → componentDeselected (unbinds)
+    pump(10);
+    compList->setCurrentRow(0); // re-select the same component
+    pump(25);
+    check("re-selecting same component repopulates values",
+          valueOf(QStringLiteral("mass")).contains(QStringLiteral("7.5")));
+
+    // 6) A second entity with the same component set: switch to it and back, then
+    //    confirm the component list still lists and values still show (the reported
+    //    "reselect entity → no components"). Same component set exercises the
+    //    producer dedup that resync must defeat.
+    auto ball2 = world.entity("Ball2");
+    ball2.set<Physics>({ false, 42.0 });
+    pump(20); // let the entity list pick up Ball2
+
+    check("entity list now has 2 entities", entityList->count() == 2);
+    // Select the other entity, then come back to the original.
+    const int firstRow = entityList->currentRow();
+    const int otherRow = firstRow == 0 ? 1 : 0;
+    entityList->setCurrentRow(otherRow);
+    pump(20);
+    entityList->setCurrentRow(firstRow);
+    pump(20);
+    check("re-selecting an entity still lists its components", compList->count() > 0);
+    if (compList->count() > 0)
+    {
+        compList->setCurrentRow(0);
+        pump(25);
+        check("values show again after returning to the entity",
+              !valueOf(QStringLiteral("mass")).isEmpty());
     }
-    check("mirrored value populated: mass == 7.5", sawMass);
-    check("mirrored value populated: isStatic == true", sawStatic);
 
     mirror.detach();
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);

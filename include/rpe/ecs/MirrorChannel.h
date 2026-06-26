@@ -55,6 +55,11 @@ namespace rpe
         void setInterest(qulonglong entity, const QString& componentName, const QStringList& leafPaths);
         void clearInterest();
         void queueEdit(const QString& path, rttr::variant value);
+        // The consumer reset its view (e.g. re-selected the same entity/component,
+        // or rebound the property tree). The producer dedups publishes against what
+        // it last sent, so without this it would NOT resend identical data and the
+        // reset view would stay empty. Call this to force one full resend.
+        void requestResync();
 
         // ── GUI thread: results ──────────────────────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out);
@@ -75,6 +80,7 @@ namespace rpe
             QString required;
             QStringList paths;
             std::vector<std::pair<QString, rttr::variant>> edits; // drained
+            bool resync = false; // consumer reset its view → resend everything
         };
         Intent takeIntent();
         void publishEntities(const QVector<EntityEntry>& entities);
@@ -94,6 +100,7 @@ namespace rpe
         QStringList _inPaths;
         QString _required;
         std::vector<std::pair<QString, rttr::variant>> _edits;
+        bool _resync = false; // set by requestResync(), drained by takeIntent()
 
         // sim -> GUI
         QVector<EntityEntry> _outEntities;

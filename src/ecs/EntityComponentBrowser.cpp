@@ -346,9 +346,28 @@ namespace rpe
             return; // direct mode uses _onEntitySelected
         }
         _mirrorEntity = id;
-        _mirrorComponent.clear();
-        _propertyEditor->unbind();
-        _pushInterest();
+        // Force a full resend: re-selecting the same entity (e.g. after a filter
+        // dropped then restored it) leaves the producer's caches unchanged, so the
+        // component list / values would otherwise never repopulate.
+        _channel->requestResync();
+
+        // Re-bind the property tree to the component that stays selected across the
+        // entity switch. Entities usually share a component set, so the component
+        // list doesn't change and won't re-emit a selection — without re-binding
+        // here the property panel would go blank on every entity change until the
+        // user re-clicks the (already-selected) component. If the new entity lacks
+        // it, the component list republish will correct the selection a frame later.
+        const QString comp = _componentList->currentComponentName();
+        if (!comp.isEmpty())
+        {
+            _onComponentNameSelected(comp); // rebinds + resync + pushes interest
+        }
+        else
+        {
+            _mirrorComponent.clear();
+            _propertyEditor->unbind();
+            _pushInterest();
+        }
     }
 
     void EntityComponentBrowser::_onComponentNameSelected(const QString& name)
@@ -367,6 +386,10 @@ namespace rpe
             _propertyEditor->bindType(t); // schema only — no instance/world touch
             _propertyEditor->expandAll();
         }
+        // bindType reset the property tree to empty values; force a full resend so
+        // the values repopulate even when re-selecting the same component (whose
+        // values are unchanged, so the producer would otherwise dedup them away).
+        _channel->requestResync();
         _pushInterest();
     }
 

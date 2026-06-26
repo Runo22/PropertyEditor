@@ -46,6 +46,11 @@ namespace rpe
         // via componentNameSelected.
         void setComponentNames(const QStringList& names);
 
+        // Currently-selected component name, or empty if none. Used to re-bind the
+        // property tree to the same component after an entity switch (the list keeps
+        // its selection but doesn't re-emit when the component set is unchanged).
+        QString currentComponentName() const;
+
     signals:
         void componentSelected(ComponentInfo info);      // direct mode (world available)
         void componentNameSelected(const QString& name); // mirror mode

@@ -33,6 +33,12 @@ namespace rpe
         _edits.emplace_back(path, std::move(value));
     }
 
+    void MirrorChannel::requestResync()
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _resync = true;
+    }
+
     // ── GUI thread: results ─────────────────────────────────────────────────────
 
     bool MirrorChannel::pollEntities(QVector<EntityEntry>& out)
@@ -83,6 +89,8 @@ namespace rpe
         in.required = _required;
         in.paths = _inPaths;
         in.edits.swap(_edits);
+        in.resync = _resync;
+        _resync = false;
         return in;
     }
 

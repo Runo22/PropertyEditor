@@ -255,6 +255,18 @@ namespace rpe
         const QStringList& paths = in.paths;
         auto& edits = in.edits;
 
+        // The GUI reset its view (re-selected the same entity/component, or its
+        // selection was cleared and restored). We dedup publishes against what we
+        // last sent, so without dropping those caches we would skip resending
+        // byte-identical data and the reset view would stay empty. Clear them so
+        // this pump resends the entity list, the component list and the values.
+        if (in.resync)
+        {
+            _lastValueStr.clear();
+            _lastComponents.clear();
+            _lastEntities.clear();
+        }
+
         // Interest changed → reset per-leaf dedup so the new selection refreshes fully.
         if (entity != _lastInterestEntity || component != _lastInterestComponent)
         {
@@ -271,7 +283,7 @@ namespace rpe
         // entities, so it is throttled — the visible set rarely changes.
         const bool requiredChanged = (required != _lastRequired);
         _lastRequired = required;
-        const bool scanEntities = requiredChanged || (_entityScanTick++ % 6 == 0);
+        const bool scanEntities = requiredChanged || in.resync || (_entityScanTick++ % 6 == 0);
         if (scanEntities && _haveQuery)
         {
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);

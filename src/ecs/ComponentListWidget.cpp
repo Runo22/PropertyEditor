@@ -133,6 +133,12 @@ namespace rpe
         }
     }
 
+    QString ComponentListWidget::currentComponentName() const
+    {
+        auto* item = _list->currentItem();
+        return item ? item->text() : QString();
+    }
+
     void ComponentListWidget::clearEntity()
     {
         _components.clear();
