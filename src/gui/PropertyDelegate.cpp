@@ -321,27 +321,27 @@ namespace rpe
                 }
             }
         }
-        else if (auto* cb = qobject_cast<QComboBox*>(editor))
+        else if (auto* combo = qobject_cast<QComboBox*>(editor))
         {
             if (t.is_enumeration())
             {
-                newVal = t.get_enumeration().name_to_value(cb->currentText().toStdString());
+                newVal = t.get_enumeration().name_to_value(combo->currentText().toStdString());
             }
         }
-        else if (auto* sb = qobject_cast<QDoubleSpinBox*>(editor))
+        else if (auto* dsb = qobject_cast<QDoubleSpinBox*>(editor))
         {
             if (t == rttr::type::get<float>())
             {
-                newVal = static_cast<float>(sb->value());
+                newVal = static_cast<float>(dsb->value());
             }
             else
             {
-                newVal = sb->value();
+                newVal = dsb->value();
             }
         }
-        else if (auto* sb = qobject_cast<QSpinBox*>(editor))
+        else if (auto* isb = qobject_cast<QSpinBox*>(editor))
         {
-            newVal = sb->value();
+            newVal = isb->value();
         }
 
         if (newVal.is_valid())
