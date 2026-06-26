@@ -89,8 +89,9 @@ namespace rpe
                 if (!enabled)
                     return;
 
-                const QRect btn = glyphRect(opt).adjusted(3, 3, -3, -3);
-                const QRect img = btn.adjusted(2, 2, -2, -2);
+                // Tight: the button fills the row-height square (1px breathing room),
+                // and the icon fills the button, so the trash/check read clearly.
+                const QRect btn = glyphRect(opt).adjusted(1, 1, -1, -1);
                 const QString name = index.data(Qt::DisplayRole).toString();
                 p->save();
                 p->setRenderHint(QPainter::Antialiasing, true);
@@ -100,8 +101,8 @@ namespace rpe
                     // Armed: warning-coloured button + white check ("click to confirm").
                     p->setPen(Qt::NoPen);
                     p->setBrush(QColor(0xD9, 0x53, 0x4F));
-                    p->drawRoundedRect(btn, 4, 4);
-                    p->drawPixmap(img, confirmPixmap());
+                    p->drawRoundedRect(btn, 3, 3);
+                    p->drawPixmap(btn, confirmPixmap());
                 }
                 else
                 {
@@ -109,13 +110,13 @@ namespace rpe
                     if (hover)
                     {
                         QColor bg = opt.palette.color(QPalette::Text);
-                        bg.setAlpha(28);
+                        bg.setAlpha(32);
                         p->setPen(Qt::NoPen);
                         p->setBrush(bg);
-                        p->drawRoundedRect(btn, 4, 4);
+                        p->drawRoundedRect(btn, 3, 3);
                     }
-                    p->setOpacity(hover ? 1.0 : 0.6);
-                    p->drawPixmap(img, removePixmap());
+                    p->setOpacity(hover ? 1.0 : 0.7);
+                    p->drawPixmap(btn, removePixmap());
                 }
                 p->restore();
             }
