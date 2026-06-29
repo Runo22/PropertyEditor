@@ -195,4 +195,13 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     # Dev-only: regenerates resources/icons/*.png (the committed icons the GUI uses).
     add_executable(rpe_makeicons tools/make_icons.cpp)
     target_link_libraries(rpe_makeicons PRIVATE Qt5::Gui)
+
+    add_executable(rpe_rttr_order_test test/rttr_order_test.cpp)
+    target_link_libraries(rpe_rttr_order_test PRIVATE rpe_core)
+
+    add_executable(rpe_flecs_naming_test test/flecs_naming_test.cpp)
+    target_link_libraries(rpe_flecs_naming_test PRIVATE rpe_gui)
+
+    add_executable(rpe_namespaced_components_gui_test test/namespaced_components_gui_test.cpp)
+    target_link_libraries(rpe_namespaced_components_gui_test PRIVATE rpe_gui)
 endif()

@@ -44,6 +44,20 @@ namespace rpe
             return pm;
         }
 
+        // Leaf (unscoped) name for display, from a full path "game.Transform" /
+        // "game::Transform" → "Transform".
+        QString componentLeaf(const QString& path)
+        {
+            int p = path.lastIndexOf(QStringLiteral("::"));
+            int s = 2;
+            if (p < 0)
+            {
+                p = path.lastIndexOf(QLatin1Char('.'));
+                s = 1;
+            }
+            return p >= 0 ? path.mid(p + s) : path;
+        }
+
         // Per-row remove affordance with a two-step confirm. A row's trailing icon
         // is normally the trash (remove.png). Clicking it once "arms" that row: the
         // icon becomes a warning-coloured button (confirm.png). Clicking again
@@ -383,23 +397,31 @@ namespace rpe
         {
             return; // unchanged → keep selection, no flicker
         }
-        // Drop a pending delete-confirm if its component is no longer present.
-        if (auto* del = static_cast<RemoveButtonDelegate*>(_rowDelegate); del && !names.contains(del->confirmName))
+        // `names` are full scoped paths; the rows DISPLAY the leaf but carry the
+        // path (Qt::UserRole) so selection/resolution stay unambiguous.
+        // Drop a pending delete-confirm (keyed on the leaf) if it is no longer shown.
+        if (auto* del = static_cast<RemoveButtonDelegate*>(_rowDelegate); del && !del->confirmName.isEmpty())
         {
-            del->clearConfirm();
+            bool stillThere = false;
+            for (const QString& path : names)
+                stillThere |= (componentLeaf(path) == del->confirmName);
+            if (!stillThere)
+                del->clearConfirm();
         }
         _mirrorNames = names;
         _components.clear(); // mirror mode has no world-backed infos
 
-        const QString prevSel = _list->currentItem() ? _list->currentItem()->text() : QString();
+        // Preserve selection across the rebuild by PATH (Qt::UserRole).
+        const QString prevSelPath = _list->currentItem() ? _list->currentItem()->data(Qt::UserRole).toString() : QString();
 
         _list->blockSignals(true);
         _list->clear();
         QListWidgetItem* reselect = nullptr;
-        for (const QString& n : names)
+        for (const QString& path : names)
         {
-            auto* item = new QListWidgetItem(n, _list);
-            if (n == prevSel)
+            auto* item = new QListWidgetItem(componentLeaf(path), _list);
+            item->setData(Qt::UserRole, path); // full path (string) → mirror mode
+            if (path == prevSelPath)
             {
                 reselect = item;
             }
@@ -423,7 +445,14 @@ namespace rpe
     QString ComponentListWidget::currentComponentName() const
     {
         auto* item = _list->currentItem();
-        return item ? item->text() : QString();
+        if (!item)
+        {
+            return {};
+        }
+        // Mirror mode stores the full path (string) in UserRole; direct mode stores
+        // an int index. Return the path in mirror mode, else the displayed leaf.
+        const QVariant ud = item->data(Qt::UserRole);
+        return ud.type() == QVariant::String ? ud.toString() : item->text();
     }
 
     void ComponentListWidget::clearEntity()
@@ -444,11 +473,22 @@ namespace rpe
             emit componentDeselected();
             return;
         }
-        emit componentNameSelected(item->text()); // world-free; mirror mode
-        const int idx = item->data(Qt::UserRole).toInt();
-        if (idx >= 0 && idx < _components.size())
+        // Mirror mode: UserRole holds the full path (string) → emit that so the
+        // browser resolves the exact type. Direct mode: UserRole holds an int index
+        // into _components → emit the world-backed info.
+        const QVariant ud = item->data(Qt::UserRole);
+        if (ud.type() == QVariant::String)
         {
-            emit componentSelected(_components[idx]);
+            emit componentNameSelected(ud.toString());
+        }
+        else
+        {
+            emit componentNameSelected(item->text());
+            const int idx = ud.toInt();
+            if (idx >= 0 && idx < _components.size())
+            {
+                emit componentSelected(_components[idx]);
+            }
         }
     }
 

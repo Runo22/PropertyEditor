@@ -437,11 +437,17 @@ namespace rpe
             {
                 return;
             }
-            if (!TypeBridge::resolveByName(n).is_valid())
+            // Identify the component by its FULL scoped path ("game.Transform"),
+            // which is unique even when two components share a leaf name. The GUI
+            // displays the leaf; resolveByName matches the path exactly against the
+            // RTTR full name. (Pass the path, not the leaf, so resolution is
+            // unambiguous.)
+            const flecs::string p = id.entity().path(".", "");
+            const QString qn = QString::fromUtf8(p.c_str());
+            if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
             {
                 return;
             }
-            const QString qn = QString::fromUtf8(n);
             comps.append(qn);
             if (qn == component)
             {

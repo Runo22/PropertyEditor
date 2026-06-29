@@ -32,11 +32,50 @@ namespace rpe
             return r;
         }
 
-        // The segment after the last "::" (or the whole string if none).
+        // Normalise scope separators: flecs paths use "." (e.g. "game.Transform"),
+        // RTTR names use "::" (e.g. "game::Transform"). Compare them on equal terms
+        // by collapsing both to "::".
+        std::string normalizeScopes(std::string s)
+        {
+            std::string out;
+            out.reserve(s.size());
+            for (size_t i = 0; i < s.size(); ++i)
+            {
+                if (s[i] == '.')
+                {
+                    out += "::";
+                }
+                else if (s[i] == ':' && i + 1 < s.size() && s[i + 1] == ':')
+                {
+                    out += "::";
+                    ++i;
+                }
+                else
+                {
+                    out += s[i];
+                }
+            }
+            return out;
+        }
+
+        // The final segment, after the last "." or "::" (or the whole string).
         std::string shortName(const std::string& s)
         {
-            const auto pos = s.rfind("::");
-            return pos == std::string::npos ? s : s.substr(pos + 2);
+            const auto dc = s.rfind("::");
+            const auto dot = s.rfind('.');
+            size_t pos = std::string::npos;
+            size_t skip = 0;
+            if (dc != std::string::npos)
+            {
+                pos = dc;
+                skip = 2;
+            }
+            if (dot != std::string::npos && (pos == std::string::npos || dot > pos))
+            {
+                pos = dot;
+                skip = 1;
+            }
+            return pos == std::string::npos ? s : s.substr(pos + skip);
         }
 
     } // namespace
@@ -100,16 +139,23 @@ namespace rpe
             }
         }
 
-        // 2) Exact RTTR name that is also bridged.
+        // 2) Exact full-name match, separator-insensitive: a flecs path like
+        //    "game.Transform" matches the RTTR type "game::Transform". This is the
+        //    UNAMBIGUOUS path — pass the full flecs component path here and two
+        //    components that share a short name ("Panel") still resolve correctly.
+        const std::string normName = normalizeScopes(name);
         for (const auto& [id, entry] : r.map)
         {
-            if (entry.type.get_name().to_string() == name)
+            if (normalizeScopes(entry.type.get_name().to_string()) == normName)
             {
                 return entry.type;
             }
         }
 
-        // 3) Short name match (flecs short names vs. scoped RTTR registrations).
+        // 3) Short-name match (flecs leaf name vs. scoped RTTR registration). This
+        //    is a best-effort fallback and is AMBIGUOUS if two bridged types share a
+        //    short name — it returns the first found. Prefer passing a full path so
+        //    step 2 resolves first.
         const std::string target = shortName(name);
         for (const auto& [id, entry] : r.map)
         {

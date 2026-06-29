@@ -388,21 +388,13 @@ namespace rpe
 
     void EntityComponentBrowser::_updateAddable()
     {
-        // Offer every catalogued component the entity does not already have. The
-        // catalog carries full scoped paths (for namespace grouping); the entity's
-        // current components are leaf names — compare on the leaf.
+        // Offer every catalogued component the entity does not already have. Both
+        // the catalog and the entity's current components are full scoped paths now,
+        // so compare directly.
         QStringList addable;
         for (const QString& full : _catalog)
         {
-            int cut = full.lastIndexOf(QStringLiteral("::"));
-            int sep = 2;
-            if (cut < 0)
-            {
-                cut = full.lastIndexOf(QLatin1Char('.'));
-                sep = 1;
-            }
-            const QString leaf = cut >= 0 ? full.mid(cut + sep) : full;
-            if (!_currentComps.contains(leaf))
+            if (!_currentComps.contains(full))
             {
                 addable.append(full);
             }
@@ -498,9 +490,9 @@ namespace rpe
             return; // direct mode uses _onComponentSelected
         }
         _mirrorComponent = name;
-        // The list shows flecs' short component name; resolveByName bridges it to the
-        // registered RTTR type (which may be scoped or named differently) so the
-        // schema binds. Plain get_by_name would miss those and show no properties.
+        // `name` is the component's full flecs path (the list displays only the
+        // leaf). resolveByName matches it exactly against the RTTR type — even when
+        // two components share a leaf name — so the schema binds to the right type.
         const rttr::type t = TypeBridge::resolveByName(name.toUtf8().constData());
         if (t.is_valid())
         {
