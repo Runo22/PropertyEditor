@@ -105,5 +105,10 @@ int main()
     show("ui.Panel");   // full path — should resolve ui::Panel (props=1)
     show("hud.Panel");  // full path — should resolve hud::Panel (props=2)
 
+    printf("\nUSER CASE — core/game::Transform registered with SHORT name \"Transform\",\n"
+           "flecs gives path \"game.Transform\"; resolution must still work via leaf fallback:\n");
+    show("game.Transform"); // the path the inspector actually passes
+    show("Transform");      // the leaf
+
     return 0;
 }
