@@ -4,6 +4,7 @@
 
 #include <QEvent>
 #include <QFrame>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
@@ -13,6 +14,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QScreen>
 #include <QStyledItemDelegate>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -322,8 +324,29 @@ namespace rpe
         });
 
         popup->setMinimumWidth(qMax(200, _list->width()));
+
+        // Position it under the button, then clamp fully inside the screen so it
+        // never overflows the window edge. The button is right-aligned in the
+        // header, so prefer aligning the popup's RIGHT edge to the button's (grows
+        // leftward), and flip above if there's no room below.
+        const QPoint anchorBR = _addBtn->mapToGlobal(_addBtn->rect().bottomRight());
+        const QScreen* scr = QGuiApplication::screenAt(anchorBR);
+        const QRect avail = (scr ? scr : QGuiApplication::primaryScreen())->availableGeometry();
+        popup->setMaximumHeight(qMax(140, avail.height() - 40));
         popup->adjustSize();
-        popup->move(_addBtn->mapToGlobal(_addBtn->rect().bottomLeft()));
+        const QSize sz = popup->size();
+
+        int x = anchorBR.x() - sz.width();
+        int y = anchorBR.y();
+        if (y + sz.height() > avail.bottom())
+        {
+            const int aboveY = _addBtn->mapToGlobal(_addBtn->rect().topRight()).y() - sz.height();
+            if (aboveY >= avail.top())
+                y = aboveY;
+        }
+        x = qBound(avail.left(), x, avail.right() - sz.width() + 1);
+        y = qBound(avail.top(), y, avail.bottom() - sz.height() + 1);
+        popup->move(x, y);
         popup->show();
         search->setFocus();
     }
