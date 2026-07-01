@@ -8,8 +8,10 @@
 #include <QVector>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 
 #include "rpe/ecs/flecs_prelude.h"
 #include "rpe/ecs/MirrorChannel.h"
@@ -138,7 +140,12 @@ namespace rpe
 
         flecs::world* _world = nullptr;
         flecs::system _system {};
-        flecs::query<> _entityQuery {}; // cached: built once at attach, never in pump()
+        flecs::query<> _entityQuery {};    // cached: built once at attach, never in pump()
+        flecs::query<> _componentQuery {}; // cached: all components, for the bridged-id set
+        // flecs ids of the components that resolve to a bridged RTTR type. Refreshed
+        // during the (throttled) entity scan so the per-entity check is an O(1) hash
+        // lookup instead of a resolveByName() registry scan per component.
+        std::unordered_set<uint64_t> _bridgedIds;
         bool _haveSystem = false;
         bool _haveQuery = false;
 

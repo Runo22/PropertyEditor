@@ -139,6 +139,8 @@ namespace rpe
         _haveQuery = false;
         _haveSystem = false;
         _entityQuery = flecs::query<>();
+        _componentQuery = flecs::query<>();
+        _bridgedIds.clear();
         _system = flecs::system();
         _world = nullptr;
     }
@@ -150,6 +152,8 @@ namespace rpe
         // bridged component (and the optional required filter), so the cached query
         // never needs rebuilding.
         _entityQuery = _world->query_builder().with(flecs::Any).build();
+        // Cached query over all component types, used to (re)build the bridged-id set.
+        _componentQuery = _world->query_builder().with<flecs::Component>().build();
         _haveQuery = true;
 
         // A term-less system is a task: its run callback fires once per frame inside
@@ -345,33 +349,74 @@ namespace rpe
         // entities, so it is throttled — the visible set rarely changes.
         const bool requiredChanged = (required != _lastRequired);
         _lastRequired = required;
-        const bool scanEntities = requiredChanged || in.resync || (_entityScanTick++ % 6 == 0);
+        const bool scanEntities = requiredChanged || in.resync || (_entityScanTick++ % 10 == 0);
         if (scanEntities && _haveQuery)
         {
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);
+
+            // Refresh the set of bridged component ids (and locate the required one).
+            // This runs resolveByName once per COMPONENT TYPE (a few dozen), not once
+            // per component-instance per entity — so the entity scan below is O(1) id
+            // lookups instead of O(registry) string work per component.
+            _bridgedIds.clear();
+            uint64_t reqId = 0;
+            _componentQuery.each([&](flecs::entity comp) {
+                const char* cn = comp.name();
+                if (!cn || cn[0] == '\0')
+                {
+                    return;
+                }
+                const flecs::string path = comp.path(".", "");
+                if (path.c_str() && QString::fromUtf8(path.c_str()).startsWith(QStringLiteral("flecs")))
+                {
+                    return; // skip flecs' own components
+                }
+                if (TypeBridge::resolveByName(path.c_str()).is_valid())
+                {
+                    _bridgedIds.insert(comp.raw_id());
+                }
+                if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
+                {
+                    reqId = comp.raw_id();
+                }
+            });
+
+            // Narrow the entity query to the required component when the filter
+            // changes: flecs then visits ONLY entities that have it, instead of every
+            // entity in the world. This is the big win for large worlds with a
+            // filtered view. Rebuilt only on change (cheap, rare).
+            if (requiredChanged)
+            {
+                flecs::world w = world; // the (non-staged) world in immediate mode
+                if (!reqShort.isEmpty() && reqId)
+                {
+                    _entityQuery = w.query_builder().with(reqId).build();
+                }
+                else if (reqShort.isEmpty())
+                {
+                    _entityQuery = w.query_builder().with(flecs::Any).build();
+                }
+            }
+
+            // A list of more than a few thousand entities is not usefully browsable;
+            // cap it so an unfiltered scan of a huge world can't spend all its time
+            // building labels. (Use the required-component filter to narrow instead.)
+            constexpr int kMaxEntities = 5000;
             QVector<EntityEntry> ents;
             _entityQuery.each([&](flecs::entity ent) {
-                if (!ent.is_alive())
+                if (ents.size() >= kMaxEntities || !ent.is_alive())
                 {
                     return;
                 }
                 bool hasBridged = false;
                 bool hasReq = reqShort.isEmpty();
                 ent.each([&](flecs::id id) {
-                    if (!id.is_entity())
-                    {
-                        return;
-                    }
-                    const char* cn = id.entity().name();
-                    if (!cn || cn[0] == '\0')
-                    {
-                        return;
-                    }
-                    if (TypeBridge::resolveByName(cn).is_valid())
+                    const uint64_t rid = id.raw_id();
+                    if (_bridgedIds.count(rid))
                     {
                         hasBridged = true;
                     }
-                    if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
+                    if (reqId && rid == reqId)
                     {
                         hasReq = true;
                     }
@@ -392,7 +437,7 @@ namespace rpe
         // The set of bridged component names in the world, for the GUI's "add
         // component" picker. Scanning every component is cheap but not free, so it is
         // throttled like the entity scan (the catalog rarely changes).
-        const bool scanCatalog = in.resync || structuralApplied || (_catalogScanTick++ % 12 == 0);
+        const bool scanCatalog = in.resync || structuralApplied || (_catalogScanTick++ % 30 == 0);
         if (scanCatalog)
         {
             QStringList catalog;

@@ -199,6 +199,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_rttr_order_test test/rttr_order_test.cpp)
     target_link_libraries(rpe_rttr_order_test PRIVATE rpe_core)
 
+    add_executable(rpe_mirror_bench test/mirror_bench.cpp)
+    target_link_libraries(rpe_mirror_bench PRIVATE rpe_gui)
+
     add_executable(rpe_flecs_naming_test test/flecs_naming_test.cpp)
     target_link_libraries(rpe_flecs_naming_test PRIVATE rpe_gui)
 
