@@ -322,15 +322,18 @@ namespace rpe
         }
 
         // The GUI reset its view (re-selected the same entity/component, or its
-        // selection was cleared and restored). We dedup publishes against what we
-        // last sent, so without dropping those caches we would skip resending
-        // byte-identical data and the reset view would stay empty. Clear them so
-        // this pump resends the entity list, the component list and the values.
+        // selection was cleared and restored) and wants the data resent. The GUI can
+        // raise this at ~30 Hz, so it MUST be cheap: re-publish the already-cached
+        // lists rather than forcing an expensive full re-scan (that feedback loop —
+        // slow sim → resync every frame → full scan every frame — is what pins the
+        // simulation at a few fps). The interest values are re-read below (cheap: a
+        // handful of watched paths).
         if (in.resync)
         {
             _lastValueStr.clear();
-            _lastComponents.clear();
-            _lastEntities.clear();
+            _ch->publishEntities(_lastEntities);
+            _ch->publishComponents(_lastComponents);
+            _ch->publishCatalog(_lastCatalog);
         }
 
         // Interest changed → reset per-leaf dedup so the new selection refreshes fully.
@@ -349,7 +352,7 @@ namespace rpe
         // entities, so it is throttled — the visible set rarely changes.
         const bool requiredChanged = (required != _lastRequired);
         _lastRequired = required;
-        const bool scanEntities = requiredChanged || in.resync || (_entityScanTick++ % 10 == 0);
+        const bool scanEntities = requiredChanged || (_entityScanTick++ % 10 == 0);
         if (scanEntities && _haveQuery)
         {
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);
@@ -437,7 +440,7 @@ namespace rpe
         // The set of bridged component names in the world, for the GUI's "add
         // component" picker. Scanning every component is cheap but not free, so it is
         // throttled like the entity scan (the catalog rarely changes).
-        const bool scanCatalog = in.resync || structuralApplied || (_catalogScanTick++ % 30 == 0);
+        const bool scanCatalog = structuralApplied || (_catalogScanTick++ % 30 == 0);
         if (scanCatalog)
         {
             QStringList catalog;
