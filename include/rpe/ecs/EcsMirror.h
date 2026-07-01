@@ -8,6 +8,7 @@
 #include <QVector>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -86,13 +87,33 @@ namespace rpe
         // left installed; it costs nothing per frame and is reaped at world fini (or
         // reused if you attach() again). This is what makes "the runtime owning the
         // world tears down before the editor owning the mirror" safe.
-        void attach(flecs::world* world); // registers the per-frame system
+        // How the per-frame snapshot/apply is driven:
+        enum class PumpMode
+        {
+            // Registers a once-per-frame flecs system (default; zero integration).
+            // Under world.set_threads() that system is immediate(), which forces a
+            // thread sync barrier every frame — cheap on most setups, but if your
+            // sim runs at thousands of fps the per-frame barrier can dominate.
+            System,
+            // No system is registered; YOU call pump() once per loop, right AFTER
+            // world.progress() returns. The world is fully merged and the workers
+            // are idle at that point, so there is no barrier and no data race —
+            // the lowest-overhead option for a fast multi-threaded sim.
+            Manual,
+        };
+        void attach(flecs::world* world, PumpMode mode = PumpMode::System);
         void detach();
         void pump(); // one snapshot/apply cycle (sim thread); uses the bound world
         bool isAttached() const
         {
             return _world != nullptr;
         }
+
+        // Cap how often the snapshot/apply actually runs, in wall-clock terms,
+        // regardless of how fast the sim ticks (or how often you call pump()). The
+        // GUI only needs ~30–60 Hz, so on a fast sim this avoids doing the work
+        // thousands of times per second. 0 = run every time (default). Set e.g. 60.
+        void setMaxPumpRateHz(double hz);
 
         // ── GUI thread: intent ───────────────────────────────────────────────────
         void setRequiredComponent(const QString& componentName); // entity-list filter
@@ -129,6 +150,9 @@ namespace rpe
         // entity ops are safe under flecs staging / multi-threaded progress.
         void _pumpImpl(const flecs::world& world);
         static void _installTrampoline(ecs_world_t* world, void* ctx);
+        // Wall-clock rate limiter: true (and stamps the clock) if enough time has
+        // passed since the last pump; false to skip this one. Sim-thread only.
+        bool _rateAllows();
 
         std::shared_ptr<MirrorChannel> _ch; // shared with the GUI consumer
 
@@ -139,6 +163,10 @@ namespace rpe
         std::shared_ptr<MirrorLiveToken> _alive;
 
         flecs::world* _world = nullptr;
+        PumpMode _mode = PumpMode::System;
+        // Minimum wall-clock gap between pumps (0 = every pump). See setMaxPumpRateHz.
+        std::chrono::duration<double> _minPumpGap { 0.0 };
+        std::chrono::steady_clock::time_point _lastPump {};
         flecs::system _system {};
         flecs::query<> _entityQuery {};    // cached: built once at attach, never in pump()
         flecs::query<> _componentQuery {}; // cached: all components, for the bridged-id set

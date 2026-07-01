@@ -70,7 +70,7 @@ namespace rpe
         _ch->markProducerGone();
     }
 
-    void EcsMirror::attach(flecs::world* world)
+    void EcsMirror::attach(flecs::world* world, PumpMode mode)
     {
         // MUST be called on the simulation thread (the one that runs progress()).
         // Creating the system + query are structural changes; a flecs world is
@@ -81,7 +81,12 @@ namespace rpe
         // plugin at runtime — the world is readonly and installing now would
         // crash. In that case we defer the install to ecs_run_post_frame, which
         // runs at frame-end on this same thread, after readonly mode is lifted.
+        //
+        // PumpMode::Manual registers no system — you call pump() yourself after
+        // world.progress(). That avoids the per-frame immediate() sync barrier, which
+        // can dominate on a fast, thread-contended sim (e.g. uncapped fps).
         detach();
+        _mode = mode;
         _world = world;
         if (!_world)
         {
@@ -156,6 +161,12 @@ namespace rpe
         _componentQuery = _world->query_builder().with<flecs::Component>().build();
         _haveQuery = true;
 
+        // Manual mode: no system. The host calls pump() itself after progress().
+        if (_mode == PumpMode::Manual)
+        {
+            return;
+        }
+
         // A term-less system is a task: its run callback fires once per frame inside
         // world.progress(), on the simulation thread. The captured 'alive' token
         // makes the callback a no-op once this EcsMirror is detached/destroyed — the
@@ -185,7 +196,7 @@ namespace rpe
                           // flight finishes first and a later pump sees alive==false
                           // and bails before touching the dead `this`.
                           std::lock_guard<std::mutex> lk(token->pumpMutex);
-                          if (!token->alive.load(std::memory_order_acquire))
+                          if (!token->alive.load(std::memory_order_acquire) || !_rateAllows())
                           {
                               return;
                           }
@@ -248,6 +259,26 @@ namespace rpe
 
     // ── simulation thread ───────────────────────────────────────────────────────
 
+    void EcsMirror::setMaxPumpRateHz(double hz)
+    {
+        _minPumpGap = std::chrono::duration<double>(hz > 0.0 ? 1.0 / hz : 0.0);
+    }
+
+    bool EcsMirror::_rateAllows()
+    {
+        if (_minPumpGap.count() <= 0.0)
+        {
+            return true;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - _lastPump < _minPumpGap)
+        {
+            return false;
+        }
+        _lastPump = now;
+        return true;
+    }
+
     void EcsMirror::pump()
     {
         if (!_world)
@@ -256,9 +287,9 @@ namespace rpe
         }
         // Same synchronisation as the registered system: hold the pump lock so a
         // concurrent detach()/destructor on another thread waits this out and never
-        // marks the mirror dead mid-pump.
+        // marks the mirror dead mid-pump. Call this once per loop, AFTER progress().
         std::lock_guard<std::mutex> lk(_alive->pumpMutex);
-        if (!_alive->alive.load(std::memory_order_acquire))
+        if (!_alive->alive.load(std::memory_order_acquire) || !_rateAllows())
         {
             return;
         }

@@ -129,7 +129,12 @@ static QWidget* makeEcsTab(QWidget* parent)
 
     noXform.set<Physics>({});
 
-    mirror.attach(&world); // registers the system
+    // Manual pump mode: no per-frame system, so there is no immediate() sync
+    // barrier — the recommended setup for a fast / uncapped multi-threaded sim.
+    // We call mirror.pump() ourselves after world.progress() (see the loop below).
+    // The GUI only needs ~60 Hz, so cap the pump rate regardless of sim fps.
+    mirror.attach(&world, rpe::EcsMirror::PumpMode::Manual);
+    mirror.setMaxPumpRateHz(60.0);
 
     auto* browser = new rpe::EntityComponentBrowser(parent);
     browser->setMirror(&mirror); // instead of setWorld — GUI never touches world
@@ -158,7 +163,8 @@ static QWidget* makeEcsTab(QWidget* parent)
                 pc->velocity.x = std::cos(t) * 3.0;
                 pc->mass = 90.0 + std::sin(t);
             }
-            world.progress(0.016f); // mirror's system runs here, on this thread
+            world.progress(0.016f);
+            mirror.pump(); // snapshot AFTER progress: world merged, workers idle → no barrier
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
     });
