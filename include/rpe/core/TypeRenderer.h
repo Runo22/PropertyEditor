@@ -17,6 +17,13 @@ namespace rpe
         // Human-readable one-line representation of a value.
         static QString toDisplayString(const rttr::variant& v);
 
+        // How many digits floats/doubles show after the decimal point (default 3).
+        // Values are formatted fixed-point — never scientific notation — with
+        // trailing zeros trimmed; anything that rounds to zero displays as "0"
+        // (e.g. 2.5e-05 → "0", 0.5 → "0.5", 1.2345 → "1.234" at the default).
+        static void setFloatDecimals(int decimals);
+        static int floatDecimals();
+
         // True if the type should expand into child rows (struct or sequence).
         static bool isExpandable(rttr::type t);
 

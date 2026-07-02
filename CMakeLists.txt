@@ -162,6 +162,9 @@ if(RPE_BUILD_DEMO)
 endif()
 
 if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
+    add_executable(rpe_display_format_test test/display_format_test.cpp)
+    target_link_libraries(rpe_display_format_test PRIVATE rpe_core)
+
     add_executable(rpe_mirror_test test/mirror_test.cpp)
     target_link_libraries(rpe_mirror_test PRIVATE rpe_gui)
 

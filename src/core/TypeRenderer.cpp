@@ -3,11 +3,63 @@
 #include <QColor>
 #include <QStringList>
 
+#include <atomic>
+#include <cmath>
+
 #include <rttr/enumeration.h>
 #include <rttr/variant_sequential_view.h>
 
 namespace rpe
 {
+
+    namespace
+    {
+        std::atomic<int> g_floatDecimals { 3 };
+
+        // Fixed-point float display: never scientific notation. Trailing zeros (and
+        // a bare trailing dot) are trimmed, so 0.5 stays "0.5" and anything smaller
+        // than the last shown digit collapses to "0" (not "2.5e-05", not "-0").
+        QString formatFloating(double v)
+        {
+            if (std::isnan(v) || std::isinf(v))
+            {
+                return QString::number(v); // "nan" / "inf"
+            }
+            // Magnitudes this large are unreadable as fixed-point anyway; fall back
+            // to the compact form rather than printing a 15+ digit run.
+            if (std::abs(v) >= 1e15)
+            {
+                return QString::number(v, 'g', 8);
+            }
+            QString s = QString::number(v, 'f', g_floatDecimals.load(std::memory_order_relaxed));
+            if (s.contains(QLatin1Char('.')))
+            {
+                while (s.endsWith(QLatin1Char('0')))
+                {
+                    s.chop(1);
+                }
+                if (s.endsWith(QLatin1Char('.')))
+                {
+                    s.chop(1);
+                }
+            }
+            if (s == QLatin1String("-0"))
+            {
+                s = QStringLiteral("0");
+            }
+            return s;
+        }
+    } // namespace
+
+    void TypeRenderer::setFloatDecimals(int decimals)
+    {
+        g_floatDecimals.store(decimals < 0 ? 0 : decimals, std::memory_order_relaxed);
+    }
+
+    int TypeRenderer::floatDecimals()
+    {
+        return g_floatDecimals.load(std::memory_order_relaxed);
+    }
 
     rttr::type TypeRenderer::rawType(rttr::type t)
     {
@@ -76,11 +128,11 @@ namespace rpe
         }
         if (t == rttr::type::get<float>())
         {
-            return QString::number(static_cast<double>(v.get_value<float>()), 'g', 6);
+            return formatFloating(static_cast<double>(v.get_value<float>()));
         }
         if (t == rttr::type::get<double>())
         {
-            return QString::number(v.get_value<double>(), 'g', 8);
+            return formatFloating(v.get_value<double>());
         }
         if (t == rttr::type::get<std::string>())
         {
