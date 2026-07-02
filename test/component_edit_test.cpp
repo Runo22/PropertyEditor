@@ -12,8 +12,11 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QKeyEvent>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QThread>
+#include <QToolButton>
 
 #include <cstdio>
 
@@ -148,6 +151,59 @@ int main(int argc, char* argv[])
                 hasSprite = true;
         });
         check("namespaced component added by full path", hasSprite);
+    }
+
+    // ── Keyboard flow in the add popup ────────────────────────────────────────
+    // Open the real popup, type a filter (the box keeps focus), press Enter: the
+    // best (first visible) match must be added and the popup closed.
+    // Current entity: Velocity + Sprite → addable: Health, Position.
+    {
+        QToolButton* addBtn = browser.componentList()->findChild<QToolButton*>();
+        addBtn->click();
+        QCoreApplication::processEvents();
+        QWidget* popup = QApplication::activePopupWidget();
+        check("add popup opened", popup != nullptr);
+        if (popup)
+        {
+            auto* search = popup->findChild<QLineEdit*>();
+            check("filter box has focus", search && popup->focusWidget() == search);
+            search->setText(QStringLiteral("Pos")); // filters + highlights Position
+            QCoreApplication::processEvents();
+            QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(search, &enter);
+            QCoreApplication::processEvents();
+            check("Enter closed the popup", QApplication::activePopupWidget() == nullptr);
+        }
+        pump(25);
+        bool hasPos = false;
+        world.entity(static_cast<flecs::entity_t>(e.id())).each([&](flecs::id id) {
+            if (id.is_entity() && id.entity().name() && QString::fromUtf8(id.entity().name()) == QStringLiteral("Position"))
+                hasPos = true;
+        });
+        check("filter + Enter added the best match (Position)", hasPos);
+    }
+
+    // Arrow navigation: open again (addable now only Health), Down then Enter.
+    {
+        browser.componentList()->findChild<QToolButton*>()->click();
+        QCoreApplication::processEvents();
+        QWidget* popup = QApplication::activePopupWidget();
+        auto* search = popup ? popup->findChild<QLineEdit*>() : nullptr;
+        if (search)
+        {
+            QKeyEvent down(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+            QCoreApplication::sendEvent(search, &down); // walks the visible options
+            QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(search, &enter);
+            QCoreApplication::processEvents();
+        }
+        pump(25);
+        bool hasHealth = false;
+        world.entity(static_cast<flecs::entity_t>(e.id())).each([&](flecs::id id) {
+            if (id.is_entity() && id.entity().name() && QString::fromUtf8(id.entity().name()) == QStringLiteral("Health"))
+                hasHealth = true;
+        });
+        check("arrow + Enter added the highlighted option (Health)", hasHealth);
     }
 
     mirror.detach();

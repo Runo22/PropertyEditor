@@ -7,6 +7,7 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -45,6 +46,25 @@ namespace rpe
             static const QPixmap pm(QStringLiteral(":/rpe/icons/confirm.png"));
             return pm;
         }
+
+        // Forwards key presses to a callback; used to drive the add-popup's tree
+        // from the filter box (arrows/enter/escape) without moving focus away from
+        // typing. Plain QObject override — no Q_OBJECT/moc needed.
+        class PopupKeyRouter : public QObject
+        {
+        public:
+            using QObject::QObject;
+            std::function<bool(QKeyEvent*)> onKey; // return true = consumed
+
+            bool eventFilter(QObject* obj, QEvent* ev) override
+            {
+                if (ev->type() == QEvent::KeyPress && onKey && onKey(static_cast<QKeyEvent*>(ev)))
+                {
+                    return true;
+                }
+                return QObject::eventFilter(obj, ev);
+            }
+        };
 
         // Leaf (unscoped) name for display, from a full path "game.Transform" /
         // "game::Transform" → "Transform".
@@ -303,7 +323,26 @@ namespace rpe
         connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
         connect(tree, &QTreeWidget::itemActivated, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
 
-        connect(search, &QLineEdit::textChanged, tree, [tree](const QString& q) {
+        // The selectable (visible, non-group) options, in top-to-bottom order —
+        // the sequence the arrow keys walk and Enter picks from.
+        auto visibleLeaves = [tree]() {
+            QList<QTreeWidgetItem*> out;
+            for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            {
+                QTreeWidgetItem* g = tree->topLevelItem(i);
+                if (g->isHidden())
+                    continue;
+                for (int j = 0; j < g->childCount(); ++j)
+                {
+                    QTreeWidgetItem* c = g->child(j);
+                    if (!c->isHidden() && !c->data(0, Qt::UserRole).toString().isEmpty())
+                        out.append(c);
+                }
+            }
+            return out;
+        };
+
+        connect(search, &QLineEdit::textChanged, tree, [tree, visibleLeaves](const QString& q) {
             const QString s = q.trimmed();
             for (int i = 0; i < tree->topLevelItemCount(); ++i)
             {
@@ -321,7 +360,57 @@ namespace rpe
                 if (shown)
                     g->setExpanded(true);
             }
+            // Highlight the best (first visible) match so Enter picks it directly.
+            const QList<QTreeWidgetItem*> leaves = visibleLeaves();
+            tree->setCurrentItem(leaves.isEmpty() ? nullptr : leaves.first());
         });
+
+        // Keyboard driving from the filter box: Up/Down walk the visible options
+        // (focus stays in the box so typing continues), Enter adds the highlighted
+        // option — or the best match when none is highlighted — and Esc closes.
+        auto* keys = new PopupKeyRouter(popup);
+        keys->onKey = [tree, popup, visibleLeaves, activate](QKeyEvent* ke) -> bool {
+            switch (ke->key())
+            {
+            case Qt::Key_Down:
+            case Qt::Key_Up:
+            {
+                const QList<QTreeWidgetItem*> leaves = visibleLeaves();
+                if (leaves.isEmpty())
+                    return true;
+                int idx = leaves.indexOf(tree->currentItem());
+                idx = (ke->key() == Qt::Key_Down) ? qMin(idx + 1, leaves.size() - 1) : qMax(idx - 1, 0);
+                tree->setCurrentItem(leaves[idx]);
+                tree->scrollToItem(leaves[idx]);
+                return true;
+            }
+            case Qt::Key_Return:
+            case Qt::Key_Enter:
+            {
+                QTreeWidgetItem* cur = tree->currentItem();
+                if (!cur || cur->isHidden() || cur->data(0, Qt::UserRole).toString().isEmpty())
+                {
+                    const QList<QTreeWidgetItem*> leaves = visibleLeaves();
+                    cur = leaves.isEmpty() ? nullptr : leaves.first();
+                }
+                activate(cur);
+                return true;
+            }
+            case Qt::Key_Escape:
+                popup->close();
+                return true;
+            default:
+                return false; // let the line edit handle typing
+            }
+        };
+        search->installEventFilter(keys);
+
+        // Pre-highlight the first option so a bare Enter adds it immediately.
+        {
+            const QList<QTreeWidgetItem*> leaves = visibleLeaves();
+            if (!leaves.isEmpty())
+                tree->setCurrentItem(leaves.first());
+        }
 
         popup->setMinimumWidth(qMax(200, _list->width()));
 
