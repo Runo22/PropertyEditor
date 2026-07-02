@@ -85,6 +85,12 @@ int main(int argc, char** argv)
     const double idle = timeFrames(world, F);
     printf("  mirror attached, no interest  : %7.3f ms/frame  (%.0f fps)\n", idle, 1000.0 / idle);
 
+    // Recommended config for uncapped sims: pump at most 60x/sec.
+    mirror.setMaxPumpRateHz(60.0);
+    const double capped = timeFrames(world, F);
+    printf("  mirror + setMaxPumpRateHz(60) : %7.3f ms/frame  (%.0f fps)\n", capped, 1000.0 / capped);
+    mirror.setMaxPumpRateHz(0.0);
+
     mirror.setInterest(eid, "Position", { "x", "y", "z" });
     const double active = timeFrames(world, F);
     printf("  mirror attached, with interest: %7.3f ms/frame  (%.0f fps)\n", active, 1000.0 / active);

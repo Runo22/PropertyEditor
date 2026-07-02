@@ -10,9 +10,10 @@ namespace rpe
 
     namespace
     {
-        // Heap context for the deferred-install trampoline (its ctx is a raw void*
-        // that the trampoline frees).
-        struct InstallCtx
+        // Heap context for the ecs_run_post_frame trampolines (deferred install and
+        // the frame-end pump). Its ctx is a raw void* that the trampoline frees; the
+        // shared token lets it no-op safely if the mirror died in the meantime.
+        struct DeferredCtx
         {
             std::shared_ptr<MirrorLiveToken> alive;
             EcsMirror* self;
@@ -83,8 +84,8 @@ namespace rpe
         // runs at frame-end on this same thread, after readonly mode is lifted.
         //
         // PumpMode::Manual registers no system — you call pump() yourself after
-        // world.progress(). That avoids the per-frame immediate() sync barrier, which
-        // can dominate on a fast, thread-contended sim (e.g. uncapped fps).
+        // world.progress(). PumpMode::System (default) registers a task that defers
+        // the snapshot to frame-end; neither mode stalls the multi-threaded pipeline.
         detach();
         _mode = mode;
         _world = world;
@@ -100,7 +101,7 @@ namespace rpe
         ecs_world_t* w = _world->c_ptr();
         if (ecs_stage_is_readonly(w))
         {
-            ecs_run_post_frame(w, &EcsMirror::_installTrampoline, new InstallCtx { _alive, this });
+            ecs_run_post_frame(w, &EcsMirror::_installTrampoline, new DeferredCtx { _alive, this });
         }
         else
         {
@@ -110,7 +111,7 @@ namespace rpe
 
     void EcsMirror::_installTrampoline(ecs_world_t*, void* ctx)
     {
-        auto* c = static_cast<InstallCtx*>(ctx);
+        auto* c = static_cast<DeferredCtx*>(ctx);
         // alive==false → the EcsMirror was destroyed before frame-end; do not
         // touch it. Else, skip if it was detached (or already installed) meanwhile.
         if (c->alive->alive.load(std::memory_order_acquire) && c->self->_world && !c->self->_haveSystem)
@@ -168,41 +169,53 @@ namespace rpe
         }
 
         // A term-less system is a task: its run callback fires once per frame inside
-        // world.progress(), on the simulation thread. The captured 'alive' token
-        // makes the callback a no-op once this EcsMirror is detached/destroyed — the
-        // system is intentionally left installed after teardown (it just no-ops) and
-        // is reaped at world fini, so it never destructs itself mid-run.
+        // world.progress(), on the simulation thread (flecs runs non-multi_threaded
+        // ops on stage 0 only). The captured 'alive' token makes the callback a
+        // no-op once this EcsMirror is detached/destroyed — the system is
+        // intentionally left installed after teardown (it just no-ops) and is reaped
+        // at world fini, so it never destructs itself mid-run.
         //
-        // immediate(): the system declares no components, so under multi-threaded
-        // progress (world.set_threads) flecs would otherwise run it CONCURRENTLY
-        // with the systems that mutate components (it thinks the task touches
-        // nothing) — pump() would then read components while workers write them.
-        // Running immediate forces a sync point and runs the task single-threaded
-        // on a merged, consistent world, so reads are race-free.
+        // The callback does NOT touch the world (workers may be mutating components
+        // concurrently — the task declares no terms, so flecs schedules it without a
+        // sync point). Instead it schedules the actual snapshot via
+        // ecs_run_post_frame, which ecs_frame_end executes on this same thread AFTER
+        // the pipeline finished: world merged, readonly over, workers idle — so the
+        // read is race-free WITHOUT the per-frame sync barrier that immediate() would
+        // force. On an uncapped sim that barrier used to dominate (thousands of
+        // worker syncs per second); this way the world never stalls for the mirror.
         auto token = _alive;
         _system = _world->system("rpe::EcsMirror")
                       .kind(flecs::PostUpdate)
-                      .immediate()
                       .run([this, token](flecs::iter& it) {
-                          // In immediate mode it.world() is the real (non-staged)
-                          // world; entity ops are valid and consistent here.
-                          flecs::world stage = it.world();
+                          ecs_world_t* stage = it.world().c_ptr();
                           while (it.next())
                           { /* task: no tables to iterate */
                           }
-                          // Hold the pump lock across the whole snapshot/apply: this
-                          // is what makes teardown safe. detach()/~EcsMirror take the
-                          // same lock before marking the mirror dead, so a pump in
-                          // flight finishes first and a later pump sees alive==false
-                          // and bails before touching the dead `this`.
+                          // Rate-gate at schedule time (under the pump lock — this may
+                          // be dead otherwise) so a skipped frame costs no allocation.
                           std::lock_guard<std::mutex> lk(token->pumpMutex);
                           if (!token->alive.load(std::memory_order_acquire) || !_rateAllows())
                           {
                               return;
                           }
-                          _pumpImpl(stage);
+                          ecs_run_post_frame(stage, &EcsMirror::_pumpTrampoline, new DeferredCtx { token, this });
                       });
         _haveSystem = true;
+    }
+
+    void EcsMirror::_pumpTrampoline(ecs_world_t*, void* ctx)
+    {
+        // Runs inside ecs_frame_end on the sim thread: pipeline done, world merged,
+        // readonly over, workers idle — the safe window to read components.
+        auto* c = static_cast<DeferredCtx*>(ctx);
+        {
+            std::lock_guard<std::mutex> lk(c->alive->pumpMutex);
+            if (c->alive->alive.load(std::memory_order_acquire) && c->self->_world)
+            {
+                c->self->_pumpImpl(*c->self->_world);
+            }
+        }
+        delete c;
     }
 
     // ── GUI thread: intent / results — delegate to the shared channel ───────────

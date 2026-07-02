@@ -90,15 +90,16 @@ namespace rpe
         // How the per-frame snapshot/apply is driven:
         enum class PumpMode
         {
-            // Registers a once-per-frame flecs system (default; zero integration).
-            // Under world.set_threads() that system is immediate(), which forces a
-            // thread sync barrier every frame — cheap on most setups, but if your
-            // sim runs at thousands of fps the per-frame barrier can dominate.
+            // Registers a once-per-frame flecs task (default; zero integration —
+            // you don't change your loop). The task itself never touches the world
+            // (no sync barrier under world.set_threads()); it defers the snapshot to
+            // frame-end via ecs_run_post_frame, which runs on the sim thread after
+            // the pipeline merged and the workers went idle — race-free, barrier-free.
             System,
             // No system is registered; YOU call pump() once per loop, right AFTER
-            // world.progress() returns. The world is fully merged and the workers
-            // are idle at that point, so there is no barrier and no data race —
-            // the lowest-overhead option for a fast multi-threaded sim.
+            // world.progress() returns (world merged, workers idle). Equivalent
+            // safety/cost to System — use it when you want explicit control of when
+            // the snapshot runs.
             Manual,
         };
         void attach(flecs::world* world, PumpMode mode = PumpMode::System);
@@ -146,10 +147,13 @@ namespace rpe
 
     private:
         void _install();
-        // Core of pump(); `world` is the stage handed in by the system iterator so
-        // entity ops are safe under flecs staging / multi-threaded progress.
+        // Core of pump(). Always runs on the sim thread with the world merged and
+        // the workers idle (frame-end trampoline, or manual pump() after progress()).
         void _pumpImpl(const flecs::world& world);
         static void _installTrampoline(ecs_world_t* world, void* ctx);
+        // Frame-end pump (System mode): scheduled by the per-frame task via
+        // ecs_run_post_frame; runs on the sim thread with the world merged.
+        static void _pumpTrampoline(ecs_world_t* world, void* ctx);
         // Wall-clock rate limiter: true (and stamps the clock) if enough time has
         // passed since the last pump; false to skip this one. Sim-thread only.
         bool _rateAllows();
