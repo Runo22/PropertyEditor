@@ -102,6 +102,10 @@ namespace rpe
             // the snapshot runs.
             Manual,
         };
+        // Only the UNDERLYING world must stay alive — the flecs::world wrapper you
+        // pass may be a temporary (e.g. a stack wrapper around an engine-provided
+        // ecs_world_t* in a plugin); the mirror stores the raw world pointer, never
+        // the wrapper's address.
         void attach(flecs::world* world, PumpMode mode = PumpMode::System);
         void detach();
         void pump(); // one snapshot/apply cycle (sim thread); uses the bound world
@@ -166,7 +170,12 @@ namespace rpe
         // fresh token is created per attach() (see attach()).
         std::shared_ptr<MirrorLiveToken> _alive;
 
-        flecs::world* _world = nullptr;
+        // The UNDERLYING world (ecs_world_t*), not the caller's flecs::world wrapper
+        // object: the wrapper passed to attach() may be a temporary/stack object
+        // (common in plugins that wrap an engine-provided pointer) and can die right
+        // after attach() returns. The raw pointer stays valid for the world's whole
+        // life; scoped flecs::world wrappers are built from it where needed.
+        ecs_world_t* _world = nullptr;
         PumpMode _mode = PumpMode::System;
         // Minimum wall-clock gap between pumps (0 = every pump). See setMaxPumpRateHz.
         std::chrono::duration<double> _minPumpGap { 0.0 };

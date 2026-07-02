@@ -88,7 +88,11 @@ namespace rpe
         // the snapshot to frame-end; neither mode stalls the multi-threaded pipeline.
         detach();
         _mode = mode;
-        _world = world;
+        // Keep only the underlying world pointer. The flecs::world WRAPPER the
+        // caller passes may be a temporary (e.g. a stack wrapper around an
+        // engine-provided ecs_world_t* in a plugin) and often dies right after
+        // attach() returns — its address must never be stored or dereferenced later.
+        _world = world ? world->c_ptr() : nullptr;
         if (!_world)
         {
             return;
@@ -98,7 +102,7 @@ namespace rpe
         // can never come back to life through this new attach. (The system entity is
         // reused — same name — so re-attach revives exactly one system per world.)
         _alive = std::make_shared<MirrorLiveToken>();
-        ecs_world_t* w = _world->c_ptr();
+        ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
             ecs_run_post_frame(w, &EcsMirror::_installTrampoline, new DeferredCtx { _alive, this });
@@ -153,13 +157,18 @@ namespace rpe
 
     void EcsMirror::_install()
     {
+        // Scoped wrapper over the raw world pointer (claims/releases a poly ref —
+        // balanced, never finalises a world the host still owns). Safe here: the
+        // world is alive during attach()/the deferred install at frame-end.
+        flecs::world w(_world);
+
         // Build the entity query ONCE here (never inside the readonly system). It
         // matches *all* entities (flecs::Any); pump() filters to those with a
         // bridged component (and the optional required filter), so the cached query
         // never needs rebuilding.
-        _entityQuery = _world->query_builder().with(flecs::Any).build();
+        _entityQuery = w.query_builder().with(flecs::Any).build();
         // Cached query over all component types, used to (re)build the bridged-id set.
-        _componentQuery = _world->query_builder().with<flecs::Component>().build();
+        _componentQuery = w.query_builder().with<flecs::Component>().build();
         _haveQuery = true;
 
         // Manual mode: no system. The host calls pump() itself after progress().
@@ -184,7 +193,7 @@ namespace rpe
         // force. On an uncapped sim that barrier used to dominate (thousands of
         // worker syncs per second); this way the world never stalls for the mirror.
         auto token = _alive;
-        _system = _world->system("rpe::EcsMirror")
+        _system = w.system("rpe::EcsMirror")
                       .kind(flecs::PostUpdate)
                       .run([this, token](flecs::iter& it) {
                           ecs_world_t* stage = it.world().c_ptr();
@@ -203,16 +212,19 @@ namespace rpe
         _haveSystem = true;
     }
 
-    void EcsMirror::_pumpTrampoline(ecs_world_t*, void* ctx)
+    void EcsMirror::_pumpTrampoline(ecs_world_t* world, void* ctx)
     {
         // Runs inside ecs_frame_end on the sim thread: pipeline done, world merged,
-        // readonly over, workers idle — the safe window to read components.
+        // readonly over, workers idle — the safe window to read components. `world`
+        // is the live world pointer flecs hands the action — build a scoped wrapper
+        // from it (never dereference any caller-owned wrapper object).
         auto* c = static_cast<DeferredCtx*>(ctx);
         {
             std::lock_guard<std::mutex> lk(c->alive->pumpMutex);
             if (c->alive->alive.load(std::memory_order_acquire) && c->self->_world)
             {
-                c->self->_pumpImpl(*c->self->_world);
+                flecs::world w(world);
+                c->self->_pumpImpl(w);
             }
         }
         delete c;
@@ -306,7 +318,8 @@ namespace rpe
         {
             return;
         }
-        _pumpImpl(*_world);
+        flecs::world w(_world); // scoped wrapper; the caller guarantees the world is alive here
+        _pumpImpl(w);
     }
 
     void EcsMirror::_pumpImpl(const flecs::world& world)

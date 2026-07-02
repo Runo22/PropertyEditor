@@ -81,6 +81,35 @@ int main()
     check("rate cap throttles rapid pumps (<=2 updates for 20 calls)", updates <= 2 && updates >= 1);
 
     mirror.detach();
+
+    // ── Temporary-wrapper attach (plugin pattern) ─────────────────────────────
+    // A plugin typically receives a raw ecs_world_t* and wraps it in a STACK
+    // flecs::world that dies right after attach() returns. The mirror must store
+    // the underlying world pointer, never the wrapper's address — otherwise the
+    // frame-end pump dereferences a dangling wrapper (access violation in
+    // ecs_get_world, e.g. from scanComponents).
+    {
+        flecs::world host; // the engine-owned world (outlives everything)
+        host.set_threads(4);
+        auto he = host.entity("H").set<Comp>({ 5.5 });
+        rpe::EcsMirror m2;
+        {
+            flecs::world tempWrapper(host.c_ptr()); // scoped wrapper: dies below
+            m2.attach(&tempWrapper);                // default System mode
+        } // tempWrapper destroyed here — before any pump ran
+        m2.setInterest(static_cast<qulonglong>(he.id()), "Comp", { "mass" });
+        double got = -1;
+        for (int i = 0; i < 10; ++i)
+        {
+            host.progress(0.016f); // frame-end pump must not touch the dead wrapper
+            for (auto& u : m2.pollValues())
+                if (u.path == "mass")
+                    got = u.value.to_double();
+        }
+        check("attach via temporary wrapper survives + mirrors (mass==5.5)", got == 5.5);
+        m2.detach();
+    }
+
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;
 }
