@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/rpe">
+        <file>icons/add.png</file>
+        <file>icons/remove.png</file>
+        <file>icons/confirm.png</file>
+    </qresource>
+</RCC>

@@ -5,14 +5,17 @@
 #include "rpe/gui/EditorWidgets.h"
 #include "rpe/gui/PropertyModel.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLineEdit>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
+#include <QStyle>
 
 #include <limits>
 
@@ -66,6 +69,28 @@ namespace rpe
         : QStyledItemDelegate(parent)
         , _model(model)
     {
+    }
+
+    void PropertyDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const
+    {
+        // While an inline editor is open over this value cell, paint ONLY the item
+        // background — not the value text/decoration. Otherwise the previous value
+        // (e.g. "true") bleeds through editors that don't fully fill the cell, most
+        // visibly a QCheckBox (which paints just its indicator) or a QColor swatch.
+        // The editor widget itself sits on top of this background.
+        if (!_editPath.isEmpty() && index.data(PropertyPathRole).toString() == _editPath)
+        {
+            QStyleOptionViewItem opt(option);
+            initStyleOption(&opt, index);
+            opt.text.clear();
+            opt.icon = QIcon();
+            opt.features &= ~(QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration);
+            const QWidget* w = opt.widget;
+            QStyle* style = w ? w->style() : QApplication::style();
+            style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, w);
+            return;
+        }
+        QStyledItemDelegate::paint(painter, option, index);
     }
 
     QWidget* PropertyDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const
@@ -321,27 +346,27 @@ namespace rpe
                 }
             }
         }
-        else if (auto* cb = qobject_cast<QComboBox*>(editor))
+        else if (auto* combo = qobject_cast<QComboBox*>(editor))
         {
             if (t.is_enumeration())
             {
-                newVal = t.get_enumeration().name_to_value(cb->currentText().toStdString());
+                newVal = t.get_enumeration().name_to_value(combo->currentText().toStdString());
             }
         }
-        else if (auto* sb = qobject_cast<QDoubleSpinBox*>(editor))
+        else if (auto* dsb = qobject_cast<QDoubleSpinBox*>(editor))
         {
             if (t == rttr::type::get<float>())
             {
-                newVal = static_cast<float>(sb->value());
+                newVal = static_cast<float>(dsb->value());
             }
             else
             {
-                newVal = sb->value();
+                newVal = dsb->value();
             }
         }
-        else if (auto* sb = qobject_cast<QSpinBox*>(editor))
+        else if (auto* isb = qobject_cast<QSpinBox*>(editor))
         {
-            newVal = sb->value();
+            newVal = isb->value();
         }
 
         if (newVal.is_valid())

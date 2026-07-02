@@ -5,6 +5,10 @@ project(rpe LANGUAGES CXX)
 option(RPE_WITH_FLECS      "Build the flecs ECS integration layer" ON)
 option(RPE_BUILD_DEMO      "Build the demo/test application"       ON)
 option(RPE_USE_SYSTEM_DEPS "Resolve rttr/flecs via find_package instead of FetchContent" OFF)
+# flecs MUST be one shared instance when the world crosses a DLL/plugin boundary
+# (host owns the world, plugin inspects it). Default to shared; set OFF only for
+# a single-binary build.
+option(RPE_FLECS_SHARED    "Build/link flecs as a shared library (DLL)" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,7 +59,7 @@ else()
 endif()
 
 if(RPE_WITH_FLECS)
-    if(NOT TARGET flecs::flecs_static AND NOT TARGET flecs::flecs)
+    if(NOT TARGET flecs::flecs AND NOT TARGET flecs::flecs_static)
         if(RPE_USE_SYSTEM_DEPS)
             find_package(flecs CONFIG REQUIRED)
         else()
@@ -63,15 +67,21 @@ if(RPE_WITH_FLECS)
                 GIT_REPOSITORY https://github.com/SanderMertens/flecs.git
                 GIT_TAG        v4.1.5
                 GIT_SHALLOW    TRUE)
-            set(FLECS_STATIC ON  CACHE BOOL "" FORCE)
-            set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
+            if(RPE_FLECS_SHARED)
+                set(FLECS_SHARED ON  CACHE BOOL "" FORCE)
+                set(FLECS_STATIC OFF CACHE BOOL "" FORCE)
+            else()
+                set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
+                set(FLECS_STATIC ON  CACHE BOOL "" FORCE)
+            endif()
             FetchContent_MakeAvailable(flecs)
         endif()
     endif()
-    if(TARGET flecs::flecs_static)
-        set(RPE_FLECS_TARGET flecs::flecs_static)
-    else()
+    # Prefer the shared target — a single flecs instance across DLL boundaries.
+    if(TARGET flecs::flecs)
         set(RPE_FLECS_TARGET flecs::flecs)
+    else()
+        set(RPE_FLECS_TARGET flecs::flecs_static)
     endif()
 endif()
 
@@ -118,6 +128,9 @@ if(RPE_WITH_FLECS)
         src/ecs/ComponentListWidget.cpp
         src/ecs/EntityComponentBrowser.cpp
         src/ecs/EcsMirror.cpp
+        src/ecs/MirrorChannel.cpp
+        src/ecs/ComponentScan.cpp
+        resources/rpe_resources.qrc
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
         include/rpe/ecs/EntityComponentBrowser.h)
@@ -151,4 +164,50 @@ endif()
 if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_mirror_test test/mirror_test.cpp)
     target_link_libraries(rpe_mirror_test PRIVATE rpe_gui)
+
+    add_executable(rpe_mirror_runtime_attach_test test/mirror_runtime_attach_test.cpp)
+    target_link_libraries(rpe_mirror_runtime_attach_test PRIVATE rpe_gui)
+
+    add_executable(rpe_mirror_lifetime_test test/mirror_lifetime_test.cpp)
+    target_link_libraries(rpe_mirror_lifetime_test PRIVATE rpe_gui)
+
+    add_executable(rpe_mirror_teardown_test test/mirror_teardown_test.cpp)
+    target_link_libraries(rpe_mirror_teardown_test PRIVATE rpe_gui)
+
+    add_executable(rpe_mirror_threaded_test test/mirror_threaded_test.cpp)
+    target_link_libraries(rpe_mirror_threaded_test PRIVATE rpe_gui)
+
+    add_executable(rpe_mirror_manual_test test/mirror_manual_test.cpp)
+    target_link_libraries(rpe_mirror_manual_test PRIVATE rpe_gui)
+
+    add_executable(rpe_mirror_concurrent_destroy_test test/mirror_concurrent_destroy_test.cpp)
+    target_link_libraries(rpe_mirror_concurrent_destroy_test PRIVATE rpe_gui)
+
+    add_executable(rpe_browser_mirror_gui_test test/browser_mirror_gui_test.cpp)
+    target_link_libraries(rpe_browser_mirror_gui_test PRIVATE rpe_gui)
+
+    add_executable(rpe_typebridge_test test/typebridge_test.cpp)
+    target_link_libraries(rpe_typebridge_test PRIVATE rpe_gui)
+
+    add_executable(rpe_component_edit_test test/component_edit_test.cpp)
+    target_link_libraries(rpe_component_edit_test PRIVATE rpe_gui)
+
+    add_executable(rpe_screenshot test/screenshot_tool.cpp)
+    target_link_libraries(rpe_screenshot PRIVATE rpe_gui)
+
+    # Dev-only: regenerates resources/icons/*.png (the committed icons the GUI uses).
+    add_executable(rpe_makeicons tools/make_icons.cpp)
+    target_link_libraries(rpe_makeicons PRIVATE Qt5::Gui)
+
+    add_executable(rpe_rttr_order_test test/rttr_order_test.cpp)
+    target_link_libraries(rpe_rttr_order_test PRIVATE rpe_core)
+
+    add_executable(rpe_mirror_bench test/mirror_bench.cpp)
+    target_link_libraries(rpe_mirror_bench PRIVATE rpe_gui)
+
+    add_executable(rpe_flecs_naming_test test/flecs_naming_test.cpp)
+    target_link_libraries(rpe_flecs_naming_test PRIVATE rpe_gui)
+
+    add_executable(rpe_namespaced_components_gui_test test/namespaced_components_gui_test.cpp)
+    target_link_libraries(rpe_namespaced_components_gui_test PRIVATE rpe_gui)
 endif()

@@ -1,11 +1,14 @@
 #include "rpe/ecs/EntityComponentBrowser.h"
 
+#include "rpe/core/TypeBridge.h"
+#include "rpe/ecs/ComponentScan.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityListWidget.h"
 #include "rpe/gui/PropertyEditor.h"
 
 #include <QCheckBox>
 #include <QSplitter>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -29,39 +32,23 @@ namespace rpe
 
     void EntityComponentBrowser::_setupUi()
     {
-        auto* layout = new QVBoxLayout(this);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(2);
+        _mainLayout = new QVBoxLayout(this);
+        _mainLayout->setContentsMargins(0, 0, 0, 0);
+        _mainLayout->setSpacing(2);
 
-        auto* hSplit = new QSplitter(Qt::Horizontal, this);
-
-        _entityList = new EntityListWidget(hSplit);
-        hSplit->addWidget(_entityList);
-
-        auto* right = new QWidget(hSplit);
-        auto* rLayout = new QVBoxLayout(right);
-        rLayout->setContentsMargins(0, 0, 0, 0);
-        rLayout->setSpacing(2);
-
-        _writeCheck = new QCheckBox(tr("Write edits back to world"), right);
+        // Create the panels once, parented to `this`. _applyLayout() re-parents
+        // them into the chosen splitter tree (and can swap it later).
+        _writeCheck = new QCheckBox(tr("Write edits back to world"), this);
         _writeCheck->setToolTip(tr(
             "On: edits modify the live component.\n"
             "Off: edits are pinned as overrides only."));
-        rLayout->addWidget(_writeCheck);
+        _mainLayout->addWidget(_writeCheck);
 
-        auto* vSplit = new QSplitter(Qt::Vertical, right);
-        _componentList = new ComponentListWidget(vSplit);
-        _propertyEditor = new PropertyEditor(vSplit);
-        vSplit->addWidget(_componentList);
-        vSplit->addWidget(_propertyEditor);
-        vSplit->setStretchFactor(0, 1);
-        vSplit->setStretchFactor(1, 3);
-        rLayout->addWidget(vSplit, 1);
+        _entityList = new EntityListWidget(this);
+        _componentList = new ComponentListWidget(this);
+        _propertyEditor = new PropertyEditor(this);
 
-        hSplit->addWidget(right);
-        hSplit->setStretchFactor(0, 1);
-        hSplit->setStretchFactor(1, 2);
-        layout->addWidget(hSplit);
+        _applyLayout(_browserLayout);
 
         // The editor needs the *current* component pointer at read/write time.
         // We relink a persistent wrapper so the returned instance stays valid for
@@ -82,22 +69,89 @@ namespace rpe
         connect(_componentList, &ComponentListWidget::componentSelected, this, &EntityComponentBrowser::_onComponentSelected);
         connect(_componentList, &ComponentListWidget::componentNameSelected, this, &EntityComponentBrowser::_onComponentNameSelected);
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
+        connect(_componentList, &ComponentListWidget::addComponentRequested, this, &EntityComponentBrowser::_onAddComponent);
+        connect(_componentList, &ComponentListWidget::removeComponentRequested, this, &EntityComponentBrowser::_onRemoveComponent);
         connect(_propertyEditor, &PropertyEditor::propertyEdited, this, &EntityComponentBrowser::propertyEdited);
         connect(_writeCheck, &QCheckBox::toggled, this, &EntityComponentBrowser::_onWriteToggled);
     }
 
+    void EntityComponentBrowser::_applyLayout(Layout layout)
+    {
+        _browserLayout = layout;
+
+        // Build the new splitter tree. addWidget() re-parents the panels out of
+        // the previous tree, so deleting it afterwards won't take them with it.
+        QWidget* root = nullptr;
+        if (layout == Layout::Vertical)
+        {
+            auto* v = new QSplitter(Qt::Vertical);
+            v->addWidget(_entityList);
+            v->addWidget(_componentList);
+            v->addWidget(_propertyEditor);
+            v->setStretchFactor(0, 2);
+            v->setStretchFactor(1, 2);
+            v->setStretchFactor(2, 5);
+            v->setChildrenCollapsible(false);
+            root = v;
+        }
+        else
+        {
+            auto* h = new QSplitter(Qt::Horizontal);
+            h->addWidget(_entityList);
+            auto* vRight = new QSplitter(Qt::Vertical);
+            vRight->addWidget(_componentList);
+            vRight->addWidget(_propertyEditor);
+            vRight->setStretchFactor(0, 1);
+            vRight->setStretchFactor(1, 3);
+            vRight->setChildrenCollapsible(false);
+            h->addWidget(vRight);
+            h->setStretchFactor(0, 1);
+            h->setStretchFactor(1, 2);
+            h->setChildrenCollapsible(false);
+            root = h;
+        }
+
+        if (_layoutRoot)
+        {
+            _mainLayout->removeWidget(_layoutRoot);
+            _layoutRoot->deleteLater(); // panels already re-parented into `root`
+        }
+        _mainLayout->addWidget(root, 1);
+        _layoutRoot = root;
+    }
+
+    void EntityComponentBrowser::setBrowserLayout(Layout layout)
+    {
+        _settings.layout = layout;
+        if (layout != _browserLayout || !_layoutRoot)
+        {
+            _applyLayout(layout);
+        }
+    }
+
     void EntityComponentBrowser::setWorld(flecs::world* world)
     {
+        // Leave mirror mode if it was active (the two modes are exclusive).
+        if (_channel)
+        {
+            _channel.reset();
+            _mirrorTimer->stop();
+            _propertyEditor->setEditSink({});
+            _writeCheck->setVisible(true);
+        }
+
         _world = world;
         _entityList->setWorld(world);
         _liveTimer->stop();
         _componentList->clearEntity();
         _propertyEditor->unbind();
+        _applyEntityFilter(); // re-apply the configured filter to the new mode
     }
 
     void EntityComponentBrowser::setLiveUpdateIntervalMs(int ms)
     {
         _liveTimer->setInterval(ms);
+        _settings.liveUpdateIntervalMs = ms;
     }
 
     void EntityComponentBrowser::setWorldAccess(AccessGuard guard)
@@ -110,15 +164,46 @@ namespace rpe
         _propertyEditor->setWriteGuard(std::move(guard));
     }
 
-    void EntityComponentBrowser::setEntityComponentFilter(const QString& name, bool enabled)
+    void EntityComponentBrowser::_applyEntityFilter()
     {
+        const QString name = _settings.requiredComponent;
+        const bool enabled = _settings.requiredComponentEnabled && !name.isEmpty();
         _entityList->setRequiredComponent(name, enabled);
+        // In mirror mode the producer does the filtering — push the required
+        // component (or clear it when disabled) so the entity list actually narrows.
+        if (_channel)
+        {
+            _channel->setRequiredComponent(enabled ? name : QString());
+            _channel->requestResync();
+        }
     }
 
     void EntityComponentBrowser::setEditPolicy(EditPolicy p)
     {
+        _settings.editPolicy = p;
         _propertyEditor->setEditPolicy(p);
         _writeCheck->setChecked(p == EditPolicy::WriteBack);
+    }
+
+    void EntityComponentBrowser::setComponentEditingEnabled(bool on)
+    {
+        _settings.allowComponentEditing = on;
+        _componentList->setComponentEditingEnabled(on);
+    }
+
+    void EntityComponentBrowser::setSettings(const Settings& s)
+    {
+        _settings = s;
+        setBrowserLayout(s.layout);
+        setSnapshotOpenFieldsOnly(s.snapshotOpenFieldsOnly);
+        setLiveUpdateIntervalMs(s.liveUpdateIntervalMs);
+        if (_mirrorTimer)
+        {
+            _mirrorTimer->setInterval(s.mirrorPollIntervalMs);
+        }
+        setEditPolicy(s.editPolicy);
+        setComponentEditingEnabled(s.allowComponentEditing);
+        _applyEntityFilter();
     }
 
     void EntityComponentBrowser::_onWriteToggled(bool on)
@@ -202,48 +287,71 @@ namespace rpe
 
     void EntityComponentBrowser::setMirror(EcsMirror* mirror)
     {
-        _mirror = mirror;
+        // This touches QTimers / widgets, which is only valid on the widget's GUI
+        // thread. The mirror is typically created on the simulation thread, so
+        // callers often invoke this from there — marshal to the GUI thread.
+        // mirror->channel() (the only thing read off `mirror`) is thread-safe.
+        if (QThread::currentThread() != this->thread())
+        {
+            QMetaObject::invokeMethod(
+                this, [this, mirror] { setMirror(mirror); }, Qt::QueuedConnection);
+            return;
+        }
+
+        // Hold the shared channel, not the EcsMirror itself: the mirror may be
+        // destroyed on the sim thread before this widget; the channel survives via
+        // this shared_ptr so polling stays valid.
+        _channel = mirror ? mirror->channel() : nullptr;
         _world = nullptr; // mirror mode never touches the world directly
         _liveTimer->stop();
 
-        // Editor edits are queued to the sim thread; values flow back via the mirror.
-        if (_mirror)
+        // Editor edits are queued to the sim thread; values flow back via the channel.
+        if (_channel)
         {
             _propertyEditor->setEditPolicy(EditPolicy::Override);
-            _propertyEditor->setEditSink([this](const QString& path, const rttr::variant& v) {
-                _mirror->queueEdit(path, v);
+            auto ch = _channel; // capture the shared_ptr (not 'this' indirection)
+            _propertyEditor->setEditSink([ch](const QString& path, const rttr::variant& v) {
+                ch->queueEdit(path, v);
             });
+            // Mirror mode is fed via setEntries(); make sure the list never queries a
+            // (possibly stale) world, so a filter change re-filters the feed instead.
+            _entityList->setWorld(nullptr);
             _entityList->stopAutoRefresh();
+            // The "write back to world" toggle is meaningless in mirror mode (edits
+            // always go through the channel's edit queue), so hide it.
+            _writeCheck->setVisible(false);
             _mirrorTimer->start();
+            _applyEntityFilter(); // push the configured filter to the producer
         }
         else
         {
             _propertyEditor->setEditSink({});
+            _writeCheck->setVisible(true);
             _mirrorTimer->stop();
         }
     }
 
     void EntityComponentBrowser::_pushInterest()
     {
-        if (!_mirror)
+        if (!_channel)
         {
             return;
         }
         const QStringList paths = _mirrorComponent.isEmpty()
             ? QStringList()
             : _propertyEditor->visibleLeafPaths(_openFieldsOnly);
-        _mirror->setInterest(_mirrorEntity, _mirrorComponent, paths);
+        _channel->setInterest(_mirrorEntity, _mirrorComponent, paths);
     }
 
     void EntityComponentBrowser::_onMirrorPoll()
     {
-        if (!_mirror)
+        if (!_channel)
         {
             return;
         }
 
-        QVector<EcsMirror::EntityEntry> ents;
-        if (_mirror->pollEntities(ents))
+        QVector<MirrorChannel::EntityEntry> ents;
+        if (_channel->pollEntities(ents))
         {
             QVector<QPair<qulonglong, QString>> rows;
             rows.reserve(ents.size());
@@ -255,12 +363,21 @@ namespace rpe
         }
 
         QStringList comps;
-        if (_mirror->pollComponents(comps))
+        if (_channel->pollComponents(comps))
         {
             _componentList->setComponentNames(comps);
+            _currentComps = comps;
+            _updateAddable();
         }
 
-        for (auto& u : _mirror->pollValues())
+        QStringList catalog;
+        if (_channel->pollCatalog(catalog))
+        {
+            _catalog = catalog;
+            _updateAddable();
+        }
+
+        for (auto& u : _channel->pollValues())
         {
             _propertyEditor->setPropertyValue(u.path, u.value);
         }
@@ -269,31 +386,123 @@ namespace rpe
         _pushInterest();
     }
 
+    void EntityComponentBrowser::_updateAddable()
+    {
+        // Offer every catalogued component the entity does not already have. Both
+        // the catalog and the entity's current components are full scoped paths now,
+        // so compare directly.
+        QStringList addable;
+        for (const QString& full : _catalog)
+        {
+            if (!_currentComps.contains(full))
+            {
+                addable.append(full);
+            }
+        }
+        _componentList->setAddableComponents(addable);
+    }
+
+    void EntityComponentBrowser::_onAddComponent(const QString& name)
+    {
+        if (_mirrorEntity == 0 || name.isEmpty())
+        {
+            return;
+        }
+        if (_channel)
+        {
+            // Mirror mode: queue the structural change to the simulation thread.
+            _channel->queueStructural(MirrorChannel::StructuralKind::AddComponent, _mirrorEntity, name);
+            _channel->requestResync();
+        }
+        else if (_world)
+        {
+            // Direct mode: apply under the world guard (the GUI owns the world here).
+            withGuard(_guard, [&] {
+                flecs::entity comp = findComponentEntity(*_world, name);
+                if (comp.is_valid() && _selectedEntity.is_alive())
+                {
+                    _selectedEntity.add(comp);
+                }
+            });
+            _componentList->setEntity(_world, _selectedEntity);
+        }
+    }
+
+    void EntityComponentBrowser::_onRemoveComponent(const QString& name)
+    {
+        if (name.isEmpty())
+        {
+            return;
+        }
+        if (_channel && _mirrorEntity != 0)
+        {
+            _channel->queueStructural(MirrorChannel::StructuralKind::RemoveComponent, _mirrorEntity, name);
+            _channel->requestResync();
+        }
+        else if (_world && _selectedEntity.is_alive())
+        {
+            withGuard(_guard, [&] {
+                flecs::entity comp = findComponentEntity(*_world, name, /*bridgedOnly=*/false);
+                if (comp.is_valid())
+                {
+                    _selectedEntity.remove(comp);
+                }
+            });
+            _componentList->setEntity(_world, _selectedEntity);
+        }
+    }
+
     void EntityComponentBrowser::_onEntityIdSelected(qulonglong id)
     {
-        if (!_mirror)
+        if (!_channel)
         {
             return; // direct mode uses _onEntitySelected
         }
         _mirrorEntity = id;
-        _mirrorComponent.clear();
-        _propertyEditor->unbind();
-        _pushInterest();
+        // Force a full resend: re-selecting the same entity (e.g. after a filter
+        // dropped then restored it) leaves the producer's caches unchanged, so the
+        // component list / values would otherwise never repopulate.
+        _channel->requestResync();
+
+        // Re-bind the property tree to the component that stays selected across the
+        // entity switch. Entities usually share a component set, so the component
+        // list doesn't change and won't re-emit a selection — without re-binding
+        // here the property panel would go blank on every entity change until the
+        // user re-clicks the (already-selected) component. If the new entity lacks
+        // it, the component list republish will correct the selection a frame later.
+        const QString comp = _componentList->currentComponentName();
+        if (!comp.isEmpty())
+        {
+            _onComponentNameSelected(comp); // rebinds + resync + pushes interest
+        }
+        else
+        {
+            _mirrorComponent.clear();
+            _propertyEditor->unbind();
+            _pushInterest();
+        }
     }
 
     void EntityComponentBrowser::_onComponentNameSelected(const QString& name)
     {
-        if (!_mirror)
+        if (!_channel)
         {
             return; // direct mode uses _onComponentSelected
         }
         _mirrorComponent = name;
-        const rttr::type t = rttr::type::get_by_name(name.toStdString());
+        // `name` is the component's full flecs path (the list displays only the
+        // leaf). resolveByName matches it exactly against the RTTR type — even when
+        // two components share a leaf name — so the schema binds to the right type.
+        const rttr::type t = TypeBridge::resolveByName(name.toUtf8().constData());
         if (t.is_valid())
         {
             _propertyEditor->bindType(t); // schema only — no instance/world touch
             _propertyEditor->expandAll();
         }
+        // bindType reset the property tree to empty values; force a full resend so
+        // the values repopulate even when re-selecting the same component (whose
+        // values are unchanged, so the producer would otherwise dedup them away).
+        _channel->requestResync();
         _pushInterest();
     }
 

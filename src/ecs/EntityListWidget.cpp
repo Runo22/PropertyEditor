@@ -1,6 +1,7 @@
 #include "rpe/ecs/EntityListWidget.h"
 
-#include <QCheckBox>
+#include "rpe/core/TypeBridge.h"
+
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -10,6 +11,37 @@
 
 namespace rpe
 {
+
+    namespace
+    {
+        // Short (unscoped) form of a name: the segment after the last "::".
+        QString shortName(const QString& s)
+        {
+            const int pos = s.lastIndexOf(QStringLiteral("::"));
+            return pos >= 0 ? s.mid(pos + 2) : s;
+        }
+
+        // Display label for an entity: its name, else its prefab's name + id, else
+        // just the id. Matches EcsMirror so direct and mirror modes look identical.
+        QString entityLabel(const flecs::entity& e)
+        {
+            const char* n = e.name();
+            if (n && n[0] != '\0')
+            {
+                return QString::fromUtf8(n);
+            }
+            const flecs::entity prefab = e.target(flecs::IsA);
+            if (prefab.is_valid())
+            {
+                const char* pn = prefab.name();
+                if (pn && pn[0] != '\0')
+                {
+                    return QStringLiteral("%1  #%2").arg(QString::fromUtf8(pn)).arg(e.id());
+                }
+            }
+            return QStringLiteral("#%1").arg(e.id());
+        }
+    } // namespace
 
     EntityListWidget::EntityListWidget(QWidget* parent)
         : QWidget(parent)
@@ -35,16 +67,11 @@ namespace rpe
         _filterEdit->setClearButtonEnabled(true);
         layout->addWidget(_filterEdit);
 
-        _requiredCheck = new QCheckBox(this);
-        _requiredCheck->setVisible(false); // shown only when a required component is set
-        layout->addWidget(_requiredCheck);
-
         _list = new QListWidget(this);
         layout->addWidget(_list, 1);
 
         connect(_list, &QListWidget::currentItemChanged, this, &EntityListWidget::_onSelectionChanged);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
-        connect(_requiredCheck, &QCheckBox::toggled, this, &EntityListWidget::_refresh);
     }
 
     void EntityListWidget::setWorld(flecs::world* world)
@@ -76,21 +103,13 @@ namespace rpe
         _timer->stop();
     }
 
-    void EntityListWidget::setRequiredComponent(const QString& componentName, bool enabledByDefault)
+    void EntityListWidget::setRequiredComponent(const QString& componentName, bool enabled)
     {
+        // The filter is configured purely through state now (no UI checkbox) — the
+        // host drives it via the browser's Settings. Direct mode applies it in
+        // _refresh(); mirror mode applies it on the producer.
         _requiredComponent = componentName;
-        if (componentName.isEmpty())
-        {
-            _requiredCheck->setVisible(false);
-        }
-        else
-        {
-            _requiredCheck->setText(tr("Only entities with %1").arg(componentName));
-            // Block the toggled→_refresh signal so we refresh exactly once below.
-            QSignalBlocker block(_requiredCheck);
-            _requiredCheck->setChecked(enabledByDefault);
-            _requiredCheck->setVisible(true);
-        }
+        _requiredEnabled = enabled;
         _refresh();
     }
 
@@ -98,70 +117,92 @@ namespace rpe
     {
         if (!_world)
         {
-            _list->clear();
-            _lastEntries.clear();
+            // Mirror mode: entries arrive via setEntries(). A filter-text or
+            // required-toggle change must NOT wipe the list — just re-apply the text
+            // filter over the entries we already have (clearing the box restores
+            // them all). The required-component filter is applied upstream by the
+            // mirror, so there is nothing to re-query here.
+            _applyTextFilter();
             return;
         }
 
-        const QString filter = _filterEdit->text().trimmed().toLower();
-        const bool filterByComp = !_requiredComponent.isEmpty() && _requiredCheck->isChecked();
+        const bool filterByComp = !_requiredComponent.isEmpty() && _requiredEnabled;
 
-        // Query all *named* entities (those carrying the (Identifier, Name) pair),
-        // optionally constrained to those having the required component. All world
-        // reads happen under the guard; the widget rebuild below does not need it.
+        // Show every entity carrying at least one bridged component (the ones the
+        // inspector can actually display), optionally constrained to those having
+        // the required component. Labelled by name / prefab name / id — to match
+        // EcsMirror exactly. All world reads happen under the guard; the widget
+        // rebuild below does not need it.
+        const QString reqShort = filterByComp ? shortName(_requiredComponent) : QString();
         QVector<QPair<qulonglong, QString>> entries;
         withGuard(_guard, [&] {
-            auto qb = _world->query_builder().with<flecs::Identifier>(flecs::Name);
-            flecs::entity requiredComp;
-            if (filterByComp)
-            {
-                requiredComp = _world->lookup(_requiredComponent.toUtf8().constData());
-                if (requiredComp.is_valid())
-                {
-                    qb.with(requiredComp);
-                }
-            }
-            flecs::query<> q = qb.build();
+            flecs::query<> q = _world->query_builder().with(flecs::Any).build();
 
             q.each([&](flecs::entity e) {
                 if (!e.is_alive())
                 {
                     return;
                 }
-                const char* rawName = e.name();
-                const QString name = rawName ? QString::fromUtf8(rawName) : QStringLiteral("(unnamed)");
-                const QString label = QStringLiteral("%1  %2").arg(e.id()).arg(name);
-                if (!filter.isEmpty() && !label.toLower().contains(filter))
+                bool hasBridged = false;
+                bool hasReq = reqShort.isEmpty();
+                e.each([&](flecs::id id) {
+                    if (!id.is_entity())
+                    {
+                        return;
+                    }
+                    const char* cn = id.entity().name();
+                    if (!cn || cn[0] == '\0')
+                    {
+                        return;
+                    }
+                    if (TypeBridge::resolveByName(cn).is_valid())
+                    {
+                        hasBridged = true;
+                    }
+                    if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
+                    {
+                        hasReq = true;
+                    }
+                });
+                if (!hasBridged || !hasReq)
                 {
                     return;
                 }
-                entries.append({ static_cast<qulonglong>(e.id()), label });
+                entries.append({ static_cast<qulonglong>(e.id()), entityLabel(e) });
             });
         });
 
-        _applyEntries(entries);
+        // Keep the full set; the text filter is applied on top so clearing it
+        // restores every entity without re-querying.
+        _sourceEntries = entries;
+        _applyTextFilter();
     }
 
     void EntityListWidget::setEntries(const QVector<QPair<qulonglong, QString>>& entries)
     {
-        // External feed (mirror mode): apply the optional text filter, then rebuild.
+        // External feed (mirror mode): remember the full set, then apply the text
+        // filter. Editing/clearing the filter re-derives from _sourceEntries.
+        _sourceEntries = entries;
+        _applyTextFilter();
+    }
+
+    void EntityListWidget::_applyTextFilter()
+    {
         const QString filter = _filterEdit->text().trimmed().toLower();
         if (filter.isEmpty())
         {
-            _applyEntries(entries);
+            _applyEntries(_sourceEntries);
+            return;
         }
-        else
+        QVector<QPair<qulonglong, QString>> filtered;
+        for (const auto& e : _sourceEntries)
         {
-            QVector<QPair<qulonglong, QString>> filtered;
-            for (const auto& e : entries)
+            if (e.second.toLower().contains(filter))
             {
-                if (e.second.toLower().contains(filter))
-                {
-                    filtered.append(e);
-                }
+                filtered.append(e);
             }
-            _applyEntries(filtered);
         }
+        _applyEntries(filtered);
     }
 
     void EntityListWidget::_applyEntries(const QVector<QPair<qulonglong, QString>>& entries)

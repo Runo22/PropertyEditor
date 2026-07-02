@@ -3,116 +3,306 @@
 #include "rpe/core/RttrBridge.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/core/TypeRenderer.h"
+#include "rpe/ecs/ComponentScan.h"
 
 namespace rpe
 {
 
-    EcsMirror::~EcsMirror()
+    namespace
     {
-        detach();
+        // Heap context for the ecs_run_post_frame trampolines (deferred install and
+        // the frame-end pump). Its ctx is a raw void* that the trampoline frees; the
+        // shared token lets it no-op safely if the mirror died in the meantime.
+        struct DeferredCtx
+        {
+            std::shared_ptr<MirrorLiveToken> alive;
+            EcsMirror* self;
+        };
+
+        // Short (unscoped) form of a name: the segment after the last "::".
+        QString shortName(const QString& s)
+        {
+            const int pos = s.lastIndexOf(QStringLiteral("::"));
+            return pos >= 0 ? s.mid(pos + 2) : s;
+        }
+
+        // Display label for an entity: its name, else its prefab's name + id,
+        // else just the id. (No leading id for named entities.)
+        QString entityLabel(const flecs::entity& e)
+        {
+            const char* n = e.name();
+            if (n && n[0] != '\0')
+            {
+                return QString::fromUtf8(n);
+            }
+            const flecs::entity prefab = e.target(flecs::IsA);
+            if (prefab.is_valid())
+            {
+                const char* pn = prefab.name();
+                if (pn && pn[0] != '\0')
+                {
+                    return QStringLiteral("%1  #%2").arg(QString::fromUtf8(pn)).arg(e.id());
+                }
+            }
+            return QStringLiteral("#%1").arg(e.id());
+        }
+    } // namespace
+
+    EcsMirror::EcsMirror()
+        : _ch(std::make_shared<MirrorChannel>())
+        , _alive(std::make_shared<MirrorLiveToken>())
+    {
     }
 
-    void EcsMirror::attach(flecs::world* world)
+    EcsMirror::~EcsMirror()
     {
-        detach();
-        _world = world;
-        if (_world)
+        // Mark dead under the pump lock: this blocks until any in-flight pump on the
+        // sim thread finishes (so it never touches this soon-to-be-freed object),
+        // and makes every later pump / deferred install no-op. Only then do we tear
+        // down and free our state.
         {
-            _registerSystem();
+            std::lock_guard<std::mutex> lk(_alive->pumpMutex);
+            _alive->alive.store(false, std::memory_order_release);
         }
+        detach();
+        // Tell any GUI consumer still holding the channel that no more data is
+        // coming; its shared_ptr keeps the channel alive, so its poll*() calls
+        // stay valid (they just return nothing) instead of touching freed memory.
+        _ch->markProducerGone();
+    }
+
+    void EcsMirror::attach(flecs::world* world, PumpMode mode)
+    {
+        // MUST be called on the simulation thread (the one that runs progress()).
+        // Creating the system + query are structural changes; a flecs world is
+        // not safe for structural changes from another thread, nor while it is in
+        // readonly mode (mid-progress).
+        //
+        // If attach() is called from *inside* progress() — e.g. a system loads the
+        // plugin at runtime — the world is readonly and installing now would
+        // crash. In that case we defer the install to ecs_run_post_frame, which
+        // runs at frame-end on this same thread, after readonly mode is lifted.
+        //
+        // PumpMode::Manual registers no system — you call pump() yourself after
+        // world.progress(). PumpMode::System (default) registers a task that defers
+        // the snapshot to frame-end; neither mode stalls the multi-threaded pipeline.
+        detach();
+        _mode = mode;
+        // Keep only the underlying world pointer. The flecs::world WRAPPER the
+        // caller passes may be a temporary (e.g. a stack wrapper around an
+        // engine-provided ecs_world_t* in a plugin) and often dies right after
+        // attach() returns — its address must never be stored or dereferenced later.
+        _world = world ? world->c_ptr() : nullptr;
+        if (!_world)
+        {
+            return;
+        }
+        // Fresh token for this binding. A new MirrorLiveToken means any system left
+        // behind by a previous detach (which stays inert, keyed to the old token)
+        // can never come back to life through this new attach. (The system entity is
+        // reused — same name — so re-attach revives exactly one system per world.)
+        _alive = std::make_shared<MirrorLiveToken>();
+        ecs_world_t* w = _world;
+        if (ecs_stage_is_readonly(w))
+        {
+            ecs_run_post_frame(w, &EcsMirror::_installTrampoline, new DeferredCtx { _alive, this });
+        }
+        else
+        {
+            _install();
+        }
+    }
+
+    void EcsMirror::_installTrampoline(ecs_world_t*, void* ctx)
+    {
+        auto* c = static_cast<DeferredCtx*>(ctx);
+        // alive==false → the EcsMirror was destroyed before frame-end; do not
+        // touch it. Else, skip if it was detached (or already installed) meanwhile.
+        if (c->alive->alive.load(std::memory_order_acquire) && c->self->_world && !c->self->_haveSystem)
+        {
+            c->self->_install();
+        }
+        delete c;
     }
 
     void EcsMirror::detach()
     {
-        if (_haveSystem && _system.is_alive())
+        // Teardown NEVER touches the world — so it is safe from any thread, while the
+        // sim thread is mid-progress(), and even after the world has been destroyed.
+        //
+        // Destructing the system here would be unsafe: it is a structural world
+        // change (races a concurrent progress()) and would free the pump callback's
+        // storage while it may be executing on the sim thread. Instead we just
+        // *neutralise*: take the pump lock — which waits out any in-flight pump and
+        // then blocks future ones — and mark the mirror dead. From then on the system
+        // runs but no-ops (it checks `alive` under the same lock before touching
+        // `this`), costing nothing per frame; the world reaps it at fini, or attach()
+        // revives it (the system has a fixed name, so there is only ever one).
+        if (_haveSystem || _haveQuery)
         {
-            _system.destruct();
+            std::lock_guard<std::mutex> lk(_alive->pumpMutex);
+            _alive->alive.store(false, std::memory_order_release);
         }
+        // Drop our handles. The flecs C++ handle move-assignment only overwrites the
+        // stored pointer — it never calls into the world — so this is safe even if
+        // the world is already gone or owned by another (busy) thread.
+        _haveQuery = false;
         _haveSystem = false;
+        _entityQuery = flecs::query<>();
+        _componentQuery = flecs::query<>();
+        _bridgedIds.clear();
         _system = flecs::system();
         _world = nullptr;
     }
 
-    void EcsMirror::_registerSystem()
+    void EcsMirror::_install()
     {
+        // Scoped wrapper over the raw world pointer (claims/releases a poly ref —
+        // balanced, never finalises a world the host still owns). Safe here: the
+        // world is alive during attach()/the deferred install at frame-end.
+        flecs::world w(_world);
+
+        // Build the entity query ONCE here (never inside the readonly system). It
+        // matches *all* entities (flecs::Any); pump() filters to those with a
+        // bridged component (and the optional required filter), so the cached query
+        // never needs rebuilding.
+        _entityQuery = w.query_builder().with(flecs::Any).build();
+        // Cached query over all component types, used to (re)build the bridged-id set.
+        _componentQuery = w.query_builder().with<flecs::Component>().build();
+        _haveQuery = true;
+
+        // Manual mode: no system. The host calls pump() itself after progress().
+        if (_mode == PumpMode::Manual)
+        {
+            return;
+        }
+
         // A term-less system is a task: its run callback fires once per frame inside
-        // world.progress(), on the simulation thread. No change to the caller's loop.
-        _system = _world->system("rpe::EcsMirror")
+        // world.progress(), on the simulation thread (flecs runs non-multi_threaded
+        // ops on stage 0 only). The captured 'alive' token makes the callback a
+        // no-op once this EcsMirror is detached/destroyed — the system is
+        // intentionally left installed after teardown (it just no-ops) and is reaped
+        // at world fini, so it never destructs itself mid-run.
+        //
+        // The callback does NOT touch the world (workers may be mutating components
+        // concurrently — the task declares no terms, so flecs schedules it without a
+        // sync point). Instead it schedules the actual snapshot via
+        // ecs_run_post_frame, which ecs_frame_end executes on this same thread AFTER
+        // the pipeline finished: world merged, readonly over, workers idle — so the
+        // read is race-free WITHOUT the per-frame sync barrier that immediate() would
+        // force. On an uncapped sim that barrier used to dominate (thousands of
+        // worker syncs per second); this way the world never stalls for the mirror.
+        auto token = _alive;
+        _system = w.system("rpe::EcsMirror")
                       .kind(flecs::PostUpdate)
-                      .run([this](flecs::iter& it) {
+                      .run([this, token](flecs::iter& it) {
+                          ecs_world_t* stage = it.world().c_ptr();
                           while (it.next())
                           { /* task: no tables to iterate */
                           }
-                          pump();
+                          // Rate-gate at schedule time (under the pump lock — this may
+                          // be dead otherwise) so a skipped frame costs no allocation.
+                          std::lock_guard<std::mutex> lk(token->pumpMutex);
+                          if (!token->alive.load(std::memory_order_acquire) || !_rateAllows())
+                          {
+                              return;
+                          }
+                          ecs_run_post_frame(stage, &EcsMirror::_pumpTrampoline, new DeferredCtx { token, this });
                       });
         _haveSystem = true;
     }
 
-    // ── GUI thread: intent ──────────────────────────────────────────────────────
+    void EcsMirror::_pumpTrampoline(ecs_world_t* world, void* ctx)
+    {
+        // Runs inside ecs_frame_end on the sim thread: pipeline done, world merged,
+        // readonly over, workers idle — the safe window to read components. `world`
+        // is the live world pointer flecs hands the action — build a scoped wrapper
+        // from it (never dereference any caller-owned wrapper object).
+        auto* c = static_cast<DeferredCtx*>(ctx);
+        {
+            std::lock_guard<std::mutex> lk(c->alive->pumpMutex);
+            if (c->alive->alive.load(std::memory_order_acquire) && c->self->_world)
+            {
+                flecs::world w(world);
+                c->self->_pumpImpl(w);
+            }
+        }
+        delete c;
+    }
+
+    // ── GUI thread: intent / results — delegate to the shared channel ───────────
 
     void EcsMirror::setRequiredComponent(const QString& componentName)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        _required = componentName;
+        _ch->setRequiredComponent(componentName);
     }
 
     void EcsMirror::setInterest(qulonglong entity, const QString& componentName, const QStringList& leafPaths)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        _inEntity = entity;
-        _inComponent = componentName;
-        _inPaths = leafPaths;
+        _ch->setInterest(entity, componentName, leafPaths);
     }
 
     void EcsMirror::clearInterest()
     {
-        std::lock_guard<std::mutex> lk(_m);
-        _inEntity = 0;
-        _inComponent.clear();
-        _inPaths.clear();
+        _ch->clearInterest();
     }
 
     void EcsMirror::queueEdit(const QString& path, rttr::variant value)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        _edits.emplace_back(path, std::move(value));
+        _ch->queueEdit(path, std::move(value));
     }
 
-    // ── GUI thread: results ─────────────────────────────────────────────────────
+    void EcsMirror::addComponent(qulonglong entity, const QString& component)
+    {
+        _ch->queueStructural(MirrorChannel::StructuralKind::AddComponent, entity, component);
+    }
+
+    void EcsMirror::removeComponent(qulonglong entity, const QString& component)
+    {
+        _ch->queueStructural(MirrorChannel::StructuralKind::RemoveComponent, entity, component);
+    }
 
     bool EcsMirror::pollEntities(QVector<EntityEntry>& out)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        if (!_outEntitiesDirty)
-        {
-            return false;
-        }
-        out = _outEntities;
-        _outEntitiesDirty = false;
-        return true;
+        return _ch->pollEntities(out);
     }
 
     bool EcsMirror::pollComponents(QStringList& out)
     {
-        std::lock_guard<std::mutex> lk(_m);
-        if (!_outComponentsDirty)
-        {
-            return false;
-        }
-        out = _outComponents;
-        _outComponentsDirty = false;
-        return true;
+        return _ch->pollComponents(out);
+    }
+
+    bool EcsMirror::pollCatalog(QStringList& out)
+    {
+        return _ch->pollCatalog(out);
     }
 
     std::vector<EcsMirror::ValueUpdate> EcsMirror::pollValues()
     {
-        std::lock_guard<std::mutex> lk(_m);
-        std::vector<ValueUpdate> v;
-        v.swap(_outValues);
-        return v;
+        return _ch->pollValues();
     }
 
     // ── simulation thread ───────────────────────────────────────────────────────
+
+    void EcsMirror::setMaxPumpRateHz(double hz)
+    {
+        _minPumpGap = std::chrono::duration<double>(hz > 0.0 ? 1.0 / hz : 0.0);
+    }
+
+    bool EcsMirror::_rateAllows()
+    {
+        if (_minPumpGap.count() <= 0.0)
+        {
+            return true;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - _lastPump < _minPumpGap)
+        {
+            return false;
+        }
+        _lastPump = now;
+        return true;
+    }
 
     void EcsMirror::pump()
     {
@@ -120,19 +310,87 @@ namespace rpe
         {
             return;
         }
-
-        // Snapshot GUI intent.
-        qulonglong entity;
-        QString component, required;
-        QStringList paths;
-        std::vector<std::pair<QString, rttr::variant>> edits;
+        // Same synchronisation as the registered system: hold the pump lock so a
+        // concurrent detach()/destructor on another thread waits this out and never
+        // marks the mirror dead mid-pump. Call this once per loop, AFTER progress().
+        std::lock_guard<std::mutex> lk(_alive->pumpMutex);
+        if (!_alive->alive.load(std::memory_order_acquire) || !_rateAllows())
         {
-            std::lock_guard<std::mutex> lk(_m);
-            entity = _inEntity;
-            component = _inComponent;
-            required = _required;
-            paths = _inPaths;
-            edits.swap(_edits);
+            return;
+        }
+        flecs::world w(_world); // scoped wrapper; the caller guarantees the world is alive here
+        _pumpImpl(w);
+    }
+
+    void EcsMirror::_pumpImpl(const flecs::world& world)
+    {
+        // Snapshot GUI intent from the shared channel.
+        MirrorChannel::Intent in = _ch->takeIntent();
+        const qulonglong entity = in.entity;
+        const QString& component = in.component;
+        const QString& required = in.required;
+        const QStringList& paths = in.paths;
+        auto& edits = in.edits;
+
+        // ── Structural edits (add/remove components) ───────────────────────────────
+        // Applied here on the simulation thread, where structural world changes are
+        // safe. The system is immediate(), so the world is non-readonly at this
+        // point. Adding/removing changes the entity's archetype, so we then force a
+        // fresh scan/publish of the component list, entity list and catalog.
+        bool structuralApplied = false;
+        for (const MirrorChannel::StructuralEdit& s : in.structurals)
+        {
+            flecs::entity e = world.entity(s.entity);
+            if (!e.is_alive())
+            {
+                continue;
+            }
+            if (s.kind == MirrorChannel::StructuralKind::AddComponent)
+            {
+                flecs::entity comp = findComponentEntity(world, s.component);
+                if (comp.is_valid())
+                {
+                    e.add(comp);
+                    structuralApplied = true;
+                }
+            }
+            else // RemoveComponent
+            {
+                // Remove by the component currently on the entity (unambiguous).
+                e.each([&](flecs::id id) {
+                    if (!id.is_entity())
+                    {
+                        return;
+                    }
+                    const char* cn = id.entity().name();
+                    if (cn && s.component == QString::fromUtf8(cn))
+                    {
+                        e.remove(id);
+                        structuralApplied = true;
+                    }
+                });
+            }
+        }
+        if (structuralApplied)
+        {
+            _lastComponents.clear();
+            _lastEntities.clear();
+            _lastCatalog.clear();
+        }
+
+        // The GUI reset its view (re-selected the same entity/component, or its
+        // selection was cleared and restored) and wants the data resent. The GUI can
+        // raise this at ~30 Hz, so it MUST be cheap: re-publish the already-cached
+        // lists rather than forcing an expensive full re-scan (that feedback loop —
+        // slow sim → resync every frame → full scan every frame — is what pins the
+        // simulation at a few fps). The interest values are re-read below (cheap: a
+        // handful of watched paths).
+        if (in.resync)
+        {
+            _lastValueStr.clear();
+            _ch->publishEntities(_lastEntities);
+            _ch->publishComponents(_lastComponents);
+            _ch->publishCatalog(_lastCatalog);
         }
 
         // Interest changed → reset per-leaf dedup so the new selection refreshes fully.
@@ -143,43 +401,128 @@ namespace rpe
             _lastInterestComponent = component;
         }
 
-        // ── Entity list (named entities, optionally filtered by component) ────────
-        QVector<EntityEntry> ents;
+        // ── Entity list ──────────────────────────────────────────────────────────
+        // Show every entity (named or not — labelled by name, else prefab name,
+        // else id) that has at least one *bridged* component, so the inspector
+        // lists exactly the entities it can show. Optionally filtered to those
+        // carrying the required component (matched by short name). This scans all
+        // entities, so it is throttled — the visible set rarely changes.
+        const bool requiredChanged = (required != _lastRequired);
+        _lastRequired = required;
+        const bool scanEntities = requiredChanged || (_entityScanTick++ % 10 == 0);
+        if (scanEntities && _haveQuery)
         {
-            auto qb = _world->query_builder().with<flecs::Identifier>(flecs::Name);
-            if (!required.isEmpty())
-            {
-                flecs::entity rc = _world->lookup(required.toUtf8().constData());
-                if (rc.is_valid())
-                {
-                    qb.with(rc);
-                }
-            }
-            flecs::query<> q = qb.build();
-            q.each([&](flecs::entity e) {
-                if (!e.is_alive())
+            const QString reqShort = required.isEmpty() ? QString() : shortName(required);
+
+            // Refresh the set of bridged component ids (and locate the required one).
+            // This runs resolveByName once per COMPONENT TYPE (a few dozen), not once
+            // per component-instance per entity — so the entity scan below is O(1) id
+            // lookups instead of O(registry) string work per component.
+            _bridgedIds.clear();
+            uint64_t reqId = 0;
+            _componentQuery.each([&](flecs::entity comp) {
+                const char* cn = comp.name();
+                if (!cn || cn[0] == '\0')
                 {
                     return;
                 }
-                const char* n = e.name();
-                const QString name = n ? QString::fromUtf8(n) : QStringLiteral("(unnamed)");
-                ents.append({ static_cast<qulonglong>(e.id()),
-                              QStringLiteral("%1  %2").arg(e.id()).arg(name) });
+                const flecs::string path = comp.path(".", "");
+                if (path.c_str() && QString::fromUtf8(path.c_str()).startsWith(QStringLiteral("flecs")))
+                {
+                    return; // skip flecs' own components
+                }
+                if (TypeBridge::resolveByName(path.c_str()).is_valid())
+                {
+                    _bridgedIds.insert(comp.raw_id());
+                }
+                if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
+                {
+                    reqId = comp.raw_id();
+                }
             });
+
+            // Narrow the entity query to the required component when the filter
+            // changes: flecs then visits ONLY entities that have it, instead of every
+            // entity in the world. This is the big win for large worlds with a
+            // filtered view. Rebuilt only on change (cheap, rare).
+            if (requiredChanged)
+            {
+                flecs::world w = world; // the (non-staged) world in immediate mode
+                if (!reqShort.isEmpty() && reqId)
+                {
+                    _entityQuery = w.query_builder().with(reqId).build();
+                }
+                else if (reqShort.isEmpty())
+                {
+                    _entityQuery = w.query_builder().with(flecs::Any).build();
+                }
+            }
+
+            // A list of more than a few thousand entities is not usefully browsable;
+            // cap it so an unfiltered scan of a huge world can't spend all its time
+            // building labels. (Use the required-component filter to narrow instead.)
+            constexpr int kMaxEntities = 5000;
+            QVector<EntityEntry> ents;
+            _entityQuery.each([&](flecs::entity ent) {
+                if (ents.size() >= kMaxEntities || !ent.is_alive())
+                {
+                    return;
+                }
+                bool hasBridged = false;
+                bool hasReq = reqShort.isEmpty();
+                ent.each([&](flecs::id id) {
+                    const uint64_t rid = id.raw_id();
+                    if (_bridgedIds.count(rid))
+                    {
+                        hasBridged = true;
+                    }
+                    if (reqId && rid == reqId)
+                    {
+                        hasReq = true;
+                    }
+                });
+                if (hasBridged && hasReq)
+                {
+                    ents.append({ static_cast<qulonglong>(ent.id()), entityLabel(ent) });
+                }
+            });
+            if (ents != _lastEntities)
+            {
+                _lastEntities = ents;
+                _ch->publishEntities(ents);
+            }
         }
-        if (ents != _lastEntities)
+
+        // ── Add-component catalog ──────────────────────────────────────────────────
+        // The set of bridged component names in the world, for the GUI's "add
+        // component" picker. Scanning every component is cheap but not free, so it is
+        // throttled like the entity scan (the catalog rarely changes).
+        const bool scanCatalog = structuralApplied || (_catalogScanTick++ % 30 == 0);
+        if (scanCatalog)
         {
-            _lastEntities = ents;
-            std::lock_guard<std::mutex> lk(_m);
-            _outEntities = ents;
-            _outEntitiesDirty = true;
+            QStringList catalog;
+            for (const ComponentResolution& c : scanComponents(world))
+            {
+                if (c.bridged)
+                {
+                    // Full scoped path so the GUI's add picker can group by namespace;
+                    // findComponentEntity accepts either the path or the leaf name.
+                    catalog.append(c.path.isEmpty() ? c.name : c.path);
+                }
+            }
+            catalog.sort();
+            if (catalog != _lastCatalog)
+            {
+                _lastCatalog = catalog;
+                _ch->publishCatalog(catalog);
+            }
         }
 
         if (entity == 0)
         {
             return;
         }
-        flecs::entity e = _world->entity(entity);
+        flecs::entity e = world.entity(entity);
         if (!e.is_alive())
         {
             return;
@@ -194,18 +537,22 @@ namespace rpe
             {
                 return;
             }
-            flecs::entity ce = id.entity();
-            const char* n = ce.name();
+            const char* n = id.entity().name();
             if (!n || n[0] == '\0')
             {
                 return;
             }
-            const rttr::type t = rttr::type::get_by_name(n);
-            if (!t.is_valid() || !TypeBridge::has(t))
+            // Identify the component by its FULL scoped path ("game.Transform"),
+            // which is unique even when two components share a leaf name. The GUI
+            // displays the leaf; resolveByName matches the path exactly against the
+            // RTTR full name. (Pass the path, not the leaf, so resolution is
+            // unambiguous.)
+            const flecs::string p = id.entity().path(".", "");
+            const QString qn = QString::fromUtf8(p.c_str());
+            if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
             {
                 return;
             }
-            const QString qn = QString::fromUtf8(n);
             comps.append(qn);
             if (qn == component)
             {
@@ -216,16 +563,14 @@ namespace rpe
         if (comps != _lastComponents)
         {
             _lastComponents = comps;
-            std::lock_guard<std::mutex> lk(_m);
-            _outComponents = comps;
-            _outComponentsDirty = true;
+            _ch->publishComponents(comps);
         }
 
         if (!haveSel)
         {
             return;
         }
-        const rttr::type t = rttr::type::get_by_name(component.toStdString());
+        const rttr::type t = TypeBridge::resolveByName(component.toUtf8().constData());
         if (!t.is_valid())
         {
             return;
@@ -268,11 +613,7 @@ namespace rpe
         }
         if (!updates.empty())
         {
-            std::lock_guard<std::mutex> lk(_m);
-            for (auto& u : updates)
-            {
-                _outValues.push_back(std::move(u));
-            }
+            _ch->publishValues(std::move(updates));
         }
     }
 

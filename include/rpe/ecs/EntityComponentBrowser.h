@@ -4,15 +4,19 @@
 
 #include "rpe/core/RttrVariantWrapper.h"
 #include "rpe/ecs/ComponentListWidget.h"
+#include "rpe/ecs/MirrorChannel.h"
 #include "rpe/gui/PropertyModel.h"
 
 #include <QWidget>
+
+#include <memory>
 
 #include "rpe/ecs/flecs_prelude.h"
 
 class QSplitter;
 class QCheckBox;
 class QTimer;
+class QVBoxLayout;
 
 namespace rpe
 {
@@ -37,10 +41,47 @@ namespace rpe
         Q_OBJECT
 
     public:
+        // Panel arrangement.
+        enum class Layout
+        {
+            Wide,     // entities | (components / properties) — wide docks
+            Vertical, // entities / components / properties stacked — UE-style sidebar
+        };
+
+        // Bundled browser options, with a single setter/getter (see settings()).
+        // Lets a host snapshot/restore the inspector's configuration in one call.
+        struct Settings
+        {
+            // Entity-list filter: when requiredComponentEnabled is true and the name
+            // is non-empty, only entities carrying that component are listed. This
+            // is the sole control for the filter (there is no in-list checkbox).
+            QString requiredComponent;
+            bool requiredComponentEnabled = true;
+            // Mirror only the property leaves currently expanded in the tree.
+            bool snapshotOpenFieldsOnly = true;
+            // How property edits are applied (Override vs WriteBack).
+            EditPolicy editPolicy = EditPolicy::Override;
+            // Show the add/remove-component controls ("+" and per-row "×").
+            bool allowComponentEditing = false;
+            // Panel arrangement.
+            Layout layout = Layout::Wide;
+            // GUI poll cadence (ms) for the mirror and the direct-mode live refresh.
+            int mirrorPollIntervalMs = 33;
+            int liveUpdateIntervalMs = 20;
+        };
+
         explicit EntityComponentBrowser(QWidget* parent = nullptr);
 
         void setWorld(flecs::world* world);
         void setLiveUpdateIntervalMs(int ms);
+
+        // Switch panel arrangement (default Wide). Vertical stacks the three
+        // panels top-to-bottom for a narrow Unreal-style sidebar.
+        void setBrowserLayout(Layout layout);
+        Layout browserLayout() const
+        {
+            return _browserLayout;
+        }
 
         // ── Mirror mode (recommended for a separate simulation thread) ───────────
         // Drive the browser entirely from an EcsMirror instead of touching the world
@@ -54,6 +95,7 @@ namespace rpe
         void setSnapshotOpenFieldsOnly(bool on)
         {
             _openFieldsOnly = on;
+            _settings.snapshotOpenFieldsOnly = on;
         }
         bool snapshotOpenFieldsOnly() const
         {
@@ -67,11 +109,27 @@ namespace rpe
         // See rpe/core/AccessGuard.h for the contract and an example.
         void setWorldAccess(AccessGuard guard);
 
-        // Restrict the entity list to entities having this component (e.g. "Transform").
-        void setEntityComponentFilter(const QString& componentName, bool enabledByDefault = true);
-
         // Default edit policy for the property editor (Override or WriteBack).
         void setEditPolicy(EditPolicy p);
+
+        // Allow the user to add/remove components on the selected entity from the
+        // component panel ("+" button and per-row "×"). Off by default. In mirror
+        // mode the change is queued to the simulation thread; in direct mode it is
+        // applied under the world guard. Requires a registered component catalog.
+        void setComponentEditingEnabled(bool on);
+        bool isComponentEditingEnabled() const
+        {
+            return _settings.allowComponentEditing;
+        }
+
+        // Bundled get/set of all the above options. setSettings applies every field
+        // (filter, snapshot policy, edit policy, component-editing, layout, timers);
+        // settings() returns the current configuration.
+        void setSettings(const Settings& s);
+        Settings settings() const
+        {
+            return _settings;
+        }
 
         PropertyEditor* propertyEditor() const
         {
@@ -109,10 +167,20 @@ namespace rpe
         void _onEntityIdSelected(qulonglong id);
         void _onComponentNameSelected(const QString& name);
 
+        // component add/remove
+        void _onAddComponent(const QString& name);
+        void _onRemoveComponent(const QString& name);
+
     private:
         void _setupUi();
+        void _applyLayout(Layout layout);
         void* _liveComponentPtr() const;
         void _pushInterest();
+        // Recompute the "+" picker list: catalog minus components already present.
+        void _updateAddable();
+        // Apply the required-component filter (from _settings) to the entity list and,
+        // in mirror mode, to the producer.
+        void _applyEntityFilter();
 
         flecs::world* _world = nullptr;
         EntityListWidget* _entityList = nullptr;
@@ -120,18 +188,28 @@ namespace rpe
         PropertyEditor* _propertyEditor = nullptr;
         QCheckBox* _writeCheck = nullptr;
         QTimer* _liveTimer = nullptr;
+        QVBoxLayout* _mainLayout = nullptr; // host layout; _layoutRoot swapped inside
+        QWidget* _layoutRoot = nullptr;     // current splitter tree
+        Layout _browserLayout = Layout::Wide;
 
         flecs::entity _selectedEntity;
         ComponentInfo _selectedComponent;
         RttrVariantWrapper _liveWrapper; // persistent storage backing the editor's instance
         AccessGuard _guard;
 
-        // mirror mode
-        EcsMirror* _mirror = nullptr;
+        // mirror mode — hold the shared channel (not the EcsMirror), so the GUI
+        // keeps it alive and never dereferences a mirror destroyed on the sim
+        // thread first. See MirrorChannel.
+        std::shared_ptr<MirrorChannel> _channel;
         QTimer* _mirrorTimer = nullptr;
         qulonglong _mirrorEntity = 0;
         QString _mirrorComponent;
         bool _openFieldsOnly = true;
+
+        // Add/remove-component state (mirror mode).
+        QStringList _catalog;       // all bridged component names in the world
+        QStringList _currentComps;  // components on the selected entity
+        Settings _settings;
     };
 
 } // namespace rpe

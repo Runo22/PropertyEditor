@@ -129,11 +129,23 @@ static QWidget* makeEcsTab(QWidget* parent)
 
     noXform.set<Physics>({});
 
-    mirror.attach(&world);                                    // registers the system
-    mirror.setRequiredComponent(QStringLiteral("Transform")); // entity-list filter
+    // Default (System) mode: zero integration — the mirror registers a per-frame
+    // task that defers the snapshot to frame-end, so the multi-threaded pipeline
+    // never stalls for it. The GUI only needs ~60 Hz, so cap the pump rate; on an
+    // uncapped sim the snapshot then runs 60x/sec no matter how fast progress() is.
+    mirror.attach(&world);
+    mirror.setMaxPumpRateHz(60.0);
 
     auto* browser = new rpe::EntityComponentBrowser(parent);
     browser->setMirror(&mirror); // instead of setWorld — GUI never touches world
+
+    // All options live in one Settings struct (filter, layout, editing, …).
+    rpe::EntityComponentBrowser::Settings st = browser->settings();
+    st.layout = rpe::EntityComponentBrowser::Layout::Vertical; // UE-style sidebar
+    st.requiredComponent = QStringLiteral("Transform");        // entity-list filter
+    st.requiredComponentEnabled = true;
+    st.allowComponentEditing = true; // show the "+"/"×" component controls
+    browser->setSettings(st);
 
     // Simulation thread: NO mutex around the loop.
     static std::thread simThread([] {
@@ -151,7 +163,7 @@ static QWidget* makeEcsTab(QWidget* parent)
                 pc->velocity.x = std::cos(t) * 3.0;
                 pc->mass = 90.0 + std::sin(t);
             }
-            world.progress(0.016f); // mirror's system runs here, on this thread
+            world.progress(0.016f); // mirror snapshots at frame-end, on this thread
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
     });

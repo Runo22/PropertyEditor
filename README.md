@@ -152,6 +152,50 @@ expanded in the tree, when `setSnapshotOpenFieldsOnly(true)`, the default) and
 ~1 frame of latency. The demo's ECS tab runs exactly this — a real `std::thread`
 advancing the world with no lock.
 
+**Which thread does what — this is the #1 source of crashes:**
+
+| Call | Thread |
+| ---- | ------ |
+| `mirror.attach()` / `mirror.detach()` / destroy the `EcsMirror` | the flecs thread (the one running `world.progress()`) |
+| your plugin's flecs registration (`world.component<T>()`, `entity.set<T>()`, creating entities) | the flecs thread |
+| `mirror.setInterest()` / `setRequiredComponent()` / `queueEdit()` / `poll*()` | any thread (lock-free channel) |
+| `new EntityComponentBrowser`, `browser->setMirror()`, all other browser/widget calls | the Qt GUI thread |
+
+A flecs world allows **only one thread at a time**. If anything mutates the world
+(creating entities/components, or `attach()` which adds a system) from a thread
+**other than the one running `progress()`**, it races the simulation and crashes
+— commonly later, inside `pump()` at `world.lookup(...)`. The fix is to do that
+work on the flecs thread.
+
+> ⚠️ Calling `mirror.attach()` from your *main* thread while the *flecs* thread
+> runs `progress()` is the classic mistake: `attach()` only auto-defers when it
+> detects readonly mode, which is only true *inside* `progress()` — from the main
+> thread it installs immediately and races. Run `attach()` on the flecs thread
+> (e.g. enqueue it as a task that the flecs thread executes), exactly as you would
+> your plugin's component registration.
+
+`browser->setMirror()` is the opposite: it touches QTimers/widgets, so it is
+GUI-thread-only. (It now auto-marshals to the GUI thread if you call it from
+another thread, but prefer calling it directly on the GUI thread with the mirror
+pointer.)
+
+**Other requirements:**
+
+* **Build flecs as one shared instance.** When the world is owned by the host
+  and inspected from a plugin DLL, host + rpe + plugins must link the *same*
+  flecs shared library (CMake default: `RPE_FLECS_SHARED=ON`). Two static flecs
+  copies operating on one world fault inside flecs (e.g. `ecs_get_world`).
+* **Under `world.set_threads(n)`** the mirror system runs `immediate()` so flecs
+  sequences it at a sync point (it declares no components, so otherwise flecs
+  would run it concurrently with the component-mutating worker systems).
+* **Destruction order is safe in any order.** The GUI (`EntityComponentBrowser`)
+  holds a `std::shared_ptr<MirrorChannel>`, not the `EcsMirror`. So you may
+  destroy the `EcsMirror` on the sim thread *before* the GUI tears down (the
+  usual shutdown / plugin-unload order): the browser keeps polling the channel,
+  which just returns nothing once the producer is gone — no dangling pointer. The
+  channel owns no flecs resources, so its final release on the GUI thread is
+  safe.
+
 #### Guard mode — simpler, if you can serialize world access
 
 If you *can* take a lock (or marshal onto the sim thread) around world access,

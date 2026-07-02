@@ -3,19 +3,38 @@
 #include "rpe/core/rttr_prelude.h"
 
 #include <QHash>
-#include <QPair>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <memory>
 #include <mutex>
-#include <utility>
-#include <vector>
+#include <unordered_set>
 
 #include "rpe/ecs/flecs_prelude.h"
+#include "rpe/ecs/MirrorChannel.h"
 
 namespace rpe
 {
+
+    // Shared control block coordinating the per-frame pump (runs on the simulation
+    // thread, inside progress()) with teardown (may run on another thread). It
+    // outlives the EcsMirror: the pump system captures a shared_ptr to it, so the
+    // system left installed after the mirror is gone reads only valid memory and
+    // simply no-ops.
+    struct MirrorLiveToken
+    {
+        // Held for the whole duration of a pump AND while teardown marks the mirror
+        // dead, so the two never overlap: an in-flight pump can't touch a
+        // half-destroyed mirror, and teardown waits for any running pump to finish.
+        std::mutex pumpMutex;
+        // Cleared when the mirror is destroyed / detached: the pump then no-ops
+        // (checked under pumpMutex) instead of dereferencing a dead `this`.
+        std::atomic<bool> alive { true };
+    };
 
     // ─────────────────────────────────────────────────────────────────────────────
     //  EcsMirror — thread separation between a flecs world (advanced by a simulation
@@ -24,7 +43,9 @@ namespace rpe
     //  attach() registers a once-per-frame flecs system, so all world access happens
     //  *inside the caller's existing world.progress()* on the simulation thread —
     //  you don't change your loop. Each frame the system:
-    //    • snapshots the named-entity list (optionally filtered by a component),
+    //    • snapshots the entity list — every entity carrying at least one bridged
+    //      component, labelled by name / prefab name / id (optionally filtered to
+    //      those carrying a required component),
     //    • enumerates the bridged components of the "interest" entity,
     //    • reads the interest leaf values into self-contained value copies, and
     //    • applies any edits the GUI queued.
@@ -41,39 +62,63 @@ namespace rpe
     class EcsMirror
     {
     public:
-        struct EntityEntry
-        {
-            qulonglong id = 0;
-            QString label;
-            bool operator==(const EntityEntry& o) const
-            {
-                return id == o.id && label == o.label;
-            }
-            bool operator!=(const EntityEntry& o) const
-            {
-                return !(*this == o);
-            }
-        };
-        struct ValueUpdate
-        {
-            QString path;
-            rttr::variant value;
-        };
+        // The shared data channel carries these (re-exported for convenience).
+        using EntityEntry = MirrorChannel::EntityEntry;
+        using ValueUpdate = MirrorChannel::ValueUpdate;
 
-        EcsMirror() = default;
+        EcsMirror();
         ~EcsMirror();
 
         EcsMirror(const EcsMirror&) = delete;
         EcsMirror& operator=(const EcsMirror&) = delete;
 
-        // ── simulation thread (or before progress() starts) ──────────────────────
-        void attach(flecs::world* world); // registers the per-frame system
+        // ── simulation thread ─────────────────────────────────────────────────────
+        // attach() MUST be called on the thread that runs world.progress()
+        // (structural world changes are not thread-safe). attach() may be called
+        // even from *inside* progress() — e.g. a system that loads a plugin at
+        // runtime: when the world is readonly it auto-defers the install to
+        // frame-end (ecs_run_post_frame), so it is always safe on the sim thread.
+        //
+        // detach() and ~EcsMirror() are safe to call from ANY thread, in ANY world
+        // state (even while the sim thread is mid-progress(), or after the world has
+        // already been destroyed): they NEVER touch the world. They wait out any
+        // in-flight pump, mark the mirror dead so the pump no-ops from then on, and
+        // drop their flecs handles (a no-op on the world). The now-inert system is
+        // left installed; it costs nothing per frame and is reaped at world fini (or
+        // reused if you attach() again). This is what makes "the runtime owning the
+        // world tears down before the editor owning the mirror" safe.
+        // How the per-frame snapshot/apply is driven:
+        enum class PumpMode
+        {
+            // Registers a once-per-frame flecs task (default; zero integration —
+            // you don't change your loop). The task itself never touches the world
+            // (no sync barrier under world.set_threads()); it defers the snapshot to
+            // frame-end via ecs_run_post_frame, which runs on the sim thread after
+            // the pipeline merged and the workers went idle — race-free, barrier-free.
+            System,
+            // No system is registered; YOU call pump() once per loop, right AFTER
+            // world.progress() returns (world merged, workers idle). Equivalent
+            // safety/cost to System — use it when you want explicit control of when
+            // the snapshot runs.
+            Manual,
+        };
+        // Only the UNDERLYING world must stay alive — the flecs::world wrapper you
+        // pass may be a temporary (e.g. a stack wrapper around an engine-provided
+        // ecs_world_t* in a plugin); the mirror stores the raw world pointer, never
+        // the wrapper's address.
+        void attach(flecs::world* world, PumpMode mode = PumpMode::System);
         void detach();
-        void pump(); // one snapshot/apply cycle (sim thread)
+        void pump(); // one snapshot/apply cycle (sim thread); uses the bound world
         bool isAttached() const
         {
             return _world != nullptr;
         }
+
+        // Cap how often the snapshot/apply actually runs, in wall-clock terms,
+        // regardless of how fast the sim ticks (or how often you call pump()). The
+        // GUI only needs ~30–60 Hz, so on a fast sim this avoids doing the work
+        // thousands of times per second. 0 = run every time (default). Set e.g. 60.
+        void setMaxPumpRateHz(double hz);
 
         // ── GUI thread: intent ───────────────────────────────────────────────────
         void setRequiredComponent(const QString& componentName); // entity-list filter
@@ -82,31 +127,68 @@ namespace rpe
         void clearInterest();
         void queueEdit(const QString& path, rttr::variant value); // applied next frame
 
+        // Structural component edits. Queued here (GUI thread) and applied on the
+        // simulation thread inside the per-frame system — structural world changes
+        // are never safe from another thread. `component` is the flecs component
+        // name as listed. Adding a component the entity already has, or removing one
+        // it lacks, is a harmless no-op.
+        void addComponent(qulonglong entity, const QString& component);
+        void removeComponent(qulonglong entity, const QString& component);
+
         // ── GUI thread: results (poll on a timer) ────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out); // true if changed since last poll
         bool pollComponents(QStringList& out);        // true if changed since last poll
         std::vector<ValueUpdate> pollValues();        // leaf values that changed
+        bool pollCatalog(QStringList& out); // bridged component names available to add
+
+        // The shared channel. The GUI (EntityComponentBrowser) keeps its own
+        // shared_ptr to this, so it stays valid even if this EcsMirror is
+        // destroyed first (see MirrorChannel).
+        std::shared_ptr<MirrorChannel> channel() const
+        {
+            return _ch;
+        }
 
     private:
-        void _registerSystem();
+        void _install();
+        // Core of pump(). Always runs on the sim thread with the world merged and
+        // the workers idle (frame-end trampoline, or manual pump() after progress()).
+        void _pumpImpl(const flecs::world& world);
+        static void _installTrampoline(ecs_world_t* world, void* ctx);
+        // Frame-end pump (System mode): scheduled by the per-frame task via
+        // ecs_run_post_frame; runs on the sim thread with the world merged.
+        static void _pumpTrampoline(ecs_world_t* world, void* ctx);
+        // Wall-clock rate limiter: true (and stamps the clock) if enough time has
+        // passed since the last pump; false to skip this one. Sim-thread only.
+        bool _rateAllows();
 
-        flecs::world* _world = nullptr;
+        std::shared_ptr<MirrorChannel> _ch; // shared with the GUI consumer
+
+        // Liveness/synchronisation token shared with the system callback and any
+        // deferred install, so they no-op safely if this EcsMirror is destroyed
+        // before they run, and so an in-flight pump never overlaps teardown. A
+        // fresh token is created per attach() (see attach()).
+        std::shared_ptr<MirrorLiveToken> _alive;
+
+        // The UNDERLYING world (ecs_world_t*), not the caller's flecs::world wrapper
+        // object: the wrapper passed to attach() may be a temporary/stack object
+        // (common in plugins that wrap an engine-provided pointer) and can die right
+        // after attach() returns. The raw pointer stays valid for the world's whole
+        // life; scoped flecs::world wrappers are built from it where needed.
+        ecs_world_t* _world = nullptr;
+        PumpMode _mode = PumpMode::System;
+        // Minimum wall-clock gap between pumps (0 = every pump). See setMaxPumpRateHz.
+        std::chrono::duration<double> _minPumpGap { 0.0 };
+        std::chrono::steady_clock::time_point _lastPump {};
         flecs::system _system {};
+        flecs::query<> _entityQuery {};    // cached: built once at attach, never in pump()
+        flecs::query<> _componentQuery {}; // cached: all components, for the bridged-id set
+        // flecs ids of the components that resolve to a bridged RTTR type. Refreshed
+        // during the (throttled) entity scan so the per-entity check is an O(1) hash
+        // lookup instead of a resolveByName() registry scan per component.
+        std::unordered_set<uint64_t> _bridgedIds;
         bool _haveSystem = false;
-
-        // Shared state guarded by _m.
-        mutable std::mutex _m;
-        qulonglong _inEntity = 0;
-        QString _inComponent;
-        QStringList _inPaths;
-        QString _required;
-        std::vector<std::pair<QString, rttr::variant>> _edits;
-
-        QVector<EntityEntry> _outEntities;
-        bool _outEntitiesDirty = false;
-        QStringList _outComponents;
-        bool _outComponentsDirty = false;
-        std::vector<ValueUpdate> _outValues;
+        bool _haveQuery = false;
 
         // Simulation-thread-only state (no lock needed).
         QVector<EntityEntry> _lastEntities;
@@ -114,6 +196,10 @@ namespace rpe
         QHash<QString, QString> _lastValueStr; // path -> last display, for dedup
         qulonglong _lastInterestEntity = 0;
         QString _lastInterestComponent;
+        QString _lastRequired;   // entity-list filter, to detect changes
+        int _entityScanTick = 0; // the all-entity scan is throttled (set rarely changes)
+        QStringList _lastCatalog; // last published add-component catalog (dedup)
+        int _catalogScanTick = 0; // the catalog scan is throttled too
     };
 
 } // namespace rpe
