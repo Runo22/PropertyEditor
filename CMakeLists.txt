@@ -207,6 +207,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_feature_shot test/feature_shot.cpp)
     target_link_libraries(rpe_feature_shot PRIVATE rpe_gui)
 
+    add_executable(rpe_add_button_shot test/add_button_shot.cpp)
+    target_link_libraries(rpe_add_button_shot PRIVATE rpe_gui)
+
     # Dev-only: regenerates resources/icons/*.png (the committed icons the GUI uses).
     add_executable(rpe_makeicons tools/make_icons.cpp)
     target_link_libraries(rpe_makeicons PRIVATE Qt5::Gui)
