@@ -134,6 +134,7 @@ namespace rpe
         void _resetRoot();
         void _buildTree(PropertyNode* parent, rttr::type type, const QString& prefix);
         void _refreshNode(PropertyNode* node, const rttr::variant& val);
+        void _refreshSequential(PropertyNode* node, const rttr::variant& val);
         void _rebuildArrayChildren(PropertyNode* node, const rttr::variant& arrayVal);
         void _applyBatch(const QHash<QString, rttr::variant>& batch);
         void _emitDirtyRanges(PropertyNode* parent);

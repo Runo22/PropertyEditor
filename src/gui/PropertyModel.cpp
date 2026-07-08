@@ -183,25 +183,7 @@ namespace rpe
 
         if (TypeRenderer::isSequential(t))
         {
-            node->setLiveValue(val);
-            auto view = val.create_sequential_view();
-            const int sz = static_cast<int>(view.get_size());
-            if (sz != node->arraySize())
-            {
-                _rebuildArrayChildren(node, val);
-            }
-            else
-            {
-                for (int i = 0; i < sz; ++i)
-                {
-                    auto* child = node->children()[i];
-                    if (child->isOverridden())
-                    {
-                        continue;
-                    }
-                    _refreshNode(child, view.get_value(static_cast<size_t>(i)));
-                }
-            }
+            _refreshSequential(node, val);
         }
         else if (TypeRenderer::isExpandable(t))
         {
@@ -220,6 +202,37 @@ namespace rpe
         else
         {
             node->setLiveValue(val);
+        }
+    }
+
+    // Sync an array node's element rows to a sequential value: rebuild the child
+    // rows when the size changed, otherwise refresh each element in place. Shared by
+    // the schema refresh() path AND the mirror injection path (setPropertyValue),
+    // so arrays display and expand in mirror mode too — where refresh() never runs.
+    void PropertyModel::_refreshSequential(PropertyNode* node, const rttr::variant& val)
+    {
+        node->setLiveValue(val);
+        if (!val.is_valid() || !val.is_sequential_container())
+        {
+            return;
+        }
+        auto view = val.create_sequential_view();
+        const int sz = static_cast<int>(view.get_size());
+        if (sz != node->arraySize())
+        {
+            _rebuildArrayChildren(node, val);
+        }
+        else
+        {
+            for (int i = 0; i < sz; ++i)
+            {
+                auto* child = node->children()[i];
+                if (child->isOverridden())
+                {
+                    continue;
+                }
+                _refreshNode(child, view.get_value(static_cast<size_t>(i)));
+            }
         }
     }
 
@@ -311,7 +324,18 @@ namespace rpe
             {
                 continue;
             }
-            node->setLiveValue(it.value());
+            // An array's whole value arrives as one sequential variant (the mirror
+            // watches the array path, not each element). Build/refresh the element
+            // rows from it — otherwise the array shows blank with no children.
+            const rttr::variant val = TypeRenderer::unwrap(it.value());
+            if (TypeRenderer::isSequential(node->type()) && val.is_sequential_container())
+            {
+                _refreshSequential(node, val);
+            }
+            else
+            {
+                node->setLiveValue(it.value());
+            }
         }
         _emitDirtyRanges(_root.get());
     }
