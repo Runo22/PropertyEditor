@@ -3,12 +3,50 @@
 #include <QColorDialog>
 #include <QFileDialog>
 #include <QHBoxLayout>
+#include <QIcon>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QToolButton>
 
 namespace rpe
 {
+
+    namespace
+    {
+        // A tidy outline folder glyph, drawn to match the inspector's other icons
+        // (thin round-joined strokes in `ink`). Rendered large and scaled down by the
+        // button so it stays crisp on hi-dpi. Used as the "Browse…" affordance.
+        QIcon folderIcon(const QColor& ink)
+        {
+            const int s = 40;
+            QImage img(s, s, QImage::Format_ARGB32);
+            img.fill(Qt::transparent);
+            QPainter p(&img);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            QPen pen(ink);
+            pen.setWidthF(s * 0.075);
+            pen.setCapStyle(Qt::RoundCap);
+            pen.setJoinStyle(Qt::RoundJoin);
+            p.setPen(pen);
+            p.setBrush(Qt::NoBrush);
+            // Folder: a raised tab on the left, then the wider lid/body.
+            QPainterPath path;
+            path.moveTo(s * 0.13, s * 0.35);
+            path.lineTo(s * 0.34, s * 0.35);
+            path.lineTo(s * 0.42, s * 0.45);
+            path.lineTo(s * 0.87, s * 0.45);
+            path.lineTo(s * 0.87, s * 0.74);
+            path.lineTo(s * 0.13, s * 0.74);
+            path.closeSubpath();
+            p.drawPath(path);
+            p.end();
+            return QIcon(QPixmap::fromImage(img));
+        }
+    } // namespace
 
     // ── FilePathEditor ─────────────────────────────────────────────────────────────
 
@@ -24,9 +62,14 @@ namespace rpe
         _edit->setFrame(false);
         layout->addWidget(_edit, 1);
 
+        // Icon-only, flat browse button — a folder glyph instead of a "…" label.
         _button = new QToolButton(this);
-        _button->setText(QStringLiteral("…"));
+        _button->setIcon(folderIcon(palette().color(QPalette::ButtonText)));
+        _button->setIconSize(QSize(16, 16));
+        _button->setAutoRaise(true);
+        _button->setToolTip(tr("Browse…"));
         _button->setCursor(Qt::ArrowCursor);
+        _button->setFocusPolicy(Qt::NoFocus);
         layout->addWidget(_button);
 
         setFocusProxy(_edit);

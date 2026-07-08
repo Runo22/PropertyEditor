@@ -86,10 +86,16 @@ int main(int argc, char* argv[])
     if (const QModelIndex idx = findByPath(view->model(), QStringLiteral("albedoTexture")); idx.isValid())
     {
         const QModelIndex valueIdx = idx.siblingAtColumn(1);
-        view->setCurrentIndex(valueIdx);
         view->openPersistentEditor(valueIdx);
         QCoreApplication::processEvents();
         saveShot(&editor, prefix + QStringLiteral("_files.png"));
+
+        // Zoomed crop of just the edited row, so the folder button reads clearly.
+        const QRect r = view->visualRect(valueIdx).translated(view->viewport()->mapTo(&editor, QPoint(0, 0)));
+        const QPixmap full = editor.grab();
+        const QPixmap row = full.copy(r.adjusted(-4, -3, 6, 3));
+        row.scaled(row.width() * 3, row.height() * 3, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+            .save(prefix + QStringLiteral("_button.png"), "PNG");
         view->closePersistentEditor(valueIdx);
     }
 
