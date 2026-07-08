@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <filesystem>
 
 #include <rttr/enumeration.h>
 #include <rttr/variant_sequential_view.h>
@@ -109,7 +110,16 @@ namespace rpe
         {
             return true;
         }
+        if (isFilePath(r))
+        {
+            return true;
+        }
         return false;
+    }
+
+    bool TypeRenderer::isFilePath(rttr::type t)
+    {
+        return rawType(t) == rttr::type::get<std::filesystem::path>();
     }
 
     QString TypeRenderer::toDisplayString(const rttr::variant& vIn)
@@ -145,6 +155,11 @@ namespace rpe
         if (t == rttr::type::get<QColor>())
         {
             return v.get_value<QColor>().name(QColor::HexArgb);
+        }
+        if (t == rttr::type::get<std::filesystem::path>())
+        {
+            // RTTR can't stringify a path; use its native string form.
+            return QString::fromStdString(v.get_value<std::filesystem::path>().string());
         }
 
         if (t.is_arithmetic())

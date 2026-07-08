@@ -123,6 +123,16 @@ namespace rpe
             return new ColorEditor(parent);
         }
 
+        // std::filesystem::path (auto) → line edit + browse button. The Directory /
+        // SaveFile hints pick the dialog kind; otherwise it's an open-file picker.
+        if (TypeRenderer::isFilePath(t))
+        {
+            const FilePathEditor::Mode m = (ed == QLatin1String(editor::Directory)) ? FilePathEditor::Mode::Directory
+                : (ed == QLatin1String(editor::SaveFile))                            ? FilePathEditor::Mode::SaveFile
+                                                                                     : FilePathEditor::Mode::OpenFile;
+            return new FilePathEditor(m, parent);
+        }
+
         // strings
         if (t == rttr::type::get<std::string>() || t == rttr::type::get<QString>())
         {
@@ -305,7 +315,12 @@ namespace rpe
         }
         else if (auto* fe = qobject_cast<FilePathEditor*>(editor))
         {
-            if (t == rttr::type::get<QString>())
+            if (TypeRenderer::isFilePath(t))
+            {
+                // The bridge builds a std::filesystem::path from this string.
+                newVal = fe->path();
+            }
+            else if (t == rttr::type::get<QString>())
             {
                 newVal = fe->path();
             }

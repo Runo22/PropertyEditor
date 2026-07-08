@@ -1,6 +1,8 @@
 #include "rpe/core/RttrBridge.h"
 #include "rpe/core/TypeRenderer.h"
 
+#include <filesystem>
+
 #include <rttr/variant_sequential_view.h>
 
 namespace rpe::bridge
@@ -135,6 +137,20 @@ namespace rpe::bridge
         if (!value.is_valid() || value.get_type() == raw)
         {
             return value;
+        }
+
+        // std::filesystem::path <- string: RTTR won't auto-convert, so build the
+        // path ourselves. Editors produce a QString/std::string.
+        if (raw == rttr::type::get<std::filesystem::path>())
+        {
+            if (value.get_type() == rttr::type::get<QString>())
+            {
+                return rttr::variant(std::filesystem::path(value.get_value<QString>().toStdString()));
+            }
+            if (value.get_type() == rttr::type::get<std::string>())
+            {
+                return rttr::variant(std::filesystem::path(value.get_value<std::string>()));
+            }
         }
 
         rttr::variant copy = value;

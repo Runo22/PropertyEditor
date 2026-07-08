@@ -33,6 +33,10 @@ namespace rpe
         // True if the type maps to a built-in inline editor (number/bool/string/enum).
         static bool isInlineEditable(rttr::type t);
 
+        // True if the (raw) type is std::filesystem::path — gets a path line-edit +
+        // browse button automatically, no editor hint required.
+        static bool isFilePath(rttr::type t);
+
         // Resolve a possibly-wrapped type to its underlying value type.
         static rttr::type rawType(rttr::type t);
 

@@ -162,6 +162,9 @@ if(RPE_BUILD_DEMO)
 endif()
 
 if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
+    add_executable(rpe_fs_path_test test/fs_path_test.cpp)
+    target_link_libraries(rpe_fs_path_test PRIVATE rpe_gui)
+
     add_executable(rpe_display_format_test test/display_format_test.cpp)
     target_link_libraries(rpe_display_format_test PRIVATE rpe_core)
 
