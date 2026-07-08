@@ -1,4 +1,5 @@
 #include "rpe/core/RttrBridge.h"
+#include "rpe/core/OptionalSupport.h"
 #include "rpe/core/TypeRenderer.h"
 
 #include <filesystem>
@@ -133,6 +134,21 @@ namespace rpe::bridge
 
     rttr::variant coerce(rttr::variant value, rttr::type target)
     {
+        // Optional target: the editor produced an INNER value (target's rawType is
+        // the inner type). Coerce it to the inner type, then wrap it into an engaged
+        // std::optional<T>. (A value already of the optional type — e.g. an explicit
+        // nullopt — is passed through untouched.) Do this before rawType() strips
+        // the optional away.
+        if (OptionalBridge::isOptional(target))
+        {
+            if (value.is_valid() && value.get_type() == target)
+            {
+                return value;
+            }
+            rttr::variant inner = coerce(value, OptionalBridge::innerType(target));
+            return OptionalBridge::engage(target, inner);
+        }
+
         const rttr::type raw = TypeRenderer::rawType(target);
         if (!value.is_valid() || value.get_type() == raw)
         {

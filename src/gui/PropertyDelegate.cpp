@@ -1,6 +1,7 @@
 #include "rpe/gui/PropertyDelegate.h"
 
 #include "rpe/core/EditorHints.h"
+#include "rpe/core/OptionalSupport.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/EditorWidgets.h"
 #include "rpe/gui/PropertyModel.h"
@@ -212,7 +213,12 @@ namespace rpe
             return;
         }
         const rttr::variant vIn = index.data(RttrVariantRole).value<rttr::variant>();
-        const rttr::variant v = TypeRenderer::unwrap(vIn);
+        rttr::variant v = TypeRenderer::unwrap(vIn);
+        // Optional: edit its inner value (empty optionals populate with a default).
+        if (OptionalBridge::isOptional(v.get_type()))
+        {
+            v = v.extract_wrapped_value();
+        }
         const rttr::type t = v.get_type();
 
         if (auto* cb = qobject_cast<QCheckBox*>(editor))

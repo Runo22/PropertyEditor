@@ -1,5 +1,7 @@
 #include "rpe/core/TypeRenderer.h"
 
+#include "rpe/core/OptionalSupport.h"
+
 #include <QColor>
 #include <QStringList>
 
@@ -69,7 +71,19 @@ namespace rpe
 
     rttr::variant TypeRenderer::unwrap(const rttr::variant& v)
     {
-        return v.get_type().is_wrapper() ? v.extract_wrapped_value() : v;
+        if (!v.get_type().is_wrapper())
+        {
+            return v;
+        }
+        // Registered std::optional<T> is a wrapper too, but we keep it INTACT so its
+        // engaged/empty state survives to the display/editor layer (extracting would
+        // silently turn an empty optional into a default value). Everything else
+        // (smart pointers, reference_wrapper) unwraps to the pointee.
+        if (OptionalBridge::isOptional(v.get_type()))
+        {
+            return v;
+        }
+        return v.extract_wrapped_value();
     }
 
     bool TypeRenderer::isSequential(rttr::type t)
@@ -127,6 +141,13 @@ namespace rpe
         if (!vIn.is_valid())
         {
             return QStringLiteral("<invalid>");
+        }
+
+        // Registered std::optional<T>: show "(none)" when empty, else the inner value.
+        if (OptionalBridge::isOptional(vIn.get_type()))
+        {
+            return OptionalBridge::hasValue(vIn) ? toDisplayString(vIn.extract_wrapped_value())
+                                                 : QStringLiteral("(none)");
         }
 
         const rttr::variant v = unwrap(vIn);
