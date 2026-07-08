@@ -17,32 +17,63 @@ namespace rpe
 
     namespace
     {
-        // A tidy outline folder glyph, drawn to match the inspector's other icons
-        // (thin round-joined strokes in `ink`). Rendered large and scaled down by the
-        // button so it stays crisp on hi-dpi. Used as the "Browse…" affordance.
-        QIcon folderIcon(const QColor& ink)
+        // A filled Material-style folder glyph (amber). Reproduces this two-path SVG
+        // bezier-for-bezier on a 48x48 viewBox — a darker back tab (#ffa000) with the
+        // lighter body (#ffca28) on top — so no QtSvg dependency is needed:
+        //   <path fill="#ffa000" d="M40,12H22l-4-4H8c-2.2,0-4,1.8-4,4v24c0,2.2,1.8,4,4,4
+        //         h29.7L44,29V16C44,13.8,42.2,12,40,12z"/>
+        //   <path fill="#ffca28" d="M40,12H8c-2.2,0-4,1.8-4,4v20c0,2.2,1.8,4,4,4h32c2.2,0,
+        //         4-1.8,4-4V16C44,13.8,42.2,12,40,12z"/>
+        // Rendered large and scaled down by the button so it stays crisp on hi-dpi.
+        QIcon folderIcon()
         {
-            const int s = 40;
+            // Back tab (#ffa000).
+            QPainterPath back;
+            back.moveTo(40, 12);
+            back.lineTo(22, 12);
+            back.lineTo(18, 8);
+            back.lineTo(8, 8);
+            back.cubicTo(5.8, 8, 4, 9.8, 4, 12);
+            back.lineTo(4, 36);
+            back.cubicTo(4, 38.2, 5.8, 40, 8, 40);
+            back.lineTo(37.7, 40);
+            back.lineTo(44, 29);
+            back.lineTo(44, 16);
+            back.cubicTo(44, 13.8, 42.2, 12, 40, 12);
+            back.closeSubpath();
+
+            // Front body (#ffca28), drawn over the tab.
+            QPainterPath front;
+            front.moveTo(40, 12);
+            front.lineTo(8, 12);
+            front.cubicTo(5.8, 12, 4, 13.8, 4, 16);
+            front.lineTo(4, 36);
+            front.cubicTo(4, 38.2, 5.8, 40, 8, 40);
+            front.lineTo(40, 40);
+            front.cubicTo(42.2, 40, 44, 38.2, 44, 36);
+            front.lineTo(44, 16);
+            front.cubicTo(44, 13.8, 42.2, 12, 40, 12);
+            front.closeSubpath();
+
+            const int s = 96; // hi-res, downscaled by the button for crispness
             QImage img(s, s, QImage::Format_ARGB32);
             img.fill(Qt::transparent);
             QPainter p(&img);
             p.setRenderHint(QPainter::Antialiasing, true);
-            QPen pen(ink);
-            pen.setWidthF(s * 0.075);
-            pen.setCapStyle(Qt::RoundCap);
-            pen.setJoinStyle(Qt::RoundJoin);
-            p.setPen(pen);
-            p.setBrush(Qt::NoBrush);
-            // Folder: a raised tab on the left, then the wider lid/body.
-            QPainterPath path;
-            path.moveTo(s * 0.13, s * 0.35);
-            path.lineTo(s * 0.34, s * 0.35);
-            path.lineTo(s * 0.42, s * 0.45);
-            path.lineTo(s * 0.87, s * 0.45);
-            path.lineTo(s * 0.87, s * 0.74);
-            path.lineTo(s * 0.13, s * 0.74);
-            path.closeSubpath();
-            p.drawPath(path);
+            p.setPen(Qt::NoPen);
+
+            // The SVG leaves whitespace inside its 48x48 box; scale the glyph's actual
+            // bounds to fill the icon (tiny margin) so it isn't rendered small.
+            const QRectF b = back.boundingRect().united(front.boundingRect());
+            const qreal margin = s * 0.04;
+            const qreal scale = (s - 2 * margin) / qMax(b.width(), b.height());
+            p.translate(margin + (s - 2 * margin - b.width() * scale) / 2.0,
+                        margin + (s - 2 * margin - b.height() * scale) / 2.0);
+            p.scale(scale, scale);
+            p.translate(-b.left(), -b.top());
+
+            p.fillPath(back, QColor(0xFF, 0xA0, 0x00));
+            p.fillPath(front, QColor(0xFF, 0xCA, 0x28));
             p.end();
             return QIcon(QPixmap::fromImage(img));
         }
@@ -63,10 +94,13 @@ namespace rpe
         layout->addWidget(_edit, 1);
 
         // Icon-only, flat browse button — a folder glyph instead of a "…" label.
+        // No border/padding so the icon fills the cell height instead of shrinking.
         _button = new QToolButton(this);
-        _button->setIcon(folderIcon(palette().color(QPalette::ButtonText)));
-        _button->setIconSize(QSize(16, 16));
+        _button->setIcon(folderIcon());
+        _button->setIconSize(QSize(22, 22));
         _button->setAutoRaise(true);
+        _button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        _button->setStyleSheet(QStringLiteral("QToolButton { border: none; margin: 0; padding: 0; background: transparent; }"));
         _button->setToolTip(tr("Browse…"));
         _button->setCursor(Qt::ArrowCursor);
         _button->setFocusPolicy(Qt::NoFocus);
