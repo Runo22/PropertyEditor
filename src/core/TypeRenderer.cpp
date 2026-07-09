@@ -17,9 +17,11 @@ namespace rpe
     {
         std::atomic<int> g_floatDecimals { 3 };
 
-        // Fixed-point float display: never scientific notation. Trailing zeros (and
-        // a bare trailing dot) are trimmed, so 0.5 stays "0.5" and anything smaller
-        // than the last shown digit collapses to "0" (not "2.5e-05", not "-0").
+        // Fixed-point float display: no scientific notation for ordinary magnitudes.
+        // Trailing zeros (and a bare trailing dot) are trimmed, so 0.5 stays "0.5" and
+        // anything smaller than the last shown digit collapses to "0" (not "2.5e-05",
+        // not "-0"). Values >= 1e15 are the one exception — printing them fixed-point
+        // would be an unreadable 15+ digit run, so they fall back to compact form.
         QString formatFloating(double v)
         {
             if (std::isnan(v) || std::isinf(v))
@@ -158,8 +160,9 @@ namespace rpe
         }
         if (t == rttr::type::get<std::filesystem::path>())
         {
-            // RTTR can't stringify a path; use its native string form.
-            return QString::fromStdString(v.get_value<std::filesystem::path>().string());
+            // RTTR can't stringify a path; use its UTF-16 form (path::string() is
+            // lossy — and can throw — for non-ASCII paths on Windows).
+            return QString::fromStdU16String(v.get_value<std::filesystem::path>().u16string());
         }
 
         if (t.is_arithmetic())

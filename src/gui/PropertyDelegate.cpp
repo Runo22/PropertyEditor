@@ -93,24 +93,11 @@ namespace rpe
         QStyledItemDelegate::paint(painter, option, index);
     }
 
-    QWidget* PropertyDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const
+    // Builds the editor widget for a leaf of declared type `t` (with editor hint
+    // `ed`). Returns nullptr for types that aren't inline-editable. Kept separate so
+    // createEditor only pins the row once it knows an editor will actually open.
+    QWidget* PropertyDelegate::_makeEditor(rttr::type t, const QString& ed, const QModelIndex& index, QWidget* parent) const
     {
-        if (!index.isValid())
-        {
-            return nullptr;
-        }
-
-        // Pin the row while the editor is open so live refresh can't clobber it.
-        // Remember the prior pin state so a cancelled edit can restore it.
-        _editPath = index.data(PropertyPathRole).toString();
-        _editWasOverridden = index.data(IsOverriddenRole).toBool();
-        _editCommitted = false;
-        _model->overrideNode(_editPath);
-
-        const rttr::variant cur = index.data(RttrVariantRole).value<rttr::variant>();
-        const rttr::type t = TypeRenderer::rawType(cur.get_type());
-        const QString ed = index.data(EditorHintRole).toString();
-
         // bool
         if (t == rttr::type::get<bool>())
         {
@@ -123,13 +110,16 @@ namespace rpe
             return new ColorEditor(parent);
         }
 
-        // std::filesystem::path (auto) → line edit + browse button. The Directory /
-        // SaveFile hints pick the dialog kind; otherwise it's an open-file picker.
+        // std::filesystem::path (auto) → line edit + browse button. A Directory /
+        // SaveFile / FilePath hint pins the dialog kind; with NO hint the browse
+        // button offers BOTH a file and a folder picker (the type alone can't say
+        // which is meant), so a folder can be chosen without registering the property.
         if (TypeRenderer::isFilePath(t))
         {
             const FilePathEditor::Mode m = (ed == QLatin1String(editor::Directory)) ? FilePathEditor::Mode::Directory
                 : (ed == QLatin1String(editor::SaveFile))                            ? FilePathEditor::Mode::SaveFile
-                                                                                     : FilePathEditor::Mode::OpenFile;
+                : (ed == QLatin1String(editor::FilePath))                            ? FilePathEditor::Mode::OpenFile
+                                                                                     : FilePathEditor::Mode::FileOrDirectory;
             return new FilePathEditor(m, parent);
         }
 
@@ -205,6 +195,40 @@ namespace rpe
         return nullptr; // expandable / unsupported types are not inline-editable
     }
 
+    QWidget* PropertyDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const
+    {
+        if (!index.isValid())
+        {
+            return nullptr;
+        }
+
+        // Pick the editor from the node's DECLARED (schema) type, not the live value:
+        // in mirror mode the value may not have arrived yet, and right after an edit
+        // the live value is the editor's transient output — both would otherwise
+        // select the wrong editor (e.g. a plain line edit for a path with no browse).
+        const rttr::variant declared = index.data(DeclaredTypeRole).value<rttr::variant>();
+        const rttr::type t = declared.is_valid()
+            ? TypeRenderer::rawType(declared.get_value<rttr::type>())
+            : TypeRenderer::rawType(index.data(RttrVariantRole).value<rttr::variant>().get_type());
+        const QString ed = index.data(EditorHintRole).toString();
+
+        QWidget* w = _makeEditor(t, ed, index, parent);
+        if (!w)
+        {
+            return nullptr;
+        }
+
+        // Pin the row only now that an editor will actually open, so live refresh
+        // can't clobber it — and a cell that yields no editor is never left stuck
+        // overridden (which would freeze its live updates). Remember the prior pin
+        // state so a cancelled edit can restore it.
+        _editPath = index.data(PropertyPathRole).toString();
+        _editWasOverridden = index.data(IsOverriddenRole).toBool();
+        _editCommitted = false;
+        _model->overrideNode(_editPath);
+        return w;
+    }
+
     void PropertyDelegate::setEditorData(QWidget* editor, const QModelIndex& index) const
     {
         if (!editor || !index.isValid())
@@ -214,6 +238,9 @@ namespace rpe
         const rttr::variant vIn = index.data(RttrVariantRole).value<rttr::variant>();
         const rttr::variant v = TypeRenderer::unwrap(vIn);
         const rttr::type t = v.get_type();
+        // Text shown in string-like editors — empty (not "<invalid>") when the value
+        // hasn't arrived yet, e.g. a path cell edited before the first mirror pump.
+        const QString text = v.is_valid() ? TypeRenderer::toDisplayString(v) : QString();
 
         if (auto* cb = qobject_cast<QCheckBox*>(editor))
         {
@@ -235,17 +262,17 @@ namespace rpe
         }
         if (auto* te = qobject_cast<QPlainTextEdit*>(editor))
         {
-            te->setPlainText(TypeRenderer::toDisplayString(v));
+            te->setPlainText(text);
             return;
         }
         if (auto* le = qobject_cast<QLineEdit*>(editor))
         {
-            le->setText(TypeRenderer::toDisplayString(v));
+            le->setText(text);
             return;
         }
         if (auto* fe = qobject_cast<FilePathEditor*>(editor))
         {
-            fe->setPath(TypeRenderer::toDisplayString(v));
+            fe->setPath(text);
             return;
         }
         if (auto* cb = qobject_cast<QComboBox*>(editor))
@@ -278,8 +305,13 @@ namespace rpe
         {
             return;
         }
-        const rttr::variant oldVal = index.data(RttrVariantRole).value<rttr::variant>();
-        const rttr::type t = TypeRenderer::rawType(oldVal.get_type());
+        // Use the declared (schema) type, not the live value — the value may be
+        // absent, or (right after an edit) hold the editor's transient output, either
+        // of which would misroute the conversion below.
+        const rttr::variant declared = index.data(DeclaredTypeRole).value<rttr::variant>();
+        const rttr::type t = declared.is_valid()
+            ? TypeRenderer::rawType(declared.get_value<rttr::type>())
+            : TypeRenderer::rawType(index.data(RttrVariantRole).value<rttr::variant>().get_type());
 
         rttr::variant newVal;
 
@@ -315,12 +347,9 @@ namespace rpe
         }
         else if (auto* fe = qobject_cast<FilePathEditor*>(editor))
         {
-            if (TypeRenderer::isFilePath(t))
-            {
-                // The bridge builds a std::filesystem::path from this string.
-                newVal = fe->path();
-            }
-            else if (t == rttr::type::get<QString>())
+            // Emit a QString for path (the bridge builds std::filesystem::path from
+            // it) and for QString targets; a std::string target gets a std::string.
+            if (TypeRenderer::isFilePath(t) || t == rttr::type::get<QString>())
             {
                 newVal = fe->path();
             }

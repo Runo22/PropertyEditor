@@ -1,5 +1,6 @@
 #include "rpe/gui/EditorWidgets.h"
 
+#include <QAction>
 #include <QColorDialog>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -7,9 +8,11 @@
 #include <QImage>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QStyle>
 #include <QToolButton>
 
 namespace rpe
@@ -25,7 +28,8 @@ namespace rpe
         //   <path fill="#ffca28" d="M40,12H8c-2.2,0-4,1.8-4,4v20c0,2.2,1.8,4,4,4h32c2.2,0,
         //         4-1.8,4-4V16C44,13.8,42.2,12,40,12z"/>
         // Rendered large and scaled down by the button so it stays crisp on hi-dpi.
-        QIcon folderIcon()
+        // Built once (the glyph is a constant) and shared.
+        QIcon buildFolderIcon()
         {
             // Back tab (#ffa000).
             QPainterPath back;
@@ -77,6 +81,12 @@ namespace rpe
             p.end();
             return QIcon(QPixmap::fromImage(img));
         }
+
+        const QIcon& folderIcon()
+        {
+            static const QIcon icon = buildFolderIcon();
+            return icon;
+        }
     } // namespace
 
     // ── FilePathEditor ─────────────────────────────────────────────────────────────
@@ -100,15 +110,36 @@ namespace rpe
         _button->setIconSize(QSize(22, 22));
         _button->setAutoRaise(true);
         _button->setToolButtonStyle(Qt::ToolButtonIconOnly);
-        _button->setStyleSheet(QStringLiteral("QToolButton { border: none; margin: 0; padding: 0; background: transparent; }"));
-        _button->setToolTip(tr("Browse…"));
         _button->setCursor(Qt::ArrowCursor);
         _button->setFocusPolicy(Qt::NoFocus);
         layout->addWidget(_button);
 
+        if (_mode == Mode::FileOrDirectory)
+        {
+            // The type alone can't say file-vs-folder, so offer both from a tidy
+            // popup on the same folder button (no separate split control). The menu
+            // indicator arrow is hidden so the button stays a clean icon.
+            _button->setStyleSheet(QStringLiteral(
+                "QToolButton { border: none; margin: 0; padding: 0; background: transparent; }"
+                "QToolButton::menu-indicator { image: none; }"));
+            _button->setToolTip(tr("Browse for a file or folder…"));
+            auto* menu = new QMenu(_button);
+            QAction* pickFile = menu->addAction(_button->style()->standardIcon(QStyle::SP_FileIcon), tr("Choose File…"));
+            QAction* pickDir = menu->addAction(folderIcon(), tr("Choose Folder…"));
+            connect(pickFile, &QAction::triggered, this, [this] { _pick(Mode::OpenFile); });
+            connect(pickDir, &QAction::triggered, this, [this] { _pick(Mode::Directory); });
+            _button->setMenu(menu);
+            _button->setPopupMode(QToolButton::InstantPopup);
+        }
+        else
+        {
+            _button->setStyleSheet(QStringLiteral("QToolButton { border: none; margin: 0; padding: 0; background: transparent; }"));
+            _button->setToolTip(tr("Browse…"));
+            connect(_button, &QToolButton::clicked, this, &FilePathEditor::_browse);
+        }
+
         setFocusProxy(_edit);
         connect(_edit, &QLineEdit::textChanged, this, &FilePathEditor::pathChanged);
-        connect(_button, &QToolButton::clicked, this, &FilePathEditor::_browse);
     }
 
     QString FilePathEditor::path() const
@@ -126,17 +157,23 @@ namespace rpe
 
     void FilePathEditor::_browse()
     {
+        _pick(_mode);
+    }
+
+    void FilePathEditor::_pick(Mode m)
+    {
         QString picked;
-        switch (_mode)
+        switch (m)
         {
-        case Mode::OpenFile:
-            picked = QFileDialog::getOpenFileName(this, tr("Select File"), _edit->text(), _filter);
-            break;
         case Mode::SaveFile:
             picked = QFileDialog::getSaveFileName(this, tr("Save File"), _edit->text(), _filter);
             break;
         case Mode::Directory:
             picked = QFileDialog::getExistingDirectory(this, tr("Select Folder"), _edit->text());
+            break;
+        case Mode::OpenFile:
+        case Mode::FileOrDirectory: // FileOrDirectory drives _pick with a concrete mode
+            picked = QFileDialog::getOpenFileName(this, tr("Select File"), _edit->text(), _filter);
             break;
         }
         if (!picked.isEmpty())

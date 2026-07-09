@@ -11,7 +11,9 @@
 #include <QAbstractItemModel>
 #include <QApplication>
 #include <QHeaderView>
+#include <QMenu>
 #include <QPixmap>
+#include <QToolButton>
 #include <QTreeView>
 
 #include <cstdio>
@@ -89,6 +91,19 @@ int main(int argc, char* argv[])
         view->openPersistentEditor(valueIdx);
         QCoreApplication::processEvents();
         saveShot(&editor, prefix + QStringLiteral("_files.png"));
+
+        // albedoTexture has no editor hint → the browse button offers BOTH a file and
+        // a folder picker. Grab the menu widget directly (offscreen has no live popup).
+        if (auto* btn = view->findChild<QToolButton*>())
+        {
+            if (QMenu* menu = btn->menu())
+            {
+                menu->popup(QPoint(0, 0));
+                QCoreApplication::processEvents();
+                saveShot(menu, prefix + QStringLiteral("_menu.png"));
+                menu->close();
+            }
+        }
 
         // Zoomed crop of just the edited row, so the folder button reads clearly.
         const QRect r = view->visualRect(valueIdx).translated(view->viewport()->mapTo(&editor, QPoint(0, 0)));

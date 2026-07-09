@@ -105,6 +105,27 @@ int main(int argc, char** argv)
         check("nested field points.[0].x displays (1)", x == QStringLiteral("1"));
     }
 
+    // ── A resize is deferred while an element has an open editor (no teardown) ──
+    // overrideNode() is exactly the pin createEditor applies; the destructive
+    // rebuild must not free a pinned element node out from under a live editor.
+    {
+        std::vector<int> base { 1, 2, 3 };
+        model.setPropertyValue(QStringLiteral("nums"), rttr::variant(base));
+        QCoreApplication::processEvents();
+        check("array has 3 rows before pin", model.rowCount(topIndex(model, QStringLiteral("nums"))) == 3);
+
+        model.overrideNode(QStringLiteral("nums.[1]")); // an editor is open on element [1]
+        std::vector<int> grown { 1, 2, 3, 4, 5 };
+        model.setPropertyValue(QStringLiteral("nums"), rttr::variant(grown));
+        QCoreApplication::processEvents();
+        check("resize deferred while a child is pinned (still 3 rows)", model.rowCount(topIndex(model, QStringLiteral("nums"))) == 3);
+
+        model.resetNode(QStringLiteral("nums.[1]")); // editor closed → pin released
+        model.setPropertyValue(QStringLiteral("nums"), rttr::variant(grown));
+        QCoreApplication::processEvents();
+        check("resize applies once the pin is released (5 rows)", model.rowCount(topIndex(model, QStringLiteral("nums"))) == 5);
+    }
+
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;
 }

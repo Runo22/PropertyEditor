@@ -25,7 +25,8 @@ namespace rpe
         {
             OpenFile,
             SaveFile,
-            Directory
+            Directory,
+            FileOrDirectory // browse button offers BOTH a file and a folder picker
         };
 
         explicit FilePathEditor(Mode mode, QWidget* parent = nullptr);
@@ -44,6 +45,7 @@ namespace rpe
         void _browse();
 
     private:
+        void _pick(Mode m); // run the dialog for a specific mode, store the result
         Mode _mode;
         QString _filter = QStringLiteral("All files (*)");
         QLineEdit* _edit = nullptr;

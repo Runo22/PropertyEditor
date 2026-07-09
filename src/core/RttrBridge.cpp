@@ -143,13 +143,15 @@ namespace rpe::bridge
         // path ourselves. Editors produce a QString/std::string.
         if (raw == rttr::type::get<std::filesystem::path>())
         {
+            // Build via UTF-16 / UTF-8 so non-ASCII paths survive on Windows (a plain
+            // narrow std::string is decoded with the active ANSI codepage there).
             if (value.get_type() == rttr::type::get<QString>())
             {
-                return rttr::variant(std::filesystem::path(value.get_value<QString>().toStdString()));
+                return rttr::variant(std::filesystem::path(value.get_value<QString>().toStdU16String()));
             }
             if (value.get_type() == rttr::type::get<std::string>())
             {
-                return rttr::variant(std::filesystem::path(value.get_value<std::string>()));
+                return rttr::variant(std::filesystem::u8path(value.get_value<std::string>()));
             }
         }
 

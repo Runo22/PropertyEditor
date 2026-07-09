@@ -2,6 +2,10 @@
 
 #include <QStyledItemDelegate>
 
+#include <rttr/type.h>
+
+class QWidget;
+
 namespace rpe
 {
 
@@ -33,6 +37,11 @@ namespace rpe
         void destroyEditor(QWidget* editor, const QModelIndex& index) const override;
 
     private:
+        // Builds the editor widget for a leaf of declared type `t`; nullptr if the
+        // type isn't inline-editable. Separate so createEditor pins the row only on
+        // success.
+        QWidget* _makeEditor(rttr::type t, const QString& ed, const QModelIndex& index, QWidget* parent) const;
+
         PropertyModel* _model;
         // Track the in-progress edit so a cancelled edit (Esc / focus loss without
         // commit) un-pins a row we pinned in createEditor.
