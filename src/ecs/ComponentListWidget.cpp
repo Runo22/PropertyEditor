@@ -21,6 +21,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <functional>
 
 // rpe_gui is a STATIC library; its embedded .qrc is only auto-registered if some
@@ -480,6 +481,30 @@ namespace rpe
             });
         });
 
+        // Sort names and their parallel ComponentInfos together, alphabetically by
+        // the displayed leaf name (item UserRole stays the index into _components).
+        {
+            QVector<int> order(names.size());
+            for (int i = 0; i < names.size(); ++i)
+            {
+                order[i] = i;
+            }
+            std::sort(order.begin(), order.end(), [&](int a, int b) {
+                return componentLeaf(names[a]).compare(componentLeaf(names[b]), Qt::CaseInsensitive) < 0;
+            });
+            QStringList sortedNames;
+            QVector<ComponentInfo> sortedInfos;
+            sortedNames.reserve(names.size());
+            sortedInfos.reserve(_components.size());
+            for (int i : order)
+            {
+                sortedNames.append(names[i]);
+                sortedInfos.append(_components[i]);
+            }
+            names = sortedNames;
+            _components = sortedInfos;
+        }
+
         _list->blockSignals(true);
         _list->clear();
         for (int i = 0; i < names.size(); ++i)
@@ -503,8 +528,14 @@ namespace rpe
         _guard = std::move(guard);
     }
 
-    void ComponentListWidget::setComponentNames(const QStringList& names)
+    void ComponentListWidget::setComponentNames(const QStringList& namesIn)
     {
+        // Show components sorted alphabetically by their displayed leaf name.
+        QStringList names = namesIn;
+        std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
+            return componentLeaf(a).compare(componentLeaf(b), Qt::CaseInsensitive) < 0;
+        });
+
         if (names == _mirrorNames)
         {
             return; // unchanged → keep selection, no flicker

@@ -148,8 +148,13 @@ namespace rpe
         void propertyEdited(const QString& path, const rttr::variant& newValue);
 
         // Selection pass-throughs so a host application can react to what the user
-        // is inspecting (e.g. highlight the entity in a 3D view).
+        // is inspecting (e.g. highlight the entity in a 3D view). Emitted on the GUI
+        // (Qt) thread. `entitySelected` carries a flecs::entity and fires in direct
+        // mode only (mirror mode has no world handle here); `entityIdSelected` carries
+        // the raw entity id and fires in BOTH modes — connect to this one for a
+        // mode-independent "an entity was selected" notification.
         void entitySelected(flecs::entity e);
+        void entityIdSelected(qulonglong id);
         void entityDeselected();
         void componentSelected(const ComponentInfo& info);
         void componentDeselected();

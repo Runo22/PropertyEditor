@@ -168,6 +168,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_array_mirror_test test/array_mirror_test.cpp)
     target_link_libraries(rpe_array_mirror_test PRIVATE rpe_gui)
 
+    add_executable(rpe_list_sort_test test/list_sort_test.cpp)
+    target_link_libraries(rpe_list_sort_test PRIVATE rpe_gui)
+
     add_executable(rpe_display_format_test test/display_format_test.cpp)
     target_link_libraries(rpe_display_format_test PRIVATE rpe_core)
 

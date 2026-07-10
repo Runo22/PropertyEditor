@@ -9,6 +9,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace rpe
 {
 
@@ -205,8 +207,16 @@ namespace rpe
         _applyEntries(filtered);
     }
 
-    void EntityListWidget::_applyEntries(const QVector<QPair<qulonglong, QString>>& entries)
+    void EntityListWidget::_applyEntries(const QVector<QPair<qulonglong, QString>>& entriesIn)
     {
+        // Show entities sorted alphabetically by label (case-insensitive), id as a
+        // stable tiebreaker for same-named entities.
+        QVector<QPair<qulonglong, QString>> entries = entriesIn;
+        std::sort(entries.begin(), entries.end(), [](const QPair<qulonglong, QString>& a, const QPair<qulonglong, QString>& b) {
+            const int c = a.second.compare(b.second, Qt::CaseInsensitive);
+            return c != 0 ? c < 0 : a.first < b.first;
+        });
+
         // Skip the rebuild when the visible set is unchanged — avoids flicker.
         if (entries == _lastEntries)
         {
@@ -224,7 +234,7 @@ namespace rpe
         _list->blockSignals(true);
         _list->clear();
 
-        bool reselected = false;
+        QListWidgetItem* reselect = nullptr;
         for (const auto& entry : entries)
         { // .first/.second: Qt 5.12 has no QPair bindings
             auto* item = new QListWidgetItem(entry.second, _list);
@@ -232,13 +242,25 @@ namespace rpe
             if (entry.first == selectedId)
             {
                 _list->setCurrentItem(item);
-                reselected = true;
+                reselect = item;
             }
         }
 
         _list->blockSignals(false);
 
-        if (!reselected && selectedId != 0)
+        if (reselect)
+        {
+            return; // the user's selection survived — leave it (and don't re-emit)
+        }
+
+        // Nothing was reselected: if any entity exists, select the top one so the
+        // panel is never left blank on first populate (or after the selected entity
+        // disappeared). Signals are unblocked here, so listeners are notified.
+        if (_list->count() > 0)
+        {
+            _list->setCurrentRow(0);
+        }
+        else if (selectedId != 0)
         {
             emit entityDeselected();
         }

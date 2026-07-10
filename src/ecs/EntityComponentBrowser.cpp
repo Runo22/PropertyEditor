@@ -230,6 +230,7 @@ namespace rpe
         _liveTimer->stop();
         _componentList->setEntity(_world, e); // auto-selects first component
         emit entitySelected(e);
+        emit entityIdSelected(static_cast<qulonglong>(e.id()));
     }
 
     void EntityComponentBrowser::_onEntityDeselected()
@@ -459,6 +460,7 @@ namespace rpe
             return; // direct mode uses _onEntitySelected
         }
         _mirrorEntity = id;
+        emit entityIdSelected(id); // mode-independent selection notification (GUI thread)
         // Force a full resend: re-selecting the same entity (e.g. after a filter
         // dropped then restored it) leaves the producer's caches unchanged, so the
         // component list / values would otherwise never repopulate.
