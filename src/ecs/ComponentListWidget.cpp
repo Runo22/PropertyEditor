@@ -207,7 +207,10 @@ namespace rpe
         _addBtn = new QToolButton(this);
         _addBtn->setText(tr("Add"));
         _addBtn->setIcon(QIcon(QStringLiteral(":/rpe/icons/add.png")));
+        _addBtn->setIconSize(QSize(14, 14)); // proportional to the label
         _addBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        // A little breathing room so the "+ Add" isn't cramped against the glyph/edges.
+        _addBtn->setStyleSheet(QStringLiteral("QToolButton { padding: 2px 6px; }"));
         _addBtn->setToolTip(tr("Add a component to the selected entity"));
         _addBtn->setAutoRaise(true);
         _addBtn->setVisible(false); // shown only when editing is enabled

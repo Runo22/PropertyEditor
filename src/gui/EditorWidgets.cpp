@@ -12,6 +12,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QProxyStyle>
 #include <QStyle>
 #include <QToolButton>
 
@@ -87,6 +88,72 @@ namespace rpe
             static const QIcon icon = buildFolderIcon();
             return icon;
         }
+
+        // A filled document glyph (blue-grey) with a folded corner, drawn the SAME way
+        // as the folder — same 48 viewBox, same bounds-fill margin — so the two read as
+        // a matched set and line up in the file/folder menu.
+        QIcon buildFileIcon()
+        {
+            QPainterPath body; // page, with the top-right corner cut for the fold
+            body.moveTo(12, 6);
+            body.lineTo(30, 6);
+            body.lineTo(38, 14);
+            body.lineTo(38, 42);
+            body.lineTo(12, 42);
+            body.closeSubpath();
+
+            QPainterPath fold; // the folded corner triangle
+            fold.moveTo(30, 6);
+            fold.lineTo(38, 14);
+            fold.lineTo(30, 14);
+            fold.closeSubpath();
+
+            QPainterPath lines; // a few "text" rules
+            lines.addRect(17, 22, 16, 2);
+            lines.addRect(17, 28, 16, 2);
+            lines.addRect(17, 34, 11, 2);
+
+            const int s = 96;
+            QImage img(s, s, QImage::Format_ARGB32);
+            img.fill(Qt::transparent);
+            QPainter p(&img);
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setPen(Qt::NoPen);
+
+            const QRectF b = body.boundingRect();
+            const qreal margin = s * 0.04;
+            const qreal scale = (s - 2 * margin) / qMax(b.width(), b.height());
+            p.translate(margin + (s - 2 * margin - b.width() * scale) / 2.0,
+                        margin + (s - 2 * margin - b.height() * scale) / 2.0);
+            p.scale(scale, scale);
+            p.translate(-b.left(), -b.top());
+
+            p.fillPath(body, QColor(0x90, 0xA4, 0xAE));  // blue-grey 300 page
+            p.fillPath(fold, QColor(0x60, 0x7D, 0x8B));  // blue-grey 600 corner
+            p.fillPath(lines, QColor(0xEC, 0xEF, 0xF1)); // near-white text
+            p.end();
+            return QIcon(QPixmap::fromImage(img));
+        }
+
+        const QIcon& fileIcon()
+        {
+            static const QIcon icon = buildFileIcon();
+            return icon;
+        }
+
+        // Bumps the menu icon size (default ~16px looks small next to the label). A
+        // proxy over the current style so any active QSS still renders the menu.
+        class MenuIconStyle : public QProxyStyle
+        {
+        public:
+            using QProxyStyle::QProxyStyle;
+            int pixelMetric(PixelMetric m, const QStyleOption* opt = nullptr, const QWidget* w = nullptr) const override
+            {
+                if (m == QStyle::PM_SmallIconSize)
+                    return 20;
+                return QProxyStyle::pixelMetric(m, opt, w);
+            }
+        };
     } // namespace
 
     // ── FilePathEditor ─────────────────────────────────────────────────────────────
@@ -107,7 +174,7 @@ namespace rpe
         // No border/padding so the icon fills the cell height instead of shrinking.
         _button = new QToolButton(this);
         _button->setIcon(folderIcon());
-        _button->setIconSize(QSize(22, 22));
+        _button->setIconSize(QSize(16, 16)); // compact enough to fit a tree-cell row
         _button->setAutoRaise(true);
         _button->setToolButtonStyle(Qt::ToolButtonIconOnly);
         _button->setCursor(Qt::ArrowCursor);
@@ -124,7 +191,10 @@ namespace rpe
                 "QToolButton::menu-indicator { image: none; }"));
             _button->setToolTip(tr("Browse for a file or folder…"));
             auto* menu = new QMenu(_button);
-            QAction* pickFile = menu->addAction(_button->style()->standardIcon(QStyle::SP_FileIcon), tr("Choose File…"));
+            auto* menuStyle = new MenuIconStyle; // wraps the app style; larger icons
+            menuStyle->setParent(menu);
+            menu->setStyle(menuStyle);
+            QAction* pickFile = menu->addAction(fileIcon(), tr("Choose File…"));
             QAction* pickDir = menu->addAction(folderIcon(), tr("Choose Folder…"));
             connect(pickFile, &QAction::triggered, this, [this] { _pick(Mode::OpenFile); });
             connect(pickDir, &QAction::triggered, this, [this] { _pick(Mode::Directory); });
@@ -152,6 +222,9 @@ namespace rpe
         if (_edit->text() != p)
         {
             _edit->setText(p);
+            // Show the START of a long path (the meaningful part) rather than letting
+            // it scroll to the end in a narrow value column.
+            _edit->setCursorPosition(0);
         }
     }
 
