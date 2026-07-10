@@ -265,6 +265,7 @@ namespace rpe
         // A small popup: a filter box over a tree of addable components grouped by
         // namespace. Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.
         auto* popup = new QFrame(this, Qt::Popup);
+        popup->setObjectName(QStringLiteral("rpeAddPopup")); // so a stylesheet can target it
         popup->setAttribute(Qt::WA_DeleteOnClose);
         popup->setFrameShape(QFrame::StyledPanel);
         auto* lay = new QVBoxLayout(popup);

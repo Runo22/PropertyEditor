@@ -115,6 +115,7 @@ set(RPE_GUI_SOURCES
     src/gui/EditorWidgets.cpp
     src/gui/PropertyEditor.cpp
     src/gui/VariantEditor.cpp
+    src/gui/DarkStyle.cpp
     # Q_OBJECT headers listed so AUTOMOC processes them (separate include/ tree).
     include/rpe/gui/PropertyModel.h
     include/rpe/gui/PropertyDelegate.h
@@ -170,6 +171,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_list_sort_test test/list_sort_test.cpp)
     target_link_libraries(rpe_list_sort_test PRIVATE rpe_gui)
+
+    add_executable(rpe_dark_style_shot test/dark_style_shot.cpp)
+    target_link_libraries(rpe_dark_style_shot PRIVATE rpe_gui)
 
     add_executable(rpe_display_format_test test/display_format_test.cpp)
     target_link_libraries(rpe_display_format_test PRIVATE rpe_core)
