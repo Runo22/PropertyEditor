@@ -2,6 +2,7 @@
 
 #include "rpe/core/rttr_prelude.h"
 
+#include <string_view>
 #include <vector>
 
 namespace rpe
@@ -74,7 +75,7 @@ namespace rpe
         // component is "TfXform"): resolveByName("TfXform") then finds T. The exact
         // and short-name matching of the no-arg overload still applies on top.
         template <class T>
-        static void registerType(const char* flecsName)
+        static void registerType(std::string_view flecsName)
         {
             registerType<T>();
             registerAlias(rttr::type::get<T>(), flecsName);
@@ -87,7 +88,9 @@ namespace rpe
         }
 
         // Map an explicit flecs component name onto an already-registered type.
-        static void registerAlias(rttr::type t, const char* flecsName);
+        // Accepts any string source (const char* / std::string / view); the name is
+        // copied into the registry, so no null-termination or lifetime is assumed.
+        static void registerAlias(rttr::type t, std::string_view flecsName);
 
         // Remove only the bridge entry for `t` (RTTR registration is untouched).
         static void unregisterType(rttr::type t);
@@ -101,8 +104,9 @@ namespace rpe
         // order: an explicit alias (registerType<T>(name) / registerAlias), the
         // exact RTTR name, then the short name (segment after the last "::") — flecs
         // reports the unscoped component name while RTTR types may be registered
-        // scoped. Returns an invalid type if nothing registered matches.
-        static rttr::type resolveByName(const char* flecsName);
+        // scoped. Returns an invalid type if nothing registered matches. Accepts any
+        // string source (const char* / std::string / view).
+        static rttr::type resolveByName(std::string_view flecsName);
 
         // Wrap `obj` as a variant holding a typed pointer (invalid if unregistered).
         static rttr::variant wrap(rttr::type t, void* obj);

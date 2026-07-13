@@ -7,6 +7,8 @@
 #include <rttr/registration.h>
 
 #include <cstdio>
+#include <string>
+#include <string_view>
 
 namespace game
 {
@@ -60,6 +62,14 @@ int main()
 
     // 3) Unknown name resolves to invalid.
     check("unknown component resolves to invalid", !rpe::TypeBridge::resolveByName("Nope").is_valid());
+
+    // 3b) The string_view API accepts std::string / std::string_view directly (no
+    //     .c_str()), and an empty view is invalid — not UB.
+    const std::string healthStr = "Health";
+    const std::string_view healthView = healthStr;
+    check("resolveByName accepts std::string", rpe::TypeBridge::resolveByName(healthStr) == rttr::type::get<Health>());
+    check("resolveByName accepts std::string_view", rpe::TypeBridge::resolveByName(healthView) == rttr::type::get<Health>());
+    check("resolveByName(empty) is invalid", !rpe::TypeBridge::resolveByName(std::string_view {}).is_valid());
 
     // 4) wrap() yields a working RTTR instance over a live object.
     game::Transform tf { 3.0, 4.0 };

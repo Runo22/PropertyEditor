@@ -91,15 +91,15 @@ namespace rpe
         r.map[t.get_id()] = Entry { t, wrap, clone };
     }
 
-    void TypeBridge::registerAlias(rttr::type t, const char* flecsName)
+    void TypeBridge::registerAlias(rttr::type t, std::string_view flecsName)
     {
-        if (!t.is_valid() || !flecsName || flecsName[0] == '\0')
+        if (!t.is_valid() || flecsName.empty())
         {
             return;
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        r.aliases[flecsName] = t.get_id();
+        r.aliases[std::string(flecsName)] = t.get_id();
     }
 
     void TypeBridge::unregisterType(rttr::type t)
@@ -119,13 +119,13 @@ namespace rpe
         }
     }
 
-    rttr::type TypeBridge::resolveByName(const char* flecsName)
+    rttr::type TypeBridge::resolveByName(std::string_view flecsName)
     {
-        if (!flecsName || flecsName[0] == '\0')
+        if (flecsName.empty())
         {
             return rttr::type::get_by_name(std::string()); // invalid
         }
-        const std::string name = flecsName;
+        const std::string name(flecsName);
 
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
