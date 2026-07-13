@@ -60,6 +60,33 @@ int main(int argc, char** argv)
         check("empty feed leaves no selection", lw && lw->currentRow() == -1);
     }
 
+    // ── Programmatic selection: immediate + pending (entity not yet loaded) ────
+    {
+        rpe::EntityListWidget list;
+        int selCount = 0;
+        qulonglong lastSel = 0;
+        QObject::connect(&list, &rpe::EntityListWidget::entityIdSelected, &list, [&](qulonglong id) {
+            ++selCount;
+            lastSel = id;
+        });
+
+        list.setEntries({ { 10, QStringLiteral("apple") }, { 20, QStringLiteral("Mango") } });
+        auto* lw = list.findChild<QListWidget*>();
+
+        // Select a present entity by id.
+        check("selectById(present) returns true", list.selectById(20) == true);
+        check("selectById selected the right row + emitted", lw->currentItem()->data(Qt::UserRole).toULongLong() == 20ull && lastSel == 20ull);
+
+        // Select an id that isn't in the list yet → deferred.
+        check("selectById(absent) returns false (pending)", list.selectById(30) == false);
+        check("selection unchanged while the request is pending", lw->currentItem()->data(Qt::UserRole).toULongLong() == 20ull);
+
+        // When the requested entity arrives, the pending request is applied.
+        list.setEntries({ { 10, QStringLiteral("apple") }, { 20, QStringLiteral("Mango") }, { 30, QStringLiteral("Zebra") } });
+        check("pending request applied once the entity appears",
+              lw->currentItem()->data(Qt::UserRole).toULongLong() == 30ull && lastSel == 30ull);
+    }
+
     // ── Components: sorted alphabetically by displayed leaf name ───────────────
     {
         rpe::ComponentListWidget comp;

@@ -188,6 +188,21 @@ namespace rpe
         _applyTextFilter();
     }
 
+    bool EntityListWidget::selectById(qulonglong id)
+    {
+        _requestedId = id;
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            if (_list->item(i)->data(Qt::UserRole).toULongLong() == id)
+            {
+                _requestedId = 0;
+                _list->setCurrentRow(i); // emits _onSelectionChanged → selection signals
+                return true;
+            }
+        }
+        return false; // not present yet — applied by _applyEntries when it appears
+    }
+
     void EntityListWidget::_applyTextFilter()
     {
         const QString filter = _filterEdit->text().trimmed().toLower();
@@ -235,6 +250,7 @@ namespace rpe
         _list->clear();
 
         QListWidgetItem* reselect = nullptr;
+        QListWidgetItem* requested = nullptr;
         for (const auto& entry : entries)
         { // .first/.second: Qt 5.12 has no QPair bindings
             auto* item = new QListWidgetItem(entry.second, _list);
@@ -244,9 +260,22 @@ namespace rpe
                 _list->setCurrentItem(item);
                 reselect = item;
             }
+            if (_requestedId != 0 && entry.first == _requestedId)
+            {
+                requested = item;
+            }
         }
 
         _list->blockSignals(false);
+
+        // A pending selectById() request wins — the entity it asked for has now
+        // appeared. Select it (with signals live so listeners hear about it).
+        if (requested)
+        {
+            _requestedId = 0;
+            _list->setCurrentItem(requested);
+            return;
+        }
 
         if (reselect)
         {
