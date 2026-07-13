@@ -126,9 +126,11 @@ namespace rpe
                 if (!enabled)
                     return;
 
-                // Tight: the button fills the row-height square (1px breathing room),
-                // and the icon fills the button, so the trash/check read clearly.
-                const QRect btn = glyphRect(opt).adjusted(1, 1, -1, -1);
+                // Draw the icon at 70% of the row-height square, centred. The
+                // clickable area (glyphRect) stays full height for an easy hit target.
+                const QRect cell = glyphRect(opt);
+                const int isz = cell.height() * 70 / 100;
+                const QRect btn(cell.x() + (cell.width() - isz) / 2, cell.y() + (cell.height() - isz) / 2, isz, isz);
                 const QString name = index.data(Qt::DisplayRole).toString();
                 p->save();
                 p->setRenderHint(QPainter::Antialiasing, true);
