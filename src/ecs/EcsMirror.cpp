@@ -427,11 +427,16 @@ namespace rpe
                     return;
                 }
                 const flecs::string path = comp.path(".", "");
-                if (path.c_str() && QString::fromUtf8(path.c_str()).startsWith(QStringLiteral("flecs")))
+                const char* pc = path.c_str();
+                if (!pc)
+                {
+                    return; // no path → nothing to resolve (also avoids string_view(nullptr))
+                }
+                if (QString::fromUtf8(pc).startsWith(QStringLiteral("flecs")))
                 {
                     return; // skip flecs' own components
                 }
-                if (TypeBridge::resolveByName(path.c_str()).is_valid())
+                if (TypeBridge::resolveByName(pc).is_valid())
                 {
                     _bridgedIds.insert(comp.raw_id());
                 }
