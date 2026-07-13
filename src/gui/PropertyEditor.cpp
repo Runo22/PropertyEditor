@@ -156,6 +156,15 @@ namespace rpe
             }
             else if (_view->isExpanded(idx))
             {
+                // An expanded array is watched at its OWN path too (not just its
+                // elements): the whole-vector read is what lets the mirror notice a
+                // resize — element paths alone can't (a grown index isn't watched, a
+                // shrunk one reads out of range). Element values still update via
+                // their own paths below.
+                if (idx.data(IsArrayRole).toBool())
+                {
+                    out.append(idx.data(PropertyPathRole).toString());
+                }
                 for (int r = rows - 1; r >= 0; --r)
                 {
                     stack.append(_proxy->index(r, 0, idx));

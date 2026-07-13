@@ -20,6 +20,9 @@ namespace rpe
     EntityComponentBrowser::EntityComponentBrowser(QWidget* parent)
         : QWidget(parent)
     {
+        // Allow a flecs::entity to travel through a queued connection into
+        // selectEntity(flecs::entity). Idempotent — safe to call more than once.
+        qRegisterMetaType<flecs::entity>("flecs::entity");
         _setupUi();
         _liveTimer = new QTimer(this);
         _liveTimer->setInterval(20); // 50 Hz default
@@ -224,12 +227,26 @@ namespace rpe
         return _selectedEntity.get_mut(_selectedComponent.id.raw_id());
     }
 
+    bool EntityComponentBrowser::selectEntity(flecs::entity e)
+    {
+        return selectEntity(static_cast<qulonglong>(e.id()));
+    }
+
+    bool EntityComponentBrowser::selectEntity(qulonglong id)
+    {
+        // Drive the list exactly as a user click would; the list's selection signal
+        // flows back through _onEntitySelected / _onEntityIdSelected to update the
+        // panels and re-emit the browser's selection signals.
+        return _entityList->selectById(id);
+    }
+
     void EntityComponentBrowser::_onEntitySelected(flecs::entity e)
     {
         _selectedEntity = e;
         _liveTimer->stop();
         _componentList->setEntity(_world, e); // auto-selects first component
         emit entitySelected(e);
+        emit entityIdSelected(static_cast<qulonglong>(e.id()));
     }
 
     void EntityComponentBrowser::_onEntityDeselected()
@@ -459,6 +476,7 @@ namespace rpe
             return; // direct mode uses _onEntitySelected
         }
         _mirrorEntity = id;
+        emit entityIdSelected(id); // mode-independent selection notification (GUI thread)
         // Force a full resend: re-selecting the same entity (e.g. after a filter
         // dropped then restored it) leaves the producer's caches unchanged, so the
         // component list / values would otherwise never repopulate.

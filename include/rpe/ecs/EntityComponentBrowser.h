@@ -7,6 +7,7 @@
 #include "rpe/ecs/MirrorChannel.h"
 #include "rpe/gui/PropertyModel.h"
 
+#include <QMetaType>
 #include <QWidget>
 
 #include <memory>
@@ -144,12 +145,34 @@ namespace rpe
             return _componentList;
         }
 
+    public slots:
+        // Programmatically select an entity — same effect as the user clicking it in
+        // the list (updates the component/property panels and emits the selection
+        // signals). Both are slots and run on the GUI thread; selection only reads
+        // e.id() (never dereferences the world), so either overload is safe to invoke
+        // across threads via a queued connection:
+        //     QMetaObject::invokeMethod(browser, "selectEntity",
+        //                               Qt::QueuedConnection, Q_ARG(flecs::entity, e));
+        //     // or, by id:            Q_ARG(qulonglong, id)
+        // (flecs::entity is registered as a Qt metatype in the constructor so it can
+        // ride a queued connection.) If the entity isn't in the list yet (mirror still
+        // loading), the request is remembered and applied when it appears. Returns
+        // true if selected immediately.
+        bool selectEntity(flecs::entity e);
+        // Same, by raw entity id.
+        bool selectEntity(qulonglong id);
+
     signals:
         void propertyEdited(const QString& path, const rttr::variant& newValue);
 
         // Selection pass-throughs so a host application can react to what the user
-        // is inspecting (e.g. highlight the entity in a 3D view).
+        // is inspecting (e.g. highlight the entity in a 3D view). Emitted on the GUI
+        // (Qt) thread. `entitySelected` carries a flecs::entity and fires in direct
+        // mode only (mirror mode has no world handle here); `entityIdSelected` carries
+        // the raw entity id and fires in BOTH modes — connect to this one for a
+        // mode-independent "an entity was selected" notification.
         void entitySelected(flecs::entity e);
+        void entityIdSelected(qulonglong id);
         void entityDeselected();
         void componentSelected(const ComponentInfo& info);
         void componentDeselected();
@@ -213,3 +236,8 @@ namespace rpe
     };
 
 } // namespace rpe
+
+// So a flecs::entity can be passed to selectEntity() through a queued connection
+// (Q_ARG(flecs::entity, e)). Only its id is read on the receiving side, never the
+// world, so copying it across threads is safe.
+Q_DECLARE_METATYPE(flecs::entity)

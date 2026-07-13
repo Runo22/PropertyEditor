@@ -11,6 +11,7 @@
 #include <rttr/registration.h>
 
 #include <QApplication>
+#include <filesystem>
 #include <QCoreApplication>
 #include <QListWidget>
 #include <QMouseEvent>
@@ -33,6 +34,7 @@ struct Health
     int armor = 25;
     bool invulnerable = false;
     std::vector<int> resistances = { 10, 5, 0 };
+    std::filesystem::path deathSound = "sfx/die.wav";
 };
 namespace physics
 {
@@ -66,7 +68,8 @@ RTTR_REGISTRATION
         .property("hp", &Health::hp)
         .property("armor", &Health::armor)
         .property("invulnerable", &Health::invulnerable)
-        .property("resistances", &Health::resistances);
+        .property("resistances", &Health::resistances)
+        .property("deathSound", &Health::deathSound);
     registration::class_<physics::RigidBody>("physics::RigidBody").property("mass", &physics::RigidBody::mass);
     registration::class_<physics::Collider>("physics::Collider").property("radius", &physics::Collider::radius);
     registration::class_<render::Mesh>("render::Mesh").property("lod", &render::Mesh::lod);

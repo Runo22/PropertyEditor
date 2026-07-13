@@ -7,6 +7,7 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -20,6 +21,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <functional>
 
 // rpe_gui is a STATIC library; its embedded .qrc is only auto-registered if some
@@ -45,6 +47,25 @@ namespace rpe
             static const QPixmap pm(QStringLiteral(":/rpe/icons/confirm.png"));
             return pm;
         }
+
+        // Forwards key presses to a callback; used to drive the add-popup's tree
+        // from the filter box (arrows/enter/escape) without moving focus away from
+        // typing. Plain QObject override — no Q_OBJECT/moc needed.
+        class PopupKeyRouter : public QObject
+        {
+        public:
+            using QObject::QObject;
+            std::function<bool(QKeyEvent*)> onKey; // return true = consumed
+
+            bool eventFilter(QObject* obj, QEvent* ev) override
+            {
+                if (ev->type() == QEvent::KeyPress && onKey && onKey(static_cast<QKeyEvent*>(ev)))
+                {
+                    return true;
+                }
+                return QObject::eventFilter(obj, ev);
+            }
+        };
 
         // Leaf (unscoped) name for display, from a full path "game.Transform" /
         // "game::Transform" → "Transform".
@@ -105,9 +126,11 @@ namespace rpe
                 if (!enabled)
                     return;
 
-                // Tight: the button fills the row-height square (1px breathing room),
-                // and the icon fills the button, so the trash/check read clearly.
-                const QRect btn = glyphRect(opt).adjusted(1, 1, -1, -1);
+                // Draw the icon at 70% of the row-height square, centred. The
+                // clickable area (glyphRect) stays full height for an easy hit target.
+                const QRect cell = glyphRect(opt);
+                const int isz = cell.height() * 70 / 100;
+                const QRect btn(cell.x() + (cell.width() - isz) / 2, cell.y() + (cell.height() - isz) / 2, isz, isz);
                 const QString name = index.data(Qt::DisplayRole).toString();
                 p->save();
                 p->setRenderHint(QPainter::Antialiasing, true);
@@ -186,7 +209,10 @@ namespace rpe
         _addBtn = new QToolButton(this);
         _addBtn->setText(tr("Add"));
         _addBtn->setIcon(QIcon(QStringLiteral(":/rpe/icons/add.png")));
+        _addBtn->setIconSize(QSize(14, 14)); // proportional to the label
         _addBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        // A little breathing room so the "+ Add" isn't cramped against the glyph/edges.
+        _addBtn->setStyleSheet(QStringLiteral("QToolButton { padding: 2px 6px; }"));
         _addBtn->setToolTip(tr("Add a component to the selected entity"));
         _addBtn->setAutoRaise(true);
         _addBtn->setVisible(false); // shown only when editing is enabled
@@ -241,6 +267,7 @@ namespace rpe
         // A small popup: a filter box over a tree of addable components grouped by
         // namespace. Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.
         auto* popup = new QFrame(this, Qt::Popup);
+        popup->setObjectName(QStringLiteral("rpeAddPopup")); // so a stylesheet can target it
         popup->setAttribute(Qt::WA_DeleteOnClose);
         popup->setFrameShape(QFrame::StyledPanel);
         auto* lay = new QVBoxLayout(popup);
@@ -303,7 +330,26 @@ namespace rpe
         connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
         connect(tree, &QTreeWidget::itemActivated, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
 
-        connect(search, &QLineEdit::textChanged, tree, [tree](const QString& q) {
+        // The selectable (visible, non-group) options, in top-to-bottom order —
+        // the sequence the arrow keys walk and Enter picks from.
+        auto visibleLeaves = [tree]() {
+            QList<QTreeWidgetItem*> out;
+            for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            {
+                QTreeWidgetItem* g = tree->topLevelItem(i);
+                if (g->isHidden())
+                    continue;
+                for (int j = 0; j < g->childCount(); ++j)
+                {
+                    QTreeWidgetItem* c = g->child(j);
+                    if (!c->isHidden() && !c->data(0, Qt::UserRole).toString().isEmpty())
+                        out.append(c);
+                }
+            }
+            return out;
+        };
+
+        connect(search, &QLineEdit::textChanged, tree, [tree, visibleLeaves](const QString& q) {
             const QString s = q.trimmed();
             for (int i = 0; i < tree->topLevelItemCount(); ++i)
             {
@@ -321,7 +367,57 @@ namespace rpe
                 if (shown)
                     g->setExpanded(true);
             }
+            // Highlight the best (first visible) match so Enter picks it directly.
+            const QList<QTreeWidgetItem*> leaves = visibleLeaves();
+            tree->setCurrentItem(leaves.isEmpty() ? nullptr : leaves.first());
         });
+
+        // Keyboard driving from the filter box: Up/Down walk the visible options
+        // (focus stays in the box so typing continues), Enter adds the highlighted
+        // option — or the best match when none is highlighted — and Esc closes.
+        auto* keys = new PopupKeyRouter(popup);
+        keys->onKey = [tree, popup, visibleLeaves, activate](QKeyEvent* ke) -> bool {
+            switch (ke->key())
+            {
+            case Qt::Key_Down:
+            case Qt::Key_Up:
+            {
+                const QList<QTreeWidgetItem*> leaves = visibleLeaves();
+                if (leaves.isEmpty())
+                    return true;
+                int idx = leaves.indexOf(tree->currentItem());
+                idx = (ke->key() == Qt::Key_Down) ? qMin(idx + 1, leaves.size() - 1) : qMax(idx - 1, 0);
+                tree->setCurrentItem(leaves[idx]);
+                tree->scrollToItem(leaves[idx]);
+                return true;
+            }
+            case Qt::Key_Return:
+            case Qt::Key_Enter:
+            {
+                QTreeWidgetItem* cur = tree->currentItem();
+                if (!cur || cur->isHidden() || cur->data(0, Qt::UserRole).toString().isEmpty())
+                {
+                    const QList<QTreeWidgetItem*> leaves = visibleLeaves();
+                    cur = leaves.isEmpty() ? nullptr : leaves.first();
+                }
+                activate(cur);
+                return true;
+            }
+            case Qt::Key_Escape:
+                popup->close();
+                return true;
+            default:
+                return false; // let the line edit handle typing
+            }
+        };
+        search->installEventFilter(keys);
+
+        // Pre-highlight the first option so a bare Enter adds it immediately.
+        {
+            const QList<QTreeWidgetItem*> leaves = visibleLeaves();
+            if (!leaves.isEmpty())
+                tree->setCurrentItem(leaves.first());
+        }
 
         popup->setMinimumWidth(qMax(200, _list->width()));
 
@@ -391,6 +487,33 @@ namespace rpe
             });
         });
 
+        // Sort names and their parallel ComponentInfos together, alphabetically by
+        // the displayed leaf name (item UserRole stays the index into _components).
+        {
+            QVector<int> order(names.size());
+            for (int i = 0; i < names.size(); ++i)
+            {
+                order[i] = i;
+            }
+            std::sort(order.begin(), order.end(), [&](int a, int b) {
+                const int c = componentLeaf(names[a]).compare(componentLeaf(names[b]), Qt::CaseInsensitive);
+                // Full name breaks leaf ties (e.g. physics::Collider vs render::Collider)
+                // so the order is deterministic — std::sort isn't stable.
+                return c != 0 ? c < 0 : names[a].compare(names[b], Qt::CaseInsensitive) < 0;
+            });
+            QStringList sortedNames;
+            QVector<ComponentInfo> sortedInfos;
+            sortedNames.reserve(names.size());
+            sortedInfos.reserve(_components.size());
+            for (int i : order)
+            {
+                sortedNames.append(names[i]);
+                sortedInfos.append(_components[i]);
+            }
+            names = sortedNames;
+            _components = sortedInfos;
+        }
+
         _list->blockSignals(true);
         _list->clear();
         for (int i = 0; i < names.size(); ++i)
@@ -414,8 +537,17 @@ namespace rpe
         _guard = std::move(guard);
     }
 
-    void ComponentListWidget::setComponentNames(const QStringList& names)
+    void ComponentListWidget::setComponentNames(const QStringList& namesIn)
     {
+        // Show components sorted alphabetically by their displayed leaf name.
+        QStringList names = namesIn;
+        std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
+            const int c = componentLeaf(a).compare(componentLeaf(b), Qt::CaseInsensitive);
+            // Full name breaks leaf ties (e.g. physics::Collider vs render::Collider)
+            // so the order is deterministic — std::sort isn't stable.
+            return c != 0 ? c < 0 : a.compare(b, Qt::CaseInsensitive) < 0;
+        });
+
         if (names == _mirrorNames)
         {
             return; // unchanged → keep selection, no flicker

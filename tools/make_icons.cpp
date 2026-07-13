@@ -18,7 +18,7 @@ static QImage canvas(int s)
 static void drawPlus(QPainter& p, int s, const QColor& c)
 {
     QPen pen(c);
-    pen.setWidthF(s * 0.13);
+    pen.setWidthF(s * 0.16);
     pen.setCapStyle(Qt::RoundCap);
     p.setPen(pen);
     const qreal m = s * 0.12;
@@ -82,13 +82,20 @@ int main(int argc, char** argv)
     const int s = 40; // generous so it stays crisp when scaled down on a toolbar
     const QColor ink(0x44, 0x48, 0x4D);
     const QColor white(0xFF, 0xFF, 0xFF);
+    // The "add" plus is coloured (not ink) so it stays visible on a dark toolbar.
+    // A medium green (Material Green 400) — clearly an "add", but not harsh.
+    const QColor addGreen(0x66, 0xBB, 0x6A);
+    // The trash gets a soft, muted red — a subtle "delete" hint, deliberately
+    // gentler than the strong red of the armed confirm button (it's drawn at 0.7
+    // opacity in the resting state, so keep it clearly readable here).
+    const QColor removeRed(0xC1, 0x66, 0x6B);
 
     bool ok = true;
     {
         QImage img = canvas(s);
         QPainter p(&img);
         p.setRenderHint(QPainter::Antialiasing, true);
-        drawPlus(p, s, ink);
+        drawPlus(p, s, addGreen);
         p.end();
         ok &= save(img, dir + "/add.png");
     }
@@ -96,7 +103,7 @@ int main(int argc, char** argv)
         QImage img = canvas(s);
         QPainter p(&img);
         p.setRenderHint(QPainter::Antialiasing, true);
-        drawTrash(p, s, ink);
+        drawTrash(p, s, removeRed);
         p.end();
         ok &= save(img, dir + "/remove.png");
     }

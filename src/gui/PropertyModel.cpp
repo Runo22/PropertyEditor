@@ -183,25 +183,7 @@ namespace rpe
 
         if (TypeRenderer::isSequential(t))
         {
-            node->setLiveValue(val);
-            auto view = val.create_sequential_view();
-            const int sz = static_cast<int>(view.get_size());
-            if (sz != node->arraySize())
-            {
-                _rebuildArrayChildren(node, val);
-            }
-            else
-            {
-                for (int i = 0; i < sz; ++i)
-                {
-                    auto* child = node->children()[i];
-                    if (child->isOverridden())
-                    {
-                        continue;
-                    }
-                    _refreshNode(child, view.get_value(static_cast<size_t>(i)));
-                }
-            }
+            _refreshSequential(node, val);
         }
         else if (TypeRenderer::isExpandable(t))
         {
@@ -221,6 +203,59 @@ namespace rpe
         {
             node->setLiveValue(val);
         }
+    }
+
+    // Sync an array node's element rows to a sequential value: rebuild the child
+    // rows when the size changed, otherwise refresh each element in place. Shared by
+    // the schema refresh() path AND the mirror injection path (setPropertyValue),
+    // so arrays display and expand in mirror mode too — where refresh() never runs.
+    void PropertyModel::_refreshSequential(PropertyNode* node, const rttr::variant& val)
+    {
+        node->setLiveValue(val);
+        if (!val.is_valid() || !val.is_sequential_container())
+        {
+            return;
+        }
+        auto view = val.create_sequential_view();
+        const int sz = static_cast<int>(view.get_size());
+        if (sz != node->arraySize())
+        {
+            // A resize tears down and rebuilds the element rows (qDeleteAll). If any
+            // element (or a field of one) currently has an open inline editor, its
+            // node is pinned and about to be freed — deleting it would destroy the
+            // live editor and dangle its QModelIndex. Defer the rebuild until the
+            // edit finishes; a later refresh/injection (the size still differs) redoes
+            // it. The stale row count is transient and harmless.
+            if (_anyDescendantOverridden(node))
+            {
+                return;
+            }
+            _rebuildArrayChildren(node, val);
+        }
+        else
+        {
+            for (int i = 0; i < sz; ++i)
+            {
+                auto* child = node->children()[i];
+                if (child->isOverridden())
+                {
+                    continue;
+                }
+                _refreshNode(child, view.get_value(static_cast<size_t>(i)));
+            }
+        }
+    }
+
+    bool PropertyModel::_anyDescendantOverridden(const PropertyNode* node)
+    {
+        for (const auto* child : node->children())
+        {
+            if (child->isOverridden() || _anyDescendantOverridden(child))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     void PropertyModel::_rebuildArrayChildren(PropertyNode* node, const rttr::variant& arrayVal)
@@ -311,7 +346,11 @@ namespace rpe
             {
                 continue;
             }
-            node->setLiveValue(it.value());
+            // Route mirror injections through the same dispatch refresh() uses, so an
+            // injected array builds its element rows and an injected struct refreshes
+            // its children — identical behaviour on both paths (and no divergence as
+            // new node kinds are added). Scalars just cache their (unwrapped) value.
+            _refreshNode(node, it.value());
         }
         _emitDirtyRanges(_root.get());
     }
@@ -644,6 +683,14 @@ namespace rpe
             const QVariant d = metaNumber(node->prop(), hint::Decimals);
             return d.isValid() ? QVariant(static_cast<int>(d.toDouble())) : QVariant();
         }
+        case IsArrayRole:
+            return node->arraySize() >= 0;
+        case DeclaredTypeRole:
+            // The node's schema type, always valid — unlike the live value, which may
+            // be absent (not yet mirrored) or a transient editor type mid-edit. The
+            // delegate picks the editor from this so a path/enum/number cell always
+            // gets the right editor.
+            return QVariant::fromValue(rttr::variant(node->type()));
         }
         return {};
     }

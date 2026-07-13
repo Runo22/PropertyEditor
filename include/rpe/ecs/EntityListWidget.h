@@ -49,6 +49,11 @@ namespace rpe
         // Externally provided (id, label) entries — used by EcsMirror integration.
         void setEntries(const QVector<QPair<qulonglong, QString>>& entries);
 
+        // Select the entity with this id. If it isn't in the list yet (e.g. the
+        // mirror hasn't fed it), the request is remembered and applied as soon as it
+        // appears. Returns true if it was selected immediately. Call on the GUI thread.
+        bool selectById(qulonglong id);
+
     signals:
         void entitySelected(flecs::entity e); // direct mode (world available)
         void entityIdSelected(qulonglong id); // always; mirror mode uses this
@@ -78,6 +83,9 @@ namespace rpe
         QVector<QPair<qulonglong, QString>> _sourceEntries;
         // Last visible (id, label) set — refresh skips the rebuild when unchanged.
         QVector<QPair<qulonglong, QString>> _lastEntries;
+        // A pending selectById() request whose entity isn't in the list yet (0 = none).
+        // Applied on the next rebuild that contains it.
+        qulonglong _requestedId = 0;
     };
 
 } // namespace rpe

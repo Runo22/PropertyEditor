@@ -32,6 +32,8 @@ namespace rpe
         MaxRole,          // double  — invalid QVariant if unset
         StepRole,         // double  — invalid QVariant if unset
         DecimalsRole,     // int     — invalid QVariant if unset
+        IsArrayRole,      // bool    — true for a sequential/array parent node
+        DeclaredTypeRole, // rttr::variant wrapping the node's declared rttr::type
     };
 
     // How committed edits are applied.
@@ -134,7 +136,9 @@ namespace rpe
         void _resetRoot();
         void _buildTree(PropertyNode* parent, rttr::type type, const QString& prefix);
         void _refreshNode(PropertyNode* node, const rttr::variant& val);
+        void _refreshSequential(PropertyNode* node, const rttr::variant& val);
         void _rebuildArrayChildren(PropertyNode* node, const rttr::variant& arrayVal);
+        static bool _anyDescendantOverridden(const PropertyNode* node);
         void _applyBatch(const QHash<QString, rttr::variant>& batch);
         void _emitDirtyRanges(PropertyNode* parent);
         void _collectNodes(PropertyNode* node, QHash<QString, PropertyNode*>& out) const;
