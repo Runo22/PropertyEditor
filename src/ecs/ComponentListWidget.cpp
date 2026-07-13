@@ -496,7 +496,10 @@ namespace rpe
                 order[i] = i;
             }
             std::sort(order.begin(), order.end(), [&](int a, int b) {
-                return componentLeaf(names[a]).compare(componentLeaf(names[b]), Qt::CaseInsensitive) < 0;
+                const int c = componentLeaf(names[a]).compare(componentLeaf(names[b]), Qt::CaseInsensitive);
+                // Full name breaks leaf ties (e.g. physics::Collider vs render::Collider)
+                // so the order is deterministic — std::sort isn't stable.
+                return c != 0 ? c < 0 : names[a].compare(names[b], Qt::CaseInsensitive) < 0;
             });
             QStringList sortedNames;
             QVector<ComponentInfo> sortedInfos;
@@ -539,7 +542,10 @@ namespace rpe
         // Show components sorted alphabetically by their displayed leaf name.
         QStringList names = namesIn;
         std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
-            return componentLeaf(a).compare(componentLeaf(b), Qt::CaseInsensitive) < 0;
+            const int c = componentLeaf(a).compare(componentLeaf(b), Qt::CaseInsensitive);
+            // Full name breaks leaf ties (e.g. physics::Collider vs render::Collider)
+            // so the order is deterministic — std::sort isn't stable.
+            return c != 0 ? c < 0 : a.compare(b, Qt::CaseInsensitive) < 0;
         });
 
         if (names == _mirrorNames)

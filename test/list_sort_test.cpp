@@ -93,6 +93,16 @@ int main(int argc, char** argv)
         comp.setComponentNames({ QStringLiteral("game::Transform"), QStringLiteral("physics::Collider"), QStringLiteral("Health") });
         check("components sorted alphabetically by leaf",
               rowsOf(&comp) == QStringList({ QStringLiteral("Collider"), QStringLiteral("Health"), QStringLiteral("Transform") }));
+
+        // Duplicate leaves must order deterministically by full name (std::sort is
+        // not stable), so the list never reshuffles between refreshes.
+        comp.setComponentNames({ QStringLiteral("render::Collider"), QStringLiteral("physics::Collider"), QStringLiteral("Health") });
+        auto* lw = comp.findChild<QListWidget*>();
+        QStringList paths;
+        for (int i = 0; i < lw->count(); ++i)
+            paths << lw->item(i)->data(Qt::UserRole).toString();
+        check("duplicate leaves ordered by full name (physics < render)",
+              paths == QStringList({ QStringLiteral("physics::Collider"), QStringLiteral("render::Collider"), QStringLiteral("Health") }));
     }
 
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
