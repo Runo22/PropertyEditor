@@ -12,6 +12,7 @@
 #include <QApplication>
 #include <QBrush>
 #include <QTreeWidget>
+#include <QTreeWidgetItem>
 
 #include <cstdio>
 
@@ -116,6 +117,31 @@ int main(int argc, char** argv)
 
         w.unpin(bid, QStringLiteral("Speed"), QStringLiteral("v"));
         check("unpin removes the row", w.pins().size() == 1 && changed == 3);
+    }
+
+    // ── 3b. Widget edits: gated before the first value, applied after ──────────
+    {
+        rpe::PinnedPropertiesWidget w;
+        w.setChannel(mirror.channel());
+        w.pin(aid, QStringLiteral("A"), QStringLiteral("Health"), QStringLiteral("hp"));
+        auto* tree = w.findChild<QTreeWidget*>();
+        QTreeWidgetItem* it = tree->topLevelItem(0);
+
+        // Edit BEFORE any mirrored value: parse has no type anchor → must be
+        // ignored and the placeholder restored (not sent as a string and dropped).
+        it->setText(1, QStringLiteral("55"));
+        check("edit before the first value restores the placeholder", it->text(1) == QStringLiteral("…"));
+        world.progress(0.016f);
+        mirror.pump();
+        check("no edit was queued (hp still 70)", a.get<Health>().hp == 70);
+
+        // First value arrives → edits work and reach the world.
+        w.pollNow();
+        check("first mirrored value lands (70)", it->text(1) == QStringLiteral("70"));
+        it->setText(1, QStringLiteral("55"));
+        world.progress(0.016f);
+        mirror.pump();
+        check("widget edit reached the world (hp == 55)", a.get<Health>().hp == 55);
     }
 
     // ── 4. Pinned rows tint the main property tree ─────────────────────────────

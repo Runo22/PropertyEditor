@@ -87,8 +87,20 @@ namespace rpe
         _tree->header()->setStretchLastSection(true);
         _tree->header()->resizeSection(0, 220);
         _tree->setContextMenuPolicy(Qt::CustomContextMenu);
+        // No built-in edit triggers: editing is started explicitly below, ONLY for
+        // the Value column — otherwise a double-click on the Property column would
+        // let the label be renamed (ignored by logic, but visually corrupting).
+        _tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
         layout->addWidget(_tree, 1);
 
+        connect(_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int column) {
+            // Value edits are anchored to the LAST MIRRORED value's type; until one
+            // has arrived there is nothing to parse against, so don't open an editor.
+            if (column == 1 && item->data(0, LastValueRole).value<rttr::variant>().is_valid())
+            {
+                _tree->editItem(item, 1);
+            }
+        });
         connect(_tree, &QTreeWidget::itemChanged, this, &PinnedPropertiesWidget::_onItemChanged);
         connect(_tree, &QTreeWidget::customContextMenuRequested, this, &PinnedPropertiesWidget::_onContextMenu);
     }
@@ -257,6 +269,16 @@ namespace rpe
             return;
         }
         const rttr::variant last = item->data(0, LastValueRole).value<rttr::variant>();
+        if (!last.is_valid())
+        {
+            // No mirrored value yet — nothing anchors the parse (a "42" would go out
+            // as a string and be dropped by coerce for arithmetic targets). Restore
+            // the placeholder instead of sending an edit that silently fails.
+            _updating = true;
+            item->setText(1, QStringLiteral("…"));
+            _updating = false;
+            return;
+        }
         const rttr::variant v = textToVariant(item->text(1), last);
         if (!v.is_valid())
         {
