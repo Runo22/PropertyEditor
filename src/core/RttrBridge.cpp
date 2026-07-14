@@ -259,12 +259,12 @@ namespace rpe::bridge
 
     rttr::variant getValueByPath(const rttr::instance& root, const QString& path)
     {
-        if (!root.is_valid())
-        {
-            return {};
-        }
-        const QStringList segs = splitPath(path);
-        if (segs.isEmpty())
+        return getValueByPath(root, splitPath(path));
+    }
+
+    rttr::variant getValueByPath(const rttr::instance& root, const QStringList& segs)
+    {
+        if (!root.is_valid() || segs.isEmpty())
         {
             return {};
         }

@@ -235,12 +235,27 @@ namespace rpe
         QStringList _selComps;             // full scoped names, parallel to _selCompIds
         QVector<uint64_t> _selCompIds;
 
-        // Pinned-watch state (sim thread). Component ids are cached by name (a
-        // findComponentEntity walk otherwise); the display-string dedup is cleared
-        // whenever the pin set changes so new pins publish immediately.
-        QHash<QString, uint64_t> _pinCompIds;
+        // Pinned-watch state (sim thread). Component id + RTTR type are cached by
+        // name (a findComponentEntity walk / registry lookup otherwise — per pump);
+        // the display-string dedup is cleared whenever the pin set changes so new
+        // pins publish immediately.
+        struct PinResolve
+        {
+            uint64_t compId = 0;
+            rttr::type rtype = rttr::type::get<void>();
+        };
+        QHash<QString, PinResolve> _pinRt;
         QHash<QString, QString> _lastPinStr; // "e|comp|path" -> last display
         QVector<MirrorChannel::PinKey> _lastPins;
+
+        // Per-pump hot-path caches (sim thread): the selected component's RTTR type
+        // (resolveByName takes a registry mutex + string normalisation) and the
+        // watched paths pre-split (splitPath allocates per read otherwise). Both
+        // refresh only when the corresponding intent field changes.
+        QString _selTypeName;
+        rttr::type _selType = rttr::type::get<void>();
+        QStringList _lastPathList;
+        std::vector<QStringList> _splitPaths;
     };
 
 } // namespace rpe

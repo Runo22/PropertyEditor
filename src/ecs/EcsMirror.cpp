@@ -110,9 +110,12 @@ namespace rpe
         _compsTable = nullptr;
         _selComps.clear();
         _selCompIds.clear();
-        _pinCompIds.clear(); // component ids belong to the old world
+        _pinRt.clear(); // component ids/types belong to the old world
         _lastPinStr.clear();
         _lastPins.clear();
+        _selTypeName.clear();
+        _lastPathList.clear();
+        _splitPaths.clear();
         ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
@@ -569,32 +572,34 @@ namespace rpe
             const auto dedupKey = [](const MirrorChannel::PinKey& k) {
                 return QStringLiteral("%1|%2|%3").arg(k.entity).arg(k.component, k.path);
             };
-            // Entity + component-pointer + type resolution for one pin. Component
-            // ids are cached by name; a stale id (dead/re-created component entity)
-            // re-resolves once, then fails silently for this pump.
+            // Entity + component-pointer + type resolution for one pin. Component id
+            // AND RTTR type are cached by name — resolveByName takes a registry
+            // mutex + string work, far too heavy per pin per pump. A stale id
+            // (dead/re-created component entity) re-resolves once.
             const auto resolvePin = [&](const MirrorChannel::PinKey& k, void*& ptrOut, rttr::type& tOut) -> bool {
                 flecs::entity pe = world.entity(k.entity);
                 if (!pe.is_alive())
                 {
                     return false;
                 }
-                uint64_t cid = _pinCompIds.value(k.component, 0);
-                if (cid == 0 || !world.entity(cid).is_alive())
+                PinResolve pr = _pinRt.value(k.component);
+                if (pr.compId == 0 || !world.entity(pr.compId).is_alive())
                 {
                     const flecs::entity comp = findComponentEntity(world, k.component);
                     if (!comp.is_valid())
                     {
                         return false;
                     }
-                    cid = comp.raw_id();
-                    _pinCompIds.insert(k.component, cid);
+                    pr.compId = comp.raw_id();
+                    pr.rtype = TypeBridge::resolveByName(k.component.toUtf8().constData());
+                    _pinRt.insert(k.component, pr);
                 }
-                tOut = TypeBridge::resolveByName(k.component.toUtf8().constData());
+                tOut = pr.rtype;
                 if (!tOut.is_valid())
                 {
                     return false;
                 }
-                ptrOut = pe.get_mut(cid);
+                ptrOut = pe.get_mut(pr.compId);
                 return ptrOut != nullptr;
             };
 
@@ -717,7 +722,14 @@ namespace rpe
         {
             return;
         }
-        const rttr::type t = TypeBridge::resolveByName(component.toUtf8().constData());
+        // Cache the selected component's RTTR type by name — resolveByName does
+        // mutex-guarded registry + string work, needless every pump.
+        if (component != _selTypeName)
+        {
+            _selTypeName = component;
+            _selType = TypeBridge::resolveByName(component.toUtf8().constData());
+        }
+        const rttr::type t = _selType;
         if (!t.is_valid())
         {
             return;
@@ -741,11 +753,24 @@ namespace rpe
             bridge::setValueByPath(inst, p, v);
         }
 
-        // Read watched leaves (sim -> GUI), de-duplicated by display string.
-        std::vector<ValueUpdate> updates;
-        for (const QString& p : paths)
+        // Read watched leaves (sim -> GUI), de-duplicated by display string. The
+        // paths are pre-split once per interest change — splitPath would otherwise
+        // allocate per path per pump, which adds up on a fast (or debug) sim.
+        if (paths != _lastPathList)
         {
-            rttr::variant val = bridge::getValueByPath(inst, p);
+            _lastPathList = paths;
+            _splitPaths.clear();
+            _splitPaths.reserve(static_cast<size_t>(paths.size()));
+            for (const QString& p : paths)
+            {
+                _splitPaths.push_back(bridge::splitPath(p));
+            }
+        }
+        std::vector<ValueUpdate> updates;
+        for (int i = 0; i < paths.size(); ++i)
+        {
+            const QString& p = paths[i];
+            rttr::variant val = bridge::getValueByPath(inst, _splitPaths[static_cast<size_t>(i)]);
             if (!val.is_valid())
             {
                 continue;
