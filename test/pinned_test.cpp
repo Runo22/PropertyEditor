@@ -75,10 +75,16 @@ int main(int argc, char** argv)
     check("unchanged pin publishes nothing (dedup)", mirror.pollPinValues().empty());
 
     // ── 2. Pin edit writes back to the world ──────────────────────────────────
+    // An OnSet observer must fire for inspector edits (ecs_modified_id is called
+    // after the write), so reactive systems / change detection see them.
+    int onSetCount = 0;
+    world.observer<Speed>().event(flecs::OnSet).each([&](flecs::entity, Speed&) { ++onSetCount; });
+
     mirror.queuePinEdit({ bid, QStringLiteral("Speed"), QStringLiteral("v") }, rttr::variant(9.25));
     world.progress(0.016f);
     mirror.pump();
     check("pin edit reached the world (v == 9.25)", b.get<Speed>().v == 9.25);
+    check("pin edit fires OnSet observers", onSetCount >= 1);
     {
         const auto pins = mirror.pollPinValues();
         check("edited pin value echoes back", pins.size() == 1 && pins[0].value.to_double() == 9.25);

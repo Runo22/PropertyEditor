@@ -114,6 +114,10 @@ int main(int argc, char** argv)
         mirror.setInterest(eid, QStringLiteral("Comp"), { QStringLiteral("x") });
         mirror.queueEdit(QStringLiteral("x"), rttr::variant(5.0));
 
+        // Inspector edits must be announced like a hand-written set<T>().
+        int onSetCount = 0;
+        w.observer<Comp>().event(flecs::OnSet).each([&](flecs::entity, Comp&) { ++onSetCount; });
+
         for (int i = 0; i < 10; ++i)
         {
             w.progress(0.016f);
@@ -121,6 +125,7 @@ int main(int argc, char** argv)
             mirror.pollValues();    // drain the GUI-bound updates
         }
         check("Mirror: queued edit reached the world (x == 5.0)", live(w, e)->x == 5.0);
+        check("Mirror: queued edit fires OnSet observers", onSetCount >= 1);
         mirror.detach();
     }
 

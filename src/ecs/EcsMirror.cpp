@@ -117,6 +117,9 @@ namespace rpe
         _lastPathList.clear();
         _splitPaths.clear();
         _stats = {};
+        _bridgedIds.clear(); // ids belong to the old world
+        _reqId = 0;
+        _lastComponentCount = -1;
         ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
@@ -476,36 +479,44 @@ namespace rpe
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);
 
             // Refresh the set of bridged component ids (and locate the required one).
-            // This runs resolveByName once per COMPONENT TYPE (a few dozen), not once
-            // per component-instance per entity — so the entity scan below is O(1) id
-            // lookups instead of O(registry) string work per component.
-            _bridgedIds.clear();
-            uint64_t reqId = 0;
-            _componentQuery.each([&](flecs::entity comp) {
-                const char* cn = comp.name();
-                if (!cn || cn[0] == '\0')
-                {
-                    return;
-                }
-                const flecs::string path = comp.path(".", "");
-                const char* pc = path.c_str();
-                if (!pc)
-                {
-                    return; // no path → nothing to resolve (also avoids string_view(nullptr))
-                }
-                if (QString::fromUtf8(pc).startsWith(QStringLiteral("flecs")))
-                {
-                    return; // skip flecs' own components
-                }
-                if (TypeBridge::resolveByName(pc).is_valid())
-                {
-                    _bridgedIds.insert(comp.raw_id());
-                }
-                if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
-                {
-                    reqId = comp.raw_id();
-                }
-            });
+            // String work (flecs path allocation + registry lookup) per component
+            // TYPE — worth skipping entirely when nothing could have changed: the
+            // component-type count is a cheap, exact-enough change signal (new types
+            // only ever get ADDED; bridge registrations are picked up by the count
+            // check at startup and by the structural/filter forces below).
+            const int compCount = _componentQuery.count();
+            if (compCount != _lastComponentCount || requiredChanged || structuralApplied || _bridgedIds.empty())
+            {
+                _lastComponentCount = compCount;
+                _bridgedIds.clear();
+                _reqId = 0;
+                _componentQuery.each([&](flecs::entity comp) {
+                    const char* cn = comp.name();
+                    if (!cn || cn[0] == '\0')
+                    {
+                        return;
+                    }
+                    const flecs::string path = comp.path(".", "");
+                    const char* pc = path.c_str();
+                    if (!pc)
+                    {
+                        return; // no path → nothing to resolve (also avoids string_view(nullptr))
+                    }
+                    if (QString::fromUtf8(pc).startsWith(QStringLiteral("flecs")))
+                    {
+                        return; // skip flecs' own components
+                    }
+                    if (TypeBridge::resolveByName(pc).is_valid())
+                    {
+                        _bridgedIds.insert(comp.raw_id());
+                    }
+                    if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
+                    {
+                        _reqId = comp.raw_id();
+                    }
+                });
+            }
+            const uint64_t reqId = _reqId;
 
             // Narrow the entity query to the required component when the filter
             // changes: flecs then visits ONLY entities that have it, instead of every
@@ -598,7 +609,7 @@ namespace rpe
             // AND RTTR type are cached by name — resolveByName takes a registry
             // mutex + string work, far too heavy per pin per pump. A stale id
             // (dead/re-created component entity) re-resolves once.
-            const auto resolvePin = [&](const MirrorChannel::PinKey& k, void*& ptrOut, rttr::type& tOut) -> bool {
+            const auto resolvePin = [&](const MirrorChannel::PinKey& k, void*& ptrOut, rttr::type& tOut, uint64_t& cidOut) -> bool {
                 flecs::entity pe = world.entity(k.entity);
                 if (!pe.is_alive())
                 {
@@ -617,6 +628,7 @@ namespace rpe
                     _pinRt.insert(k.component, pr);
                 }
                 tOut = pr.rtype;
+                cidOut = pr.compId;
                 if (!tOut.is_valid())
                 {
                     return false;
@@ -629,7 +641,8 @@ namespace rpe
             {
                 void* pp = nullptr;
                 rttr::type pt = rttr::type::get<void>();
-                if (!resolvePin(k, pp, pt))
+                uint64_t cid = 0;
+                if (!resolvePin(k, pp, pt, cid))
                 {
                     continue;
                 }
@@ -639,7 +652,12 @@ namespace rpe
                     continue;
                 }
                 rttr::instance pinst(access);
-                bridge::setValueByPath(pinst, k.path, v);
+                if (bridge::setValueByPath(pinst, k.path, v))
+                {
+                    // Announce the write like a hand-written set<T>() would: OnSet
+                    // observers and query change detection see inspector edits too.
+                    ecs_modified_id(world.c_ptr(), k.entity, cid);
+                }
                 _lastPinStr.remove(dedupKey(k)); // force an echo of the applied value
             }
 
@@ -656,7 +674,8 @@ namespace rpe
             {
                 void* pp = nullptr;
                 rttr::type pt = rttr::type::get<void>();
-                if (!resolvePin(k, pp, pt))
+                uint64_t cid = 0;
+                if (!resolvePin(k, pp, pt, cid))
                 {
                     continue;
                 }
@@ -769,10 +788,17 @@ namespace rpe
         }
         rttr::instance inst(access);
 
-        // Apply queued edits (GUI -> sim).
+        // Apply queued edits (GUI -> sim). One modified() per component after the
+        // batch (not per leaf) — announces the write exactly like a hand-written
+        // set<T>() so OnSet observers / query change detection see inspector edits.
+        bool wroteAny = false;
         for (auto& [p, v] : edits)
         {
-            bridge::setValueByPath(inst, p, v);
+            wroteAny = bridge::setValueByPath(inst, p, v) || wroteAny;
+        }
+        if (wroteAny)
+        {
+            ecs_modified_id(world.c_ptr(), e.id(), _selCompIds[selIdx]);
         }
 
         // Read watched leaves (sim -> GUI), de-duplicated by display string. The

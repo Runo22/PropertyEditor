@@ -228,6 +228,8 @@ namespace rpe
         // during the (throttled) entity scan so the per-entity check is an O(1) hash
         // lookup instead of a resolveByName() registry scan per component.
         std::unordered_set<uint64_t> _bridgedIds;
+        uint64_t _reqId = 0;          // resolved required-component id (with _bridgedIds)
+        int _lastComponentCount = -1; // skip the bridged-id rebuild when unchanged
         bool _haveSystem = false;
         bool _haveQuery = false;
 
