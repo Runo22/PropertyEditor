@@ -480,6 +480,20 @@ namespace rpe
         _editSink = std::move(sink);
     }
 
+    void PropertyModel::setPinnedPaths(const QSet<QString>& paths)
+    {
+        if (_pinnedPaths == paths)
+        {
+            return;
+        }
+        _pinnedPaths = paths;
+        // Rare (pin/unpin/selection change) — a whole-tree repaint is fine.
+        if (!_root->children().isEmpty())
+        {
+            emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1), { Qt::ForegroundRole });
+        }
+    }
+
     QStringList PropertyModel::allLeafPaths() const
     {
         QStringList out;
@@ -658,7 +672,11 @@ namespace rpe
         case Qt::ForegroundRole:
             if (node->hasLocalEdit())
             {
-                return QBrush(QColor(0xE5, 0x9A, 0x2E)); // amber for pinned values
+                return QBrush(QColor(0xE5, 0x9A, 0x2E)); // amber: local draft edit
+            }
+            if (!_pinnedPaths.isEmpty() && _pinnedPaths.contains(node->path()))
+            {
+                return QBrush(QColor(0x4D, 0xB6, 0xAC)); // teal: pinned to the watch list
             }
             break;
 

@@ -25,6 +25,7 @@ namespace rpe
     class EntityListWidget;
     class PropertyEditor;
     class EcsMirror;
+    class PinnedPropertiesWidget;
 
     // ─────────────────────────────────────────────────────────────────────────────
     //  EntityComponentBrowser — UE5-style three-level inspector:
@@ -145,6 +146,13 @@ namespace rpe
             return _componentList;
         }
 
+        // Attach a watch-list widget (host it anywhere — e.g. its own dock page).
+        // The browser wires everything: the property tree gains "Pin to watch list"
+        // in its context menu, pinned rows are tinted, and the widget receives the
+        // mirror channel so pinned values flow (and its edits apply). Mirror mode
+        // only — in direct mode there is no producer to feed pinned values.
+        void setPinnedPropertiesWidget(PinnedPropertiesWidget* w);
+
     public slots:
         // Programmatically select an entity — same effect as the user clicking it in
         // the list (updates the component/property panels and emits the selection
@@ -201,6 +209,8 @@ namespace rpe
         void _pushInterest();
         // Recompute the "+" picker list: catalog minus components already present.
         void _updateAddable();
+        // Re-tint the property tree with the pins of the current entity+component.
+        void _refreshPinnedTint();
         // Apply the required-component filter (from _settings) to the entity list and,
         // in mirror mode, to the producer.
         void _applyEntityFilter();
@@ -233,6 +243,8 @@ namespace rpe
         QStringList _catalog;       // all bridged component names in the world
         QStringList _currentComps;  // components on the selected entity
         Settings _settings;
+
+        PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)
     };
 
 } // namespace rpe

@@ -128,13 +128,15 @@ if(RPE_WITH_FLECS)
         src/ecs/EntityListWidget.cpp
         src/ecs/ComponentListWidget.cpp
         src/ecs/EntityComponentBrowser.cpp
+        src/ecs/PinnedPropertiesWidget.cpp
         src/ecs/EcsMirror.cpp
         src/ecs/MirrorChannel.cpp
         src/ecs/ComponentScan.cpp
         resources/rpe_resources.qrc
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
-        include/rpe/ecs/EntityComponentBrowser.h)
+        include/rpe/ecs/EntityComponentBrowser.h
+        include/rpe/ecs/PinnedPropertiesWidget.h)
 endif()
 
 add_library(rpe_gui STATIC ${RPE_GUI_SOURCES})
@@ -177,6 +179,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_writeback_test test/writeback_test.cpp)
     target_link_libraries(rpe_writeback_test PRIVATE rpe_gui)
+
+    add_executable(rpe_pinned_test test/pinned_test.cpp)
+    target_link_libraries(rpe_pinned_test PRIVATE rpe_gui)
 
     add_executable(rpe_dark_style_shot test/dark_style_shot.cpp)
     target_link_libraries(rpe_dark_style_shot PRIVATE rpe_gui)

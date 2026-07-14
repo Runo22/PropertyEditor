@@ -4,6 +4,7 @@
 #include "rpe/ecs/ComponentScan.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityListWidget.h"
+#include "rpe/ecs/PinnedPropertiesWidget.h"
 #include "rpe/gui/PropertyEditor.h"
 
 #include <QCheckBox>
@@ -346,6 +347,55 @@ namespace rpe
             _writeCheck->setVisible(true);
             _mirrorTimer->stop();
         }
+
+        // Hand the channel to an attached watch list (pins flow producer-side).
+        if (_pinWidget)
+        {
+            _pinWidget->setChannel(_channel);
+        }
+        _propertyEditor->setPinningEnabled(_channel && _pinWidget);
+        _refreshPinnedTint();
+    }
+
+    void EntityComponentBrowser::setPinnedPropertiesWidget(PinnedPropertiesWidget* w)
+    {
+        if (_pinWidget == w)
+        {
+            return;
+        }
+        if (_pinWidget)
+        {
+            _pinWidget->disconnect(this);
+            disconnect(_propertyEditor, &PropertyEditor::pinRequested, this, nullptr);
+            disconnect(_propertyEditor, &PropertyEditor::unpinRequested, this, nullptr);
+        }
+        _pinWidget = w;
+        if (w)
+        {
+            w->setChannel(_channel);
+            connect(_propertyEditor, &PropertyEditor::pinRequested, this, [this](const QString& path) {
+                if (_pinWidget && _mirrorEntity != 0 && !_mirrorComponent.isEmpty())
+                {
+                    _pinWidget->pin(_mirrorEntity, _entityList->currentLabel(), _mirrorComponent, path);
+                }
+            });
+            connect(_propertyEditor, &PropertyEditor::unpinRequested, this, [this](const QString& path) {
+                if (_pinWidget && _mirrorEntity != 0)
+                {
+                    _pinWidget->unpin(_mirrorEntity, _mirrorComponent, path);
+                }
+            });
+            connect(w, &PinnedPropertiesWidget::pinsChanged, this, &EntityComponentBrowser::_refreshPinnedTint);
+        }
+        _propertyEditor->setPinningEnabled(_channel && _pinWidget);
+        _refreshPinnedTint();
+    }
+
+    void EntityComponentBrowser::_refreshPinnedTint()
+    {
+        _propertyEditor->setPinnedPaths((_pinWidget && _channel)
+                                            ? _pinWidget->pinnedPaths(_mirrorEntity, _mirrorComponent)
+                                            : QSet<QString>());
     }
 
     void EntityComponentBrowser::_pushInterest()
@@ -477,6 +527,7 @@ namespace rpe
         }
         _mirrorEntity = id;
         emit entityIdSelected(id); // mode-independent selection notification (GUI thread)
+        _refreshPinnedTint();      // the pin set is per entity+component
         // Force a full resend: re-selecting the same entity (e.g. after a filter
         // dropped then restored it) leaves the producer's caches unchanged, so the
         // component list / values would otherwise never repopulate.
@@ -522,6 +573,7 @@ namespace rpe
         // values are unchanged, so the producer would otherwise dedup them away).
         _channel->requestResync();
         _pushInterest();
+        _refreshPinnedTint(); // the pin set is per entity+component
     }
 
 } // namespace rpe

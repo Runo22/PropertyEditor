@@ -203,6 +203,12 @@ namespace rpe
         return false; // not present yet — applied by _applyEntries when it appears
     }
 
+    QString EntityListWidget::currentLabel() const
+    {
+        const auto* cur = _list->currentItem();
+        return cur ? cur->text() : QString();
+    }
+
     void EntityListWidget::_applyTextFilter()
     {
         const QString filter = _filterEdit->text().trimmed().toLower();

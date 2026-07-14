@@ -110,6 +110,9 @@ namespace rpe
         _compsTable = nullptr;
         _selComps.clear();
         _selCompIds.clear();
+        _pinCompIds.clear(); // component ids belong to the old world
+        _lastPinStr.clear();
+        _lastPins.clear();
         ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
@@ -268,6 +271,21 @@ namespace rpe
     void EcsMirror::removeComponent(qulonglong entity, const QString& component)
     {
         _ch->queueStructural(MirrorChannel::StructuralKind::RemoveComponent, entity, component);
+    }
+
+    void EcsMirror::setPins(const QVector<PinKey>& pins)
+    {
+        _ch->setPins(pins);
+    }
+
+    void EcsMirror::queuePinEdit(const PinKey& key, rttr::variant value)
+    {
+        _ch->queuePinEdit(key, std::move(value));
+    }
+
+    std::vector<EcsMirror::PinValue> EcsMirror::pollPinValues()
+    {
+        return _ch->pollPinValues();
     }
 
     bool EcsMirror::pollEntities(QVector<EntityEntry>& out)
@@ -540,6 +558,104 @@ namespace rpe
             {
                 _lastCatalog = catalog;
                 _ch->publishCatalog(catalog);
+            }
+        }
+
+        // ── Pinned watches (independent of the selection) ──────────────────────────
+        // Apply queued pin edits, then mirror every pinned leaf — pins keep flowing
+        // for entities/components that are NOT selected, feeding the watch widget.
+        if (!in.pinEdits.empty() || !in.pins.isEmpty())
+        {
+            const auto dedupKey = [](const MirrorChannel::PinKey& k) {
+                return QStringLiteral("%1|%2|%3").arg(k.entity).arg(k.component, k.path);
+            };
+            // Entity + component-pointer + type resolution for one pin. Component
+            // ids are cached by name; a stale id (dead/re-created component entity)
+            // re-resolves once, then fails silently for this pump.
+            const auto resolvePin = [&](const MirrorChannel::PinKey& k, void*& ptrOut, rttr::type& tOut) -> bool {
+                flecs::entity pe = world.entity(k.entity);
+                if (!pe.is_alive())
+                {
+                    return false;
+                }
+                uint64_t cid = _pinCompIds.value(k.component, 0);
+                if (cid == 0 || !world.entity(cid).is_alive())
+                {
+                    const flecs::entity comp = findComponentEntity(world, k.component);
+                    if (!comp.is_valid())
+                    {
+                        return false;
+                    }
+                    cid = comp.raw_id();
+                    _pinCompIds.insert(k.component, cid);
+                }
+                tOut = TypeBridge::resolveByName(k.component.toUtf8().constData());
+                if (!tOut.is_valid())
+                {
+                    return false;
+                }
+                ptrOut = pe.get_mut(cid);
+                return ptrOut != nullptr;
+            };
+
+            for (auto& [k, v] : in.pinEdits)
+            {
+                void* pp = nullptr;
+                rttr::type pt = rttr::type::get<void>();
+                if (!resolvePin(k, pp, pt))
+                {
+                    continue;
+                }
+                rttr::variant access = TypeBridge::wrap(pt, pp);
+                if (!access.is_valid())
+                {
+                    continue;
+                }
+                rttr::instance pinst(access);
+                bridge::setValueByPath(pinst, k.path, v);
+                _lastPinStr.remove(dedupKey(k)); // force an echo of the applied value
+            }
+
+            // The pin set changed → clear the dedup so newly pinned leaves publish
+            // immediately (and dropped ones stop occupying the cache).
+            if (in.pins != _lastPins)
+            {
+                _lastPins = in.pins;
+                _lastPinStr.clear();
+            }
+
+            std::vector<MirrorChannel::PinValue> pinUpdates;
+            for (const MirrorChannel::PinKey& k : in.pins)
+            {
+                void* pp = nullptr;
+                rttr::type pt = rttr::type::get<void>();
+                if (!resolvePin(k, pp, pt))
+                {
+                    continue;
+                }
+                rttr::variant access = TypeBridge::wrap(pt, pp);
+                if (!access.is_valid())
+                {
+                    continue;
+                }
+                rttr::instance pinst(access);
+                rttr::variant val = bridge::getValueByPath(pinst, k.path);
+                if (!val.is_valid())
+                {
+                    continue;
+                }
+                const QString kk = dedupKey(k);
+                const QString s = TypeRenderer::toDisplayString(val);
+                if (_lastPinStr.value(kk) == s)
+                {
+                    continue;
+                }
+                _lastPinStr.insert(kk, s);
+                pinUpdates.push_back({ k, std::move(val) });
+            }
+            if (!pinUpdates.empty())
+            {
+                _ch->publishPinValues(std::move(pinUpdates));
             }
         }
 

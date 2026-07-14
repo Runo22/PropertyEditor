@@ -8,6 +8,7 @@
 #include <rpe/ecs/EcsMirror.h>
 #include <rpe/ecs/EntityComponentBrowser.h>
 #include <rpe/ecs/EntityListWidget.h>
+#include <rpe/ecs/PinnedPropertiesWidget.h>
 #include <rpe/gui/DarkStyle.h>
 #include <rpe/gui/PropertyEditor.h>
 #include <rpe/gui/PropertyModel.h>
@@ -114,8 +115,8 @@ int main(int argc, char* argv[])
     world.component<Transform>();
     world.component<Health>();
     world.component<physics::RigidBody>();
-    world.entity("Player").set<Transform>({ { 12.5, 3.0, -4.0 }, 1.0 }).set<Health>({ 87, 40, false, { 10, 5, 0 } }).set<physics::RigidBody>({ 2.0 });
-    world.entity("Enemy").set<Transform>({ { -8, 0, 2 }, 1.2 }).set<Health>({ 50, 10, false, { 3, 1 } });
+    auto player = world.entity("Player").set<Transform>({ { 12.5, 3.0, -4.0 }, 1.0 }).set<Health>({ 87, 40, false, { 10, 5, 0 } }).set<physics::RigidBody>({ 2.0 });
+    auto enemy = world.entity("Enemy").set<Transform>({ { -8, 0, 2 }, 1.2 }).set<Health>({ 50, 10, false, { 3, 1 } });
 
     rpe::EcsMirror mirror;
     mirror.attach(&world);
@@ -150,6 +151,21 @@ int main(int argc, char* argv[])
         tv->expandAll();
     pump(6);
     saveShot(&browser, prefix + QStringLiteral("_browser.png"));
+
+    // Pinned-properties watch list: pin values from BOTH entities, then capture the
+    // widget and the browser with its tinted (teal) pinned row.
+    rpe::PinnedPropertiesWidget pinWidget;
+    browser.setPinnedPropertiesWidget(&pinWidget);
+    pinWidget.resize(360, 170);
+    pinWidget.show();
+    pinWidget.pin(static_cast<qulonglong>(player.id()), QStringLiteral("Player"), QStringLiteral("Health"), QStringLiteral("hp"));
+    pinWidget.pin(static_cast<qulonglong>(player.id()), QStringLiteral("Player"), QStringLiteral("Health"), QStringLiteral("resistances.[0]"));
+    pinWidget.pin(static_cast<qulonglong>(enemy.id()), QStringLiteral("Enemy"), QStringLiteral("Health"), QStringLiteral("armor"));
+    pump(10);
+    pinWidget.pollNow();
+    QCoreApplication::processEvents();
+    saveShot(&pinWidget, prefix + QStringLiteral("_pins.png"));
+    saveShot(&browser, prefix + QStringLiteral("_browser_pinned.png"));
 
     // Add-component popup.
     if (auto* addBtn = browser.componentList()->findChild<QToolButton*>())

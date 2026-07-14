@@ -50,6 +50,26 @@ namespace rpe
             rttr::variant value;
         };
 
+        // A pinned (watched) property, independent of the current selection: any
+        // entity + component + leaf path. Pins are mirrored every pump alongside the
+        // selected component, so a watch widget can show values from several
+        // entities at once.
+        struct PinKey
+        {
+            qulonglong entity = 0;
+            QString component; // full scoped flecs name ("game.Transform")
+            QString path;      // property dot-path inside the component
+            bool operator==(const PinKey& o) const
+            {
+                return entity == o.entity && component == o.component && path == o.path;
+            }
+        };
+        struct PinValue
+        {
+            PinKey key;
+            rttr::variant value;
+        };
+
         // ── GUI thread: intent ───────────────────────────────────────────────────
         void setRequiredComponent(const QString& componentName);
         void setInterest(qulonglong entity, const QString& componentName, const QStringList& leafPaths);
@@ -77,6 +97,16 @@ namespace rpe
         };
         void queueStructural(StructuralKind kind, qulonglong entity, const QString& component);
 
+        // ── GUI thread: pinned watches ───────────────────────────────────────────
+        // Replace the full pin set (atomic swap; the producer reads it next pump).
+        void setPins(const QVector<PinKey>& pins);
+        // Queue a value edit for a pinned property (applied on the sim thread, like
+        // queueEdit but addressed to an explicit entity + component).
+        void queuePinEdit(const PinKey& key, rttr::variant value);
+        // Latest changed pin values (drained; keyed producer-side so a hidden
+        // consumer can't make this grow unbounded).
+        std::vector<PinValue> pollPinValues();
+
         // ── GUI thread: results ──────────────────────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out);
         bool pollComponents(QStringList& out);
@@ -100,12 +130,15 @@ namespace rpe
             QStringList paths;
             std::vector<std::pair<QString, rttr::variant>> edits; // drained
             std::vector<StructuralEdit> structurals;              // drained
+            QVector<PinKey> pins;                                 // current pin set
+            std::vector<std::pair<PinKey, rttr::variant>> pinEdits; // drained
             bool resync = false; // consumer reset its view → resend everything
         };
         Intent takeIntent();
         void publishEntities(const QVector<EntityEntry>& entities);
         void publishComponents(const QStringList& components);
         void publishValues(std::vector<ValueUpdate>&& values);
+        void publishPinValues(std::vector<PinValue>&& values);
         void publishCatalog(const QStringList& catalog);
         void markProducerGone()
         {
@@ -122,6 +155,8 @@ namespace rpe
         QString _required;
         std::vector<std::pair<QString, rttr::variant>> _edits;
         std::vector<StructuralEdit> _structurals;
+        QVector<PinKey> _pins;
+        std::vector<std::pair<PinKey, rttr::variant>> _pinEdits;
         bool _resync = false; // set by requestResync(), drained by takeIntent()
 
         // sim -> GUI
@@ -134,6 +169,8 @@ namespace rpe
         // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
         // consumer can't make this grow unbounded.
         QHash<QString, rttr::variant> _outValues;
+        // Same idea for pins, keyed by "entity|component|path".
+        QHash<QString, PinValue> _outPinValues;
 
         std::atomic<bool> _producerAlive { true };
     };

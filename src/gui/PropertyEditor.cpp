@@ -130,6 +130,11 @@ namespace rpe
         _model->setEditSink(std::move(sink));
     }
 
+    void PropertyEditor::setPinnedPaths(const QSet<QString>& paths)
+    {
+        _model->setPinnedPaths(paths);
+    }
+
     QStringList PropertyEditor::visibleLeafPaths(bool onlyExpanded) const
     {
         if (!onlyExpanded)
@@ -231,6 +236,18 @@ namespace rpe
             else
             {
                 connect(menu.addAction(tr("Reset to live")), &QAction::triggered, this, [this, path] { _model->resetNode(path); });
+            }
+            menu.addSeparator();
+        }
+        if (_pinningEnabled && srcIdx.data(IsLeafRole).toBool())
+        {
+            if (!_model->isPinnedPath(path))
+            {
+                connect(menu.addAction(tr("Pin to watch list")), &QAction::triggered, this, [this, path] { emit pinRequested(path); });
+            }
+            else
+            {
+                connect(menu.addAction(tr("Unpin from watch list")), &QAction::triggered, this, [this, path] { emit unpinRequested(path); });
             }
             menu.addSeparator();
         }

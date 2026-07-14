@@ -65,6 +65,8 @@ namespace rpe
         // The shared data channel carries these (re-exported for convenience).
         using EntityEntry = MirrorChannel::EntityEntry;
         using ValueUpdate = MirrorChannel::ValueUpdate;
+        using PinKey = MirrorChannel::PinKey;
+        using PinValue = MirrorChannel::PinValue;
 
         EcsMirror();
         ~EcsMirror();
@@ -143,6 +145,15 @@ namespace rpe
         // it lacks, is a harmless no-op.
         void addComponent(qulonglong entity, const QString& component);
         void removeComponent(qulonglong entity, const QString& component);
+
+        // ── GUI thread: pinned watches ───────────────────────────────────────────
+        // Pins are mirrored EVERY pump, independent of the selected entity — the
+        // backing of a watch widget that shows properties from several entities at
+        // once. setPins replaces the whole set; queuePinEdit writes a pinned value
+        // back on the sim thread (like queueEdit, but explicitly addressed).
+        void setPins(const QVector<PinKey>& pins);
+        void queuePinEdit(const PinKey& key, rttr::variant value);
+        std::vector<PinValue> pollPinValues();
 
         // ── GUI thread: results (poll on a timer) ────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out); // true if changed since last poll
@@ -223,6 +234,13 @@ namespace rpe
         const void* _compsTable = nullptr; // opaque ecs_table_t*
         QStringList _selComps;             // full scoped names, parallel to _selCompIds
         QVector<uint64_t> _selCompIds;
+
+        // Pinned-watch state (sim thread). Component ids are cached by name (a
+        // findComponentEntity walk otherwise); the display-string dedup is cleared
+        // whenever the pin set changes so new pins publish immediately.
+        QHash<QString, uint64_t> _pinCompIds;
+        QHash<QString, QString> _lastPinStr; // "e|comp|path" -> last display
+        QVector<MirrorChannel::PinKey> _lastPins;
     };
 
 } // namespace rpe

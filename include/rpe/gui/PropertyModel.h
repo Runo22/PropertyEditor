@@ -7,6 +7,7 @@
 
 #include <QAbstractItemModel>
 #include <QHash>
+#include <QSet>
 #include <QMutex>
 
 #include <atomic>
@@ -112,6 +113,14 @@ namespace rpe
         // Dot-paths of every directly-editable leaf in the current schema.
         QStringList allLeafPaths() const;
 
+        // Paths pinned to a watch list (PinnedPropertiesWidget). Purely visual
+        // here: pinned rows are tinted so they are recognisable in the main tree.
+        void setPinnedPaths(const QSet<QString>& paths);
+        bool isPinnedPath(const QString& path) const
+        {
+            return _pinnedPaths.contains(path);
+        }
+
         // ── Local edit / reset ──────────────────────────────────────────────────────
         void beginLocalEdit(const QString& path);
         void resetNode(const QString& path);
@@ -157,6 +166,7 @@ namespace rpe
         std::atomic<bool> _flushScheduled { false };
 
         bool _readOnly = false;
+        QSet<QString> _pinnedPaths; // watch-list tint (see setPinnedPaths)
         EditPolicy _editPolicy = EditPolicy::LocalEdit;
         std::function<rttr::instance()> _instanceProvider;
         AccessGuard _writeGuard;
