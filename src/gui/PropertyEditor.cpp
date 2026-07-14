@@ -43,7 +43,7 @@ namespace rpe
 
         _resetBtn = new QToolButton(_toolbar);
         _resetBtn->setText(tr("Reset"));
-        _resetBtn->setToolTip(tr("Release all pinned/overridden values"));
+        _resetBtn->setToolTip(tr("Release all local edits (return to live values)"));
         tb->addWidget(_resetBtn);
 
         root->addWidget(_toolbar);
@@ -219,14 +219,14 @@ namespace rpe
         }
 
         const QString path = srcIdx.data(PropertyPathRole).toString();
-        const bool overridden = srcIdx.data(IsOverriddenRole).toBool();
+        const bool hasLocalEdit = srcIdx.data(HasLocalEditRole).toBool();
 
         QMenu menu(this);
         if (!isReadOnly())
         {
-            if (!overridden)
+            if (!hasLocalEdit)
             {
-                connect(menu.addAction(tr("Pin / Override value")), &QAction::triggered, this, [this, path] { _model->overrideNode(path); });
+                connect(menu.addAction(tr("Local edit (freeze live value)")), &QAction::triggered, this, [this, path] { _model->beginLocalEdit(path); });
             }
             else
             {

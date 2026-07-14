@@ -3,7 +3,7 @@
 //      provider under the write guard (synchronously, on commit).
 //   2. Mirror — the edit is queued to the channel and applied on the sim thread
 //      during pump() (EcsMirror::_pumpImpl → bridge::setValueByPath on get_mut).
-// Also checks the Override policy does NOT touch the world.
+// Also checks the LocalEdit policy does NOT touch the world.
 #include <rpe/core/RttrVariantWrapper.h>
 #include <rpe/core/TypeBridge.h>
 #include <rpe/ecs/EcsMirror.h>
@@ -82,7 +82,7 @@ int main(int argc, char** argv)
         check("WriteBack: a second field writes too (n == 42)", live(w, e)->n == 42);
     }
 
-    // ── 2. Override policy must NOT write to the world ─────────────────────────
+    // ── 2. LocalEdit policy must NOT write to the world ──────────────────────────
     {
         flecs::world w;
         w.component<Comp>();
@@ -91,7 +91,7 @@ int main(int argc, char** argv)
         rpe::RttrVariantWrapper wrap;
         rpe::PropertyModel model;
         model.bindType(rttr::type::get<Comp>());
-        model.setEditPolicy(rpe::EditPolicy::Override);
+        model.setEditPolicy(rpe::EditPolicy::LocalEdit);
         model.setInstanceProvider([&]() -> rttr::instance {
             wrap = rpe::RttrVariantWrapper::makeLinked(rttr::type::get<Comp>(), live(w, e));
             return wrap.instance();
@@ -99,7 +99,7 @@ int main(int argc, char** argv)
         { auto seed = rpe::RttrVariantWrapper::makeLinked(rttr::type::get<Comp>(), live(w, e)); model.refresh(seed.instance()); }
 
         model.setData(leaf(model, QStringLiteral("x")), QVariant::fromValue(rttr::variant(9.0)), Qt::EditRole);
-        check("Override: world is left untouched (x still 1.0)", live(w, e)->x == 1.0);
+        check("LocalEdit: world is left untouched (x still 1.0)", live(w, e)->x == 1.0);
     }
 
     // ── 3. Mirror: queued edit is applied to the world on pump() ───────────────

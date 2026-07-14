@@ -33,7 +33,7 @@ namespace rpe
     //
     //  Pick an entity (optionally filtered to those with a Transform), pick one of
     //  its RTTR-registered components, then view/edit its properties live. Edits can
-    //  either be pinned as overrides or written straight back into the world.
+    //  either be kept as local drafts or written straight back into the world.
     //
     //  Embeddable as a window, a QDockWidget, or a side panel.
     // ─────────────────────────────────────────────────────────────────────────────
@@ -60,8 +60,8 @@ namespace rpe
             bool requiredComponentEnabled = true;
             // Mirror only the property leaves currently expanded in the tree.
             bool snapshotOpenFieldsOnly = true;
-            // How property edits are applied (Override vs WriteBack).
-            EditPolicy editPolicy = EditPolicy::Override;
+            // How property edits are applied (LocalEdit vs WriteBack).
+            EditPolicy editPolicy = EditPolicy::LocalEdit;
             // Show the add/remove-component controls ("+" and per-row "×").
             bool allowComponentEditing = false;
             // Panel arrangement.
@@ -110,7 +110,7 @@ namespace rpe
         // See rpe/core/AccessGuard.h for the contract and an example.
         void setWorldAccess(AccessGuard guard);
 
-        // Default edit policy for the property editor (Override or WriteBack).
+        // Default edit policy for the property editor (LocalEdit or WriteBack).
         void setEditPolicy(EditPolicy p);
 
         // Allow the user to add/remove components on the selected entity from the

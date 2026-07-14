@@ -19,7 +19,7 @@ namespace rpe
     //  min/max/step/decimals, bools → check box, strings → line edit / file picker /
     //  multi-line, enums → combo, QColor → color picker.
     //
-    //  Opening an editor implicitly pins the row (override) so live updates don't
+    //  Opening an editor implicitly pins the row (a local edit) so live updates don't
     //  fight the user mid-edit; committing routes through the model's edit policy.
     // ─────────────────────────────────────────────────────────────────────────────
     class PropertyDelegate : public QStyledItemDelegate
@@ -46,7 +46,7 @@ namespace rpe
         // Track the in-progress edit so a cancelled edit (Esc / focus loss without
         // commit) un-pins a row we pinned in createEditor.
         mutable QString _editPath;
-        mutable bool _editWasOverridden = false;
+        mutable bool _editHadLocalEdit = false;
         mutable bool _editCommitted = false;
     };
 

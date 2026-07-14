@@ -101,17 +101,17 @@ namespace rpe
         {
             return _liveValue;
         }
-        const rttr::variant& overrideValue() const
+        const rttr::variant& localEditValue() const
         {
-            return _overrideValue;
+            return _localEditValue;
         }
         const rttr::variant& effectiveValue() const
         {
-            return _isOverridden ? _overrideValue : _liveValue;
+            return _hasLocalEdit ? _localEditValue : _liveValue;
         }
-        bool isOverridden() const
+        bool hasLocalEdit() const
         {
-            return _isOverridden;
+            return _hasLocalEdit;
         }
         bool isDirty() const
         {
@@ -123,10 +123,10 @@ namespace rpe
         }
 
         void setLiveValue(const rttr::variant& v);
-        void setOverrideValue(const rttr::variant& v);
-        void setOverridden(bool v)
+        void setLocalEditValue(const rttr::variant& v);
+        void setLocalEdit(bool v)
         {
-            _isOverridden = v;
+            _hasLocalEdit = v;
             _isDirty = true;
         }
         void clearDirty()
@@ -159,8 +159,8 @@ namespace rpe
         QVector<PropertyNode*> _children;
 
         rttr::variant _liveValue;
-        rttr::variant _overrideValue;
-        bool _isOverridden = false;
+        rttr::variant _localEditValue;
+        bool _hasLocalEdit = false;
         bool _isDirty = false;
         bool _arrayElement = false;
         bool _expandable = false;

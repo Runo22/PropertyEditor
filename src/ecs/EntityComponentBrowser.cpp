@@ -44,7 +44,7 @@ namespace rpe
         _writeCheck = new QCheckBox(tr("Write edits back to world"), this);
         _writeCheck->setToolTip(tr(
             "On: edits modify the live component.\n"
-            "Off: edits are pinned as overrides only."));
+            "Off: edits stay as local drafts only."));
         _mainLayout->addWidget(_writeCheck);
 
         _entityList = new EntityListWidget(this);
@@ -211,7 +211,7 @@ namespace rpe
 
     void EntityComponentBrowser::_onWriteToggled(bool on)
     {
-        _propertyEditor->setEditPolicy(on ? EditPolicy::WriteBack : EditPolicy::Override);
+        _propertyEditor->setEditPolicy(on ? EditPolicy::WriteBack : EditPolicy::LocalEdit);
     }
 
     // NOTE: touches the world; callers must already hold the world guard (the
@@ -325,7 +325,7 @@ namespace rpe
         // Editor edits are queued to the sim thread; values flow back via the channel.
         if (_channel)
         {
-            _propertyEditor->setEditPolicy(EditPolicy::Override);
+            _propertyEditor->setEditPolicy(EditPolicy::LocalEdit);
             auto ch = _channel; // capture the shared_ptr (not 'this' indirection)
             _propertyEditor->setEditSink([ch](const QString& path, const rttr::variant& v) {
                 ch->queueEdit(path, v);

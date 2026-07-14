@@ -33,9 +33,9 @@ namespace rpe
         _cachedDisplay = QString(); // invalidate; recomputed lazily by data()
     }
 
-    void PropertyNode::setOverrideValue(const rttr::variant& v)
+    void PropertyNode::setLocalEditValue(const rttr::variant& v)
     {
-        _overrideValue = v;
+        _localEditValue = v;
         _isDirty = true;
         _cachedDisplay = QString();
     }

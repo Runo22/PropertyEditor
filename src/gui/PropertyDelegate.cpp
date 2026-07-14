@@ -220,12 +220,12 @@ namespace rpe
 
         // Pin the row only now that an editor will actually open, so live refresh
         // can't clobber it — and a cell that yields no editor is never left stuck
-        // overridden (which would freeze its live updates). Remember the prior pin
+        // stuck holding a local edit (which would freeze its live updates). Remember the prior pin
         // state so a cancelled edit can restore it.
         _editPath = index.data(PropertyPathRole).toString();
-        _editWasOverridden = index.data(IsOverriddenRole).toBool();
+        _editHadLocalEdit = index.data(HasLocalEditRole).toBool();
         _editCommitted = false;
-        _model->overrideNode(_editPath);
+        _model->beginLocalEdit(_editPath);
         return w;
     }
 
@@ -429,7 +429,7 @@ namespace rpe
     {
         // If the edit was cancelled (no commit) and the row was not pinned before we
         // opened the editor, release the implicit pin so live updates resume.
-        if (!_editCommitted && !_editWasOverridden && !_editPath.isEmpty())
+        if (!_editCommitted && !_editHadLocalEdit && !_editPath.isEmpty())
         {
             _model->resetNode(_editPath);
         }
