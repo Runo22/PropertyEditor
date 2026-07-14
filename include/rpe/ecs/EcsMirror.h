@@ -120,6 +120,15 @@ namespace rpe
         // thousands of times per second. 0 = run every time (default). Set e.g. 60.
         void setMaxPumpRateHz(double hz);
 
+        // Wall-clock intervals for the two FULL-WORLD scans the pump performs on the
+        // simulation thread: the entity list (every entity + its components) and the
+        // add-component catalog (every component type). These are the expensive,
+        // bursty parts of a pump — running them per-N-pumps (the old behaviour) tied
+        // their cost to the frame rate and produced periodic frame-time spikes.
+        // Defaults: entity list 500 ms, catalog 2000 ms. 0 = scan every pump.
+        // Structural changes and filter changes force an immediate rescan regardless.
+        void setScanIntervalsMs(int entityListMs, int catalogMs);
+
         // ── GUI thread: intent ───────────────────────────────────────────────────
         void setRequiredComponent(const QString& componentName); // entity-list filter
         void setInterest(qulonglong entity, const QString& componentName,
@@ -196,10 +205,24 @@ namespace rpe
         QHash<QString, QString> _lastValueStr; // path -> last display, for dedup
         qulonglong _lastInterestEntity = 0;
         QString _lastInterestComponent;
-        QString _lastRequired;   // entity-list filter, to detect changes
-        int _entityScanTick = 0; // the all-entity scan is throttled (set rarely changes)
+        QString _lastRequired;    // entity-list filter, to detect changes
         QStringList _lastCatalog; // last published add-component catalog (dedup)
-        int _catalogScanTick = 0; // the catalog scan is throttled too
+
+        // Wall-clock throttles for the full-world scans (see setScanIntervalsMs).
+        // Epoch-initialised so the FIRST pump after attach() always scans.
+        std::chrono::duration<double> _entityScanGap { 0.5 };
+        std::chrono::duration<double> _catalogScanGap { 2.0 };
+        std::chrono::steady_clock::time_point _lastEntityScan {};
+        std::chrono::steady_clock::time_point _lastCatalogScan {};
+
+        // Selected-entity component list, rebuilt only when the entity or its
+        // archetype (flecs table) changes — NOT every pump. Building it walks the
+        // entity's components doing string allocation + a registry lookup each, so
+        // per-pump rebuilds were a constant drag at high frame rates.
+        qulonglong _compsEntity = 0;
+        const void* _compsTable = nullptr; // opaque ecs_table_t*
+        QStringList _selComps;             // full scoped names, parallel to _selCompIds
+        QVector<uint64_t> _selCompIds;
     };
 
 } // namespace rpe

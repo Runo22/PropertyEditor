@@ -102,6 +102,14 @@ namespace rpe
         // can never come back to life through this new attach. (The system entity is
         // reused — same name — so re-attach revives exactly one system per world.)
         _alive = std::make_shared<MirrorLiveToken>();
+        // Fresh binding → scan immediately on the first pump and rebuild the
+        // selected-entity component cache (its table pointer belongs to the old world).
+        _lastEntityScan = {};
+        _lastCatalogScan = {};
+        _compsEntity = 0;
+        _compsTable = nullptr;
+        _selComps.clear();
+        _selCompIds.clear();
         ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
@@ -289,6 +297,12 @@ namespace rpe
         _minPumpGap = std::chrono::duration<double>(hz > 0.0 ? 1.0 / hz : 0.0);
     }
 
+    void EcsMirror::setScanIntervalsMs(int entityListMs, int catalogMs)
+    {
+        _entityScanGap = std::chrono::duration<double>(entityListMs > 0 ? entityListMs / 1000.0 : 0.0);
+        _catalogScanGap = std::chrono::duration<double>(catalogMs > 0 ? catalogMs / 1000.0 : 0.0);
+    }
+
     bool EcsMirror::_rateAllows()
     {
         if (_minPumpGap.count() <= 0.0)
@@ -406,12 +420,17 @@ namespace rpe
         // else id) that has at least one *bridged* component, so the inspector
         // lists exactly the entities it can show. Optionally filtered to those
         // carrying the required component (matched by short name). This scans all
-        // entities, so it is throttled — the visible set rarely changes.
+        // entities, so it is throttled on WALL CLOCK (not pump count): a per-N-pumps
+        // gate ties the scan rate to the frame rate — on a fast sim that produced a
+        // full-world scan burst (and a frame-time spike) every fraction of a second.
+        const auto scanNow = std::chrono::steady_clock::now();
         const bool requiredChanged = (required != _lastRequired);
         _lastRequired = required;
-        const bool scanEntities = requiredChanged || (_entityScanTick++ % 10 == 0);
+        const bool scanEntities = requiredChanged || structuralApplied
+            || (scanNow - _lastEntityScan >= _entityScanGap);
         if (scanEntities && _haveQuery)
         {
+            _lastEntityScan = scanNow;
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);
 
             // Refresh the set of bridged component ids (and locate the required one).
@@ -502,9 +521,10 @@ namespace rpe
         // The set of bridged component names in the world, for the GUI's "add
         // component" picker. Scanning every component is cheap but not free, so it is
         // throttled like the entity scan (the catalog rarely changes).
-        const bool scanCatalog = structuralApplied || (_catalogScanTick++ % 30 == 0);
+        const bool scanCatalog = structuralApplied || (scanNow - _lastCatalogScan >= _catalogScanGap);
         if (scanCatalog)
         {
+            _lastCatalogScan = scanNow;
             QStringList catalog;
             for (const ComponentResolution& c : scanComponents(world))
             {
@@ -534,44 +554,50 @@ namespace rpe
         }
 
         // ── Components of the interest entity + resolve the selected one ──────────
-        QStringList comps;
-        flecs::id selId;
-        bool haveSel = false;
-        e.each([&](flecs::id id) {
-            if (!id.is_entity())
-            {
-                return;
-            }
-            const char* n = id.entity().name();
-            if (!n || n[0] == '\0')
-            {
-                return;
-            }
-            // Identify the component by its FULL scoped path ("game.Transform"),
-            // which is unique even when two components share a leaf name. The GUI
-            // displays the leaf; resolveByName matches the path exactly against the
-            // RTTR full name. (Pass the path, not the leaf, so resolution is
-            // unambiguous.)
-            const flecs::string p = id.entity().path(".", "");
-            const QString qn = QString::fromUtf8(p.c_str());
-            if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
-            {
-                return;
-            }
-            comps.append(qn);
-            if (qn == component)
-            {
-                selId = id;
-                haveSel = true;
-            }
-        });
-        if (comps != _lastComponents)
+        // Rebuilt only when the entity or its ARCHETYPE (flecs table) changes —
+        // add/remove component moves the entity to another table, so the table
+        // pointer is a exact, O(1) change detector. Building the list walks every
+        // component doing a string allocation + registry lookup each; doing that
+        // every pump was a constant per-frame drag on an uncapped sim.
+        const void* table = ecs_get_table(world.c_ptr(), e.id());
+        if (entity != _compsEntity || table != _compsTable)
         {
-            _lastComponents = comps;
-            _ch->publishComponents(comps);
+            _compsEntity = entity;
+            _compsTable = table;
+            _selComps.clear();
+            _selCompIds.clear();
+            e.each([&](flecs::id id) {
+                if (!id.is_entity())
+                {
+                    return;
+                }
+                const char* n = id.entity().name();
+                if (!n || n[0] == '\0')
+                {
+                    return;
+                }
+                // Identify the component by its FULL scoped path ("game.Transform"),
+                // which is unique even when two components share a leaf name. The GUI
+                // displays the leaf; resolveByName matches the path exactly against
+                // the RTTR full name.
+                const flecs::string p = id.entity().path(".", "");
+                const QString qn = QString::fromUtf8(p.c_str());
+                if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
+                {
+                    return;
+                }
+                _selComps.append(qn);
+                _selCompIds.append(id.raw_id());
+            });
+        }
+        if (_selComps != _lastComponents)
+        {
+            _lastComponents = _selComps;
+            _ch->publishComponents(_selComps);
         }
 
-        if (!haveSel)
+        const int selIdx = _selComps.indexOf(component);
+        if (selIdx < 0)
         {
             return;
         }
@@ -580,7 +606,7 @@ namespace rpe
         {
             return;
         }
-        void* ptr = e.get_mut(selId.raw_id());
+        void* ptr = e.get_mut(_selCompIds[selIdx]);
         if (!ptr)
         {
             return;

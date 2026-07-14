@@ -10,7 +10,9 @@
 #include <cstdio>
 #include <string>
 #include <cmath>
+#include <algorithm>
 #include <utility>
+#include <vector>
 
 struct Position
 {
@@ -121,6 +123,39 @@ int main(int argc, char** argv)
 
     printf("  overhead: idle=%.3f ms  active=%.3f ms  filtered=%.3f ms per frame\n",
            idle - base, active - base, filtered - base);
+
+    // ── Frame-time SPIKES (periodic stalls, not the mean) ──────────────────────
+    // The full-world scans (entity list, catalog) are bursty: what matters for a
+    // smooth sim is the worst frame, not the average. Compare per-frame times with
+    // the wall-clock scan throttle (default: 500 ms / 2 s) against scanning every
+    // pump — the pathological case the old per-N-pumps gate approached on a fast
+    // sim, where it caused a visible frequency drop at a regular interval.
+    auto frameStats = [&](const char* label) {
+        using clock = std::chrono::steady_clock;
+        std::vector<double> ms;
+        ms.reserve(static_cast<size_t>(F) * 4);
+        for (int i = 0; i < F * 4; ++i)
+        {
+            const auto f0 = clock::now();
+            world.progress(0.016f);
+            ms.push_back(std::chrono::duration<double, std::milli>(clock::now() - f0).count());
+        }
+        std::sort(ms.begin(), ms.end());
+        const double med = ms[ms.size() / 2];
+        const double p99 = ms[static_cast<size_t>(ms.size() * 0.99)];
+        const double mx = ms.back();
+        int spikes = 0;
+        for (double v : ms)
+            if (v > med * 3.0)
+                ++spikes;
+        printf("  %-30s: median %6.3f  p99 %7.3f  max %7.3f ms  spikes(>3x med) %d/%zu\n",
+               label, med, p99, mx, spikes, ms.size());
+    };
+
+    frameStats("scan throttle: default");
+    mirror.setScanIntervalsMs(0, 0); // scan the whole world every pump (worst case)
+    frameStats("scan throttle: every pump");
+    mirror.setScanIntervalsMs(500, 2000);
 
     mirror.detach();
     return 0;
