@@ -122,6 +122,24 @@ namespace rpe
         // thousands of times per second. 0 = run every time (default). Set e.g. 60.
         void setMaxPumpRateHz(double hz);
 
+        // Lightweight pump diagnostics, updated on the simulation thread. Read them
+        // from anywhere for logging (plain fields — a torn read is harmless for
+        // diagnostics). Answers "is the rate cap active?" (skipped grows) and "how
+        // expensive is a pump / an entity scan HERE?" (…Ms fields), which is the
+        // data needed to tell mirror cost apart from everything else in a build.
+        struct PumpStats
+        {
+            quint64 pumps = 0;       // pumps actually executed since attach()
+            quint64 skipped = 0;     // pumps skipped by the rate cap since attach()
+            double lastPumpMs = 0.0; // duration of the most recent pump
+            double maxPumpMs = 0.0;  // worst pump since attach()
+            double lastScanMs = 0.0; // duration of the most recent entity-list scan
+        };
+        PumpStats pumpStats() const
+        {
+            return _stats;
+        }
+
         // Wall-clock intervals for the two FULL-WORLD scans the pump performs on the
         // simulation thread: the entity list (every entity + its components) and the
         // add-component catalog (every component type). These are the expensive,
@@ -197,9 +215,12 @@ namespace rpe
         // life; scoped flecs::world wrappers are built from it where needed.
         ecs_world_t* _world = nullptr;
         PumpMode _mode = PumpMode::System;
-        // Minimum wall-clock gap between pumps (0 = every pump). See setMaxPumpRateHz.
-        std::chrono::duration<double> _minPumpGap { 0.0 };
+        // Minimum wall-clock gap between pumps, seconds (0 = every pump). Atomic:
+        // setMaxPumpRateHz is called from the GUI thread, _rateAllows reads on the
+        // sim thread. See setMaxPumpRateHz.
+        std::atomic<double> _minPumpGapSec { 0.0 };
         std::chrono::steady_clock::time_point _lastPump {};
+        PumpStats _stats; // sim-thread writes; see pumpStats()
         flecs::system _system {};
         flecs::query<> _entityQuery {};    // cached: built once at attach, never in pump()
         flecs::query<> _componentQuery {}; // cached: all components, for the bridged-id set

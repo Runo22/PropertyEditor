@@ -116,6 +116,7 @@ namespace rpe
         _selTypeName.clear();
         _lastPathList.clear();
         _splitPaths.clear();
+        _stats = {};
         ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
@@ -315,7 +316,7 @@ namespace rpe
 
     void EcsMirror::setMaxPumpRateHz(double hz)
     {
-        _minPumpGap = std::chrono::duration<double>(hz > 0.0 ? 1.0 / hz : 0.0);
+        _minPumpGapSec.store(hz > 0.0 ? 1.0 / hz : 0.0, std::memory_order_relaxed);
     }
 
     void EcsMirror::setScanIntervalsMs(int entityListMs, int catalogMs)
@@ -326,13 +327,15 @@ namespace rpe
 
     bool EcsMirror::_rateAllows()
     {
-        if (_minPumpGap.count() <= 0.0)
+        const double gap = _minPumpGapSec.load(std::memory_order_relaxed);
+        if (gap <= 0.0)
         {
             return true;
         }
         const auto now = std::chrono::steady_clock::now();
-        if (now - _lastPump < _minPumpGap)
+        if (std::chrono::duration<double>(now - _lastPump).count() < gap)
         {
+            ++_stats.skipped;
             return false;
         }
         _lastPump = now;
@@ -359,6 +362,23 @@ namespace rpe
 
     void EcsMirror::_pumpImpl(const flecs::world& world)
     {
+        // Time the whole pump (RAII — covers every early return) for pumpStats().
+        struct PumpTimer
+        {
+            PumpStats& s;
+            std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+            ~PumpTimer()
+            {
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                ++s.pumps;
+                s.lastPumpMs = ms;
+                if (ms > s.maxPumpMs)
+                {
+                    s.maxPumpMs = ms;
+                }
+            }
+        } pumpTimer { _stats };
+
         // Snapshot GUI intent from the shared channel.
         MirrorChannel::Intent in = _ch->takeIntent();
         const qulonglong entity = in.entity;
@@ -452,6 +472,7 @@ namespace rpe
         if (scanEntities && _haveQuery)
         {
             _lastEntityScan = scanNow;
+            const auto scanT0 = std::chrono::steady_clock::now();
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);
 
             // Refresh the set of bridged component ids (and locate the required one).
@@ -536,6 +557,7 @@ namespace rpe
                 _lastEntities = ents;
                 _ch->publishEntities(ents);
             }
+            _stats.lastScanMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scanT0).count();
         }
 
         // ── Add-component catalog ──────────────────────────────────────────────────

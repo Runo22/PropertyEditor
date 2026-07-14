@@ -38,6 +38,18 @@ int main()
         m.attach(&w); // default = System
         w.progress(0.016f);
         check("System mode registers the rpe::EcsMirror system", w.lookup("rpe::EcsMirror").is_valid());
+
+        // The rate cap must gate SYSTEM-mode pumps too: a tight progress() loop
+        // (well under 1/30 s of wall clock) may execute at most a couple of pumps;
+        // the rest must be counted as skipped. pumpStats() exposes both.
+        m.setMaxPumpRateHz(30.0);
+        for (int i = 0; i < 50; ++i)
+        {
+            w.progress(0.001f);
+        }
+        const auto s = m.pumpStats();
+        check("System mode: rate cap skips most pumps", s.pumps <= 5 && s.skipped >= 40);
+        check("pump stats record durations", s.pumps == 0 || s.maxPumpMs > 0.0);
         m.detach();
     }
 
