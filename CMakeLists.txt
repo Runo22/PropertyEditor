@@ -151,7 +151,10 @@ endif()
 
 foreach(_t rpe_core rpe_gui)
     if(MSVC)
-        target_compile_options(${_t} PRIVATE /W4 /MP /permissive-)
+        # /utf-8: source files are UTF-8; without this MSVC decodes them with the
+        # local ANSI codepage and non-ASCII string literals ("…", "›") turn into
+        # mojibake ("â€¦", "â€º") in the UI.
+        target_compile_options(${_t} PRIVATE /W4 /MP /permissive- /utf-8)
         target_compile_definitions(${_t} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
     else()
         target_compile_options(${_t} PRIVATE -Wall -Wextra)

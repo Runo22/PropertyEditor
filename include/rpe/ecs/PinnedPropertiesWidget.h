@@ -9,6 +9,7 @@
 
 #include <memory>
 
+class QLabel;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QTimer;
@@ -51,6 +52,10 @@ namespace rpe
         // Paths pinned for one entity+component — for tinting rows in a property tree.
         QSet<QString> pinnedPaths(qulonglong entity, const QString& component) const;
 
+        // The built-in "Pinned properties" title row. Hide it when the host already
+        // titles the widget (e.g. a dock tab), so it isn't shown twice.
+        void setTitleVisible(bool visible);
+
     public slots:
         void pin(qulonglong entity, const QString& entityLabel, const QString& component, const QString& path);
         void unpin(qulonglong entity, const QString& component, const QString& path);
@@ -73,6 +78,7 @@ namespace rpe
         static MirrorChannel::PinKey _itemKey(const QTreeWidgetItem* item);
 
         std::shared_ptr<MirrorChannel> _channel;
+        QLabel* _title = nullptr;
         QTreeWidget* _tree = nullptr;
         QTimer* _timer = nullptr;
         bool _updating = false; // guards itemChanged during programmatic updates

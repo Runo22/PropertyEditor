@@ -103,10 +103,10 @@ int main(int argc, char** argv)
         for (int i = 0; i < tree->topLevelItemCount(); ++i)
         {
             const auto* it = tree->topLevelItem(i);
-            if (it->text(0).contains(QStringLiteral("Speed")))
-                vText = it->text(1);
+            if (it->text(1).contains(QStringLiteral("Speed")))
+                vText = it->text(2);
             else
-                hpText = it->text(1);
+                hpText = it->text(2);
         }
         check("widget shows the live pinned values", vText == QStringLiteral("9.25") && hpText == QStringLiteral("70"));
 
@@ -129,16 +129,16 @@ int main(int argc, char** argv)
 
         // Edit BEFORE any mirrored value: parse has no type anchor → must be
         // ignored and the placeholder restored (not sent as a string and dropped).
-        it->setText(1, QStringLiteral("55"));
-        check("edit before the first value restores the placeholder", it->text(1) == QStringLiteral("…"));
+        it->setText(2, QStringLiteral("55"));
+        check("edit before the first value restores the placeholder", it->text(2) == QStringLiteral("…"));
         world.progress(0.016f);
         mirror.pump();
         check("no edit was queued (hp still 70)", a.get<Health>().hp == 70);
 
         // First value arrives → edits work and reach the world.
         w.pollNow();
-        check("first mirrored value lands (70)", it->text(1) == QStringLiteral("70"));
-        it->setText(1, QStringLiteral("55"));
+        check("first mirrored value lands (70)", it->text(2) == QStringLiteral("70"));
+        it->setText(2, QStringLiteral("55"));
         world.progress(0.016f);
         mirror.pump();
         check("widget edit reached the world (hp == 55)", a.get<Health>().hp == 55);
