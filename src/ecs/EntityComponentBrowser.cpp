@@ -372,6 +372,14 @@ namespace rpe
         _pinWidget = w;
         if (w)
         {
+            // The widget is host-owned and may be destroyed before this browser
+            // (e.g. its dock page closes) — drop the raw pointer then, so selection
+            // changes can't dereference a dead widget.
+            connect(w, &QObject::destroyed, this, [this] {
+                _pinWidget = nullptr;
+                _propertyEditor->setPinningEnabled(false);
+                _refreshPinnedTint();
+            });
             w->setChannel(_channel);
             connect(_propertyEditor, &PropertyEditor::pinRequested, this, [this](const QString& path) {
                 if (_pinWidget && _mirrorEntity != 0 && !_mirrorComponent.isEmpty())

@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include <string>
+#include <atomic>
 #include <unordered_map>
 
 namespace rpe
@@ -24,6 +25,8 @@ namespace rpe
             // Explicit flecs-name → type aliases. The std::string keys live here in
             // rpe_core (never in a plugin), so destroying this map is always safe.
             std::unordered_map<std::string, rttr::type::type_id> aliases;
+            // Bumped on every registration change; atomic so readers skip the mutex.
+            std::atomic<uint64_t> generation { 0 };
         };
 
         Registry& registry()
@@ -89,6 +92,7 @@ namespace rpe
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
         r.map[t.get_id()] = Entry { t, wrap, clone };
+        r.generation.fetch_add(1, std::memory_order_relaxed);
     }
 
     void TypeBridge::registerAlias(rttr::type t, std::string_view flecsName)
@@ -100,6 +104,7 @@ namespace rpe
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
         r.aliases[std::string(flecsName)] = t.get_id();
+        r.generation.fetch_add(1, std::memory_order_relaxed);
     }
 
     void TypeBridge::unregisterType(rttr::type t)
@@ -117,6 +122,12 @@ namespace rpe
         {
             it = (it->second == t.get_id()) ? r.aliases.erase(it) : std::next(it);
         }
+        r.generation.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    uint64_t TypeBridge::registryGeneration()
+    {
+        return registry().generation.load(std::memory_order_relaxed);
     }
 
     rttr::type TypeBridge::resolveByName(std::string_view flecsName)

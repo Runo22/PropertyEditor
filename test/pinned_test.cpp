@@ -24,11 +24,16 @@ struct Speed
 {
     double v = 5.0;
 };
+struct Armor // bridged LATE in the test (plugin load-order scenario)
+{
+    int def = 1;
+};
 
 RTTR_REGISTRATION
 {
     rttr::registration::class_<Health>("Health").property("hp", &Health::hp);
     rttr::registration::class_<Speed>("Speed").property("v", &Speed::v);
+    rttr::registration::class_<Armor>("Armor").property("def", &Armor::def);
 }
 
 static int g_fails = 0;
@@ -160,6 +165,42 @@ int main(int argc, char** argv)
         check("pinned path is tinted teal in the model", fg.color() == QColor(0x4D, 0xB6, 0xAC));
         model.setPinnedPaths({});
         check("clearing pins clears the tint", !model.data(idx, Qt::ForegroundRole).isValid());
+    }
+
+    // ── 5. A LATE bridge registration is picked up (registry generation) ───────
+    // Plugin load order: the flecs component exists first, the RPE bridge arrives
+    // later. The bridged-id cache must rebuild on the registry-generation bump —
+    // the component-type count alone doesn't change at registration time.
+    {
+        auto c = world.entity("C").set<Armor>({ 3 }); // Armor NOT bridged yet
+        mirror.setScanIntervalsMs(0, 0);              // scan every pump
+        // Interest BEFORE the bridge exists: the selected-type and component-list
+        // caches must not freeze the "unresolvable" state (they retry on the
+        // registry-generation bump / invalid-type re-resolve).
+        mirror.setInterest(static_cast<qulonglong>(c.id()), "Armor", { QStringLiteral("def") });
+        world.progress(0.016f);
+        mirror.pump();
+        mirror.pollValues(); // drain (nothing meaningful can flow yet)
+        QVector<rpe::EcsMirror::EntityEntry> ents;
+        mirror.pollEntities(ents); // drain (C absent: only unbridged Armor on it)
+        bool hasC = false;
+        for (const auto& en : ents)
+            hasC |= (en.id == static_cast<qulonglong>(c.id()));
+        check("entity with only an unbridged component is not listed", !hasC);
+
+        rpe::TypeBridge::registerType<Armor>(); // the "plugin" registers late
+        world.progress(0.016f);
+        mirror.pump();
+        check("late bridge registration republishes the entity list", mirror.pollEntities(ents));
+        hasC = false;
+        for (const auto& en : ents)
+            hasC |= (en.id == static_cast<qulonglong>(c.id()));
+        check("late-bridged component's entity appears in the list", hasC);
+
+        bool gotDef = false;
+        for (const auto& u : mirror.pollValues())
+            gotDef |= (u.path == QStringLiteral("def") && rpe::TypeRenderer::toDisplayString(u.value) == QStringLiteral("3"));
+        check("values flow for the late-bridged selection (def == 3)", gotDef);
     }
 
     mirror.detach();

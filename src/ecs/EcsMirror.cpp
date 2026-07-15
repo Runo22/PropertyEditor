@@ -485,9 +485,12 @@ namespace rpe
             // only ever get ADDED; bridge registrations are picked up by the count
             // check at startup and by the structural/filter forces below).
             const int compCount = _componentQuery.count();
-            if (compCount != _lastComponentCount || requiredChanged || structuralApplied || _bridgedIds.empty())
+            const uint64_t bridgeGen = TypeBridge::registryGeneration();
+            if (compCount != _lastComponentCount || bridgeGen != _bridgeGen
+                || requiredChanged || structuralApplied || _bridgedIds.empty())
             {
                 _lastComponentCount = compCount;
+                _bridgeGen = bridgeGen;
                 _bridgedIds.clear();
                 _reqId = 0;
                 _componentQuery.each([&](flecs::entity comp) {
@@ -627,6 +630,16 @@ namespace rpe
                     pr.rtype = TypeBridge::resolveByName(k.component.toUtf8().constData());
                     _pinRt.insert(k.component, pr);
                 }
+                else if (!pr.rtype.is_valid())
+                {
+                    // Never cache an invalid type: the bridge registration may land
+                    // after the pin was created (plugin load order) — retry.
+                    pr.rtype = TypeBridge::resolveByName(k.component.toUtf8().constData());
+                    if (pr.rtype.is_valid())
+                    {
+                        _pinRt.insert(k.component, pr);
+                    }
+                }
                 tOut = pr.rtype;
                 cidOut = pr.compId;
                 if (!tOut.is_valid())
@@ -721,11 +734,16 @@ namespace rpe
         // pointer is a exact, O(1) change detector. Building the list walks every
         // component doing a string allocation + registry lookup each; doing that
         // every pump was a constant per-frame drag on an uncapped sim.
+        // The list also depends on WHICH components are bridged, so a late bridge
+        // registration (plugin load order) must rebuild it too — the registry
+        // generation catches that; the table alone wouldn't change.
         const void* table = ecs_get_table(world.c_ptr(), e.id());
-        if (entity != _compsEntity || table != _compsTable)
+        const uint64_t compsGen = TypeBridge::registryGeneration();
+        if (entity != _compsEntity || table != _compsTable || compsGen != _compsGen)
         {
             _compsEntity = entity;
             _compsTable = table;
+            _compsGen = compsGen;
             _selComps.clear();
             _selCompIds.clear();
             e.each([&](flecs::id id) {
@@ -764,8 +782,10 @@ namespace rpe
             return;
         }
         // Cache the selected component's RTTR type by name — resolveByName does
-        // mutex-guarded registry + string work, needless every pump.
-        if (component != _selTypeName)
+        // mutex-guarded registry + string work, needless every pump. An INVALID
+        // result is never cached: the bridge may register a moment later (plugin
+        // load order), and the pre-cache behaviour was to retry every pump.
+        if (component != _selTypeName || !_selType.is_valid())
         {
             _selTypeName = component;
             _selType = TypeBridge::resolveByName(component.toUtf8().constData());
@@ -788,17 +808,14 @@ namespace rpe
         }
         rttr::instance inst(access);
 
-        // Apply queued edits (GUI -> sim). One modified() per component after the
-        // batch (not per leaf) — announces the write exactly like a hand-written
-        // set<T>() so OnSet observers / query change detection see inspector edits.
+        // Apply queued edits (GUI -> sim). The modified() announcement happens at
+        // the END of this function: an OnSet observer may add/remove components on
+        // `e`, which moves it to another table and DANGLES `ptr`/`inst` — so it must
+        // come after our last read through them.
         bool wroteAny = false;
         for (auto& [p, v] : edits)
         {
             wroteAny = bridge::setValueByPath(inst, p, v) || wroteAny;
-        }
-        if (wroteAny)
-        {
-            ecs_modified_id(world.c_ptr(), e.id(), _selCompIds[selIdx]);
         }
 
         // Read watched leaves (sim -> GUI), de-duplicated by display string. The
@@ -834,6 +851,15 @@ namespace rpe
         if (!updates.empty())
         {
             _ch->publishValues(std::move(updates));
+        }
+
+        // Announce the edits like a hand-written set<T>() — one modified() per
+        // component per batch, so OnSet observers / query change detection see
+        // inspector edits. LAST on purpose: observers may structurally change `e`
+        // (archetype move), which invalidates the `ptr` the reads above used.
+        if (wroteAny)
+        {
+            ecs_modified_id(world.c_ptr(), e.id(), _selCompIds[selIdx]);
         }
     }
 

@@ -229,7 +229,8 @@ namespace rpe
         // lookup instead of a resolveByName() registry scan per component.
         std::unordered_set<uint64_t> _bridgedIds;
         uint64_t _reqId = 0;          // resolved required-component id (with _bridgedIds)
-        int _lastComponentCount = -1; // skip the bridged-id rebuild when unchanged
+        int _lastComponentCount = -1; // skip the bridged-id rebuild when unchanged...
+        uint64_t _bridgeGen = 0;      // ...unless the TypeBridge registry changed
         bool _haveSystem = false;
         bool _haveQuery = false;
 
@@ -255,6 +256,7 @@ namespace rpe
         // per-pump rebuilds were a constant drag at high frame rates.
         qulonglong _compsEntity = 0;
         const void* _compsTable = nullptr; // opaque ecs_table_t*
+        uint64_t _compsGen = 0;            // TypeBridge generation the list was built at
         QStringList _selComps;             // full scoped names, parallel to _selCompIds
         QVector<uint64_t> _selCompIds;
 
