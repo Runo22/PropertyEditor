@@ -13,8 +13,8 @@ namespace rpe
     // children) or to qApp:
     //     browser.setStyleSheet(rpe::darkStyleSheet());
     //
-    // Entirely optional and self-contained (this file + src/gui/DarkStyle.cpp) so it
-    // can be dropped without touching anything else.
+    // Applying it is optional — nothing else in the library depends on it, so a
+    // host with its own stylesheet can simply not call this.
     QString darkStyleSheet();
 
 } // namespace rpe

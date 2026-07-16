@@ -22,6 +22,7 @@
 #include "rpe/core/TypeRenderer.h"
 
 // gui
+#include "rpe/gui/DarkStyle.h"
 #include "rpe/gui/EditorWidgets.h"
 #include "rpe/gui/PropertyDelegate.h"
 #include "rpe/gui/PropertyEditor.h"
@@ -38,7 +39,4 @@
 #endif
 
 // Deliberately NOT included here:
-//  - rpe/gui/DarkStyle.h — the optional dark theme lives in a single revertable
-//    commit; referencing it from the umbrella would break the build if that
-//    commit is reverted. Include it directly where used.
 //  - rpe/ecs/MirrorChannel.h — comes in transitively through EcsMirror.h.
