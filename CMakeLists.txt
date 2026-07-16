@@ -183,6 +183,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_writeback_test test/writeback_test.cpp)
     target_link_libraries(rpe_writeback_test PRIVATE rpe_gui)
 
+    add_executable(rpe_variant_editor_test test/variant_editor_test.cpp)
+    target_link_libraries(rpe_variant_editor_test PRIVATE rpe_gui)
+
     add_executable(rpe_pinned_test test/pinned_test.cpp)
     target_link_libraries(rpe_pinned_test PRIVATE rpe_gui)
 

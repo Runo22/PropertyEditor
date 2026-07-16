@@ -66,7 +66,18 @@ editor->show();
 
 - `valueChanged(path, leafValue)` reports the edited **field** (`"tint"`,
   `"position.x"`, `"weights.[2]"`); the whole struct is `editor->variant()`.
-- Load a new value at any time with another `setVariant(v)`.
+- **Pushing fresh values in** (e.g. your sim echoes state back): use
+  `updateVariant(v)`, NOT `setVariant(v)`. `setVariant` rebuilds the whole
+  tree — it closes any open inline editor and collapses the expansion.
+  `updateVariant` refreshes values through the existing schema; the row the
+  user is currently editing is pinned and left alone, so live updates never
+  stomp their typing. It falls back to a full `setVariant` automatically when
+  the incoming variant's type differs.
+
+```cpp
+// Live round-trip: user edits → your callback → sim applies → echo back:
+editor->updateVariant(latestFromSim);   // safe to call while the user is typing
+```
 
 ## 2. In-place — edit your object directly (write-through)
 
