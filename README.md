@@ -19,6 +19,10 @@ Both share the same generic property grid: numbers, booleans, strings, enums,
 file paths, colors, **arrays/sequential containers**, and nested structs — all
 discovered automatically from RTTR metadata.
 
+Topic guides live in [`docs/`](docs/README.md): getting started, standalone
+editors, the ECS browser, the threading mirror, and the pinned-properties
+watch list.
+
 ## Layout
 
 ```
