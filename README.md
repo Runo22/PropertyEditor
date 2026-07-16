@@ -19,6 +19,10 @@ Both share the same generic property grid: numbers, booleans, strings, enums,
 file paths, colors, **arrays/sequential containers**, and nested structs — all
 discovered automatically from RTTR metadata.
 
+Topic guides live in [`docs/`](docs/README.md): getting started, standalone
+editors, the ECS browser, the threading mirror, and the pinned-properties
+watch list.
+
 ## Layout
 
 ```
@@ -234,7 +238,7 @@ RTTR_REGISTRATION {
             rttr::metadata(rpe::hint::Editor, rpe::editor::Color));
 }
 
-// 2a) Live read-only / override display, fed from anywhere (thread-safe):
+// 2a) Live read-only display (edits stay local drafts), fed from anywhere (thread-safe):
 auto* editor = new rpe::PropertyEditor;
 editor->bindType(rttr::type::get<Light>());
 editor->refresh(rttr::instance(light));                 // GUI thread, 50 Hz
@@ -246,8 +250,9 @@ editor->editObject(light);   // bind + WriteBack + instance provider in one call
 
 ### Edit policies
 
-* **Override** (default) — an edited row is *pinned*: it freezes on top of the
-  live stream until reset (right-click → *Reset to live*, or *Reset All*).
+* **LocalEdit** (default) — the edit is kept as a *local draft*: the row shows
+  your value and stops following the live stream until reset (right-click →
+  *Reset to live*, or *Reset All*). The object/world is never written.
 * **WriteBack** — edits are written straight into the bound object via
   `RttrBridge::setValueByPath`, so the editor becomes a data-authoring tool.
 

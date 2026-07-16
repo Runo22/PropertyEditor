@@ -22,6 +22,7 @@
 #include "rpe/core/TypeRenderer.h"
 
 // gui
+#include "rpe/gui/DarkStyle.h"
 #include "rpe/gui/EditorWidgets.h"
 #include "rpe/gui/PropertyDelegate.h"
 #include "rpe/gui/PropertyEditor.h"
@@ -34,4 +35,8 @@
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityComponentBrowser.h"
 #include "rpe/ecs/EntityListWidget.h"
+#include "rpe/ecs/PinnedPropertiesWidget.h"
 #endif
+
+// Deliberately NOT included here:
+//  - rpe/ecs/MirrorChannel.h — comes in transitively through EcsMirror.h.

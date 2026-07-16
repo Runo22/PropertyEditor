@@ -45,6 +45,33 @@ namespace rpe
         _structurals.push_back(StructuralEdit { kind, entity, component });
     }
 
+    // ── GUI thread: pinned watches ──────────────────────────────────────────────
+
+    void MirrorChannel::setPins(const QVector<PinKey>& pins)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _pins = pins;
+    }
+
+    void MirrorChannel::queuePinEdit(const PinKey& key, rttr::variant value)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _pinEdits.emplace_back(key, std::move(value));
+    }
+
+    std::vector<MirrorChannel::PinValue> MirrorChannel::pollPinValues()
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        std::vector<PinValue> v;
+        v.reserve(static_cast<size_t>(_outPinValues.size()));
+        for (auto it = _outPinValues.cbegin(); it != _outPinValues.cend(); ++it)
+        {
+            v.push_back(it.value());
+        }
+        _outPinValues.clear();
+        return v;
+    }
+
     // ── GUI thread: results ─────────────────────────────────────────────────────
 
     bool MirrorChannel::pollEntities(QVector<EntityEntry>& out)
@@ -108,6 +135,8 @@ namespace rpe
         in.paths = _inPaths;
         in.edits.swap(_edits);
         in.structurals.swap(_structurals);
+        in.pins = _pins;
+        in.pinEdits.swap(_pinEdits);
         in.resync = _resync;
         _resync = false;
         return in;
@@ -140,6 +169,17 @@ namespace rpe
         for (auto& v : values)
         {
             _outValues.insert(v.path, std::move(v.value)); // coalesce: latest per path
+        }
+    }
+
+    void MirrorChannel::publishPinValues(std::vector<PinValue>&& values)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        for (auto& v : values)
+        {
+            // Coalesce: keep only the latest value per pin.
+            const QString k = QStringLiteral("%1|%2|%3").arg(v.key.entity).arg(v.key.component, v.key.path);
+            _outPinValues.insert(k, std::move(v));
         }
     }
 

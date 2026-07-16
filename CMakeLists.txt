@@ -128,13 +128,15 @@ if(RPE_WITH_FLECS)
         src/ecs/EntityListWidget.cpp
         src/ecs/ComponentListWidget.cpp
         src/ecs/EntityComponentBrowser.cpp
+        src/ecs/PinnedPropertiesWidget.cpp
         src/ecs/EcsMirror.cpp
         src/ecs/MirrorChannel.cpp
         src/ecs/ComponentScan.cpp
         resources/rpe_resources.qrc
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
-        include/rpe/ecs/EntityComponentBrowser.h)
+        include/rpe/ecs/EntityComponentBrowser.h
+        include/rpe/ecs/PinnedPropertiesWidget.h)
 endif()
 
 add_library(rpe_gui STATIC ${RPE_GUI_SOURCES})
@@ -149,7 +151,10 @@ endif()
 
 foreach(_t rpe_core rpe_gui)
     if(MSVC)
-        target_compile_options(${_t} PRIVATE /W4 /MP /permissive-)
+        # /utf-8: source files are UTF-8; without this MSVC decodes them with the
+        # local ANSI codepage and non-ASCII string literals ("…", "›") turn into
+        # mojibake ("â€¦", "â€º") in the UI.
+        target_compile_options(${_t} PRIVATE /W4 /MP /permissive- /utf-8)
         target_compile_definitions(${_t} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
     else()
         target_compile_options(${_t} PRIVATE -Wall -Wextra)
@@ -174,6 +179,15 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_select_entity_test test/select_entity_test.cpp)
     target_link_libraries(rpe_select_entity_test PRIVATE rpe_gui)
+
+    add_executable(rpe_writeback_test test/writeback_test.cpp)
+    target_link_libraries(rpe_writeback_test PRIVATE rpe_gui)
+
+    add_executable(rpe_variant_editor_test test/variant_editor_test.cpp)
+    target_link_libraries(rpe_variant_editor_test PRIVATE rpe_gui)
+
+    add_executable(rpe_pinned_test test/pinned_test.cpp)
+    target_link_libraries(rpe_pinned_test PRIVATE rpe_gui)
 
     add_executable(rpe_dark_style_shot test/dark_style_shot.cpp)
     target_link_libraries(rpe_dark_style_shot PRIVATE rpe_gui)

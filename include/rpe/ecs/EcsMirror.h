@@ -65,6 +65,8 @@ namespace rpe
         // The shared data channel carries these (re-exported for convenience).
         using EntityEntry = MirrorChannel::EntityEntry;
         using ValueUpdate = MirrorChannel::ValueUpdate;
+        using PinKey = MirrorChannel::PinKey;
+        using PinValue = MirrorChannel::PinValue;
 
         EcsMirror();
         ~EcsMirror();
@@ -120,6 +122,33 @@ namespace rpe
         // thousands of times per second. 0 = run every time (default). Set e.g. 60.
         void setMaxPumpRateHz(double hz);
 
+        // Lightweight pump diagnostics, updated on the simulation thread. Read them
+        // from anywhere for logging (plain fields — a torn read is harmless for
+        // diagnostics). Answers "is the rate cap active?" (skipped grows) and "how
+        // expensive is a pump / an entity scan HERE?" (…Ms fields), which is the
+        // data needed to tell mirror cost apart from everything else in a build.
+        struct PumpStats
+        {
+            quint64 pumps = 0;       // pumps actually executed since attach()
+            quint64 skipped = 0;     // pumps skipped by the rate cap since attach()
+            double lastPumpMs = 0.0; // duration of the most recent pump
+            double maxPumpMs = 0.0;  // worst pump since attach()
+            double lastScanMs = 0.0; // duration of the most recent entity-list scan
+        };
+        PumpStats pumpStats() const
+        {
+            return _stats;
+        }
+
+        // Wall-clock intervals for the two FULL-WORLD scans the pump performs on the
+        // simulation thread: the entity list (every entity + its components) and the
+        // add-component catalog (every component type). These are the expensive,
+        // bursty parts of a pump — running them per-N-pumps (the old behaviour) tied
+        // their cost to the frame rate and produced periodic frame-time spikes.
+        // Defaults: entity list 500 ms, catalog 2000 ms. 0 = scan every pump.
+        // Structural changes and filter changes force an immediate rescan regardless.
+        void setScanIntervalsMs(int entityListMs, int catalogMs);
+
         // ── GUI thread: intent ───────────────────────────────────────────────────
         void setRequiredComponent(const QString& componentName); // entity-list filter
         void setInterest(qulonglong entity, const QString& componentName,
@@ -134,6 +163,15 @@ namespace rpe
         // it lacks, is a harmless no-op.
         void addComponent(qulonglong entity, const QString& component);
         void removeComponent(qulonglong entity, const QString& component);
+
+        // ── GUI thread: pinned watches ───────────────────────────────────────────
+        // Pins are mirrored EVERY pump, independent of the selected entity — the
+        // backing of a watch widget that shows properties from several entities at
+        // once. setPins replaces the whole set; queuePinEdit writes a pinned value
+        // back on the sim thread (like queueEdit, but explicitly addressed).
+        void setPins(const QVector<PinKey>& pins);
+        void queuePinEdit(const PinKey& key, rttr::variant value);
+        std::vector<PinValue> pollPinValues();
 
         // ── GUI thread: results (poll on a timer) ────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out); // true if changed since last poll
@@ -177,9 +215,12 @@ namespace rpe
         // life; scoped flecs::world wrappers are built from it where needed.
         ecs_world_t* _world = nullptr;
         PumpMode _mode = PumpMode::System;
-        // Minimum wall-clock gap between pumps (0 = every pump). See setMaxPumpRateHz.
-        std::chrono::duration<double> _minPumpGap { 0.0 };
+        // Minimum wall-clock gap between pumps, seconds (0 = every pump). Atomic:
+        // setMaxPumpRateHz is called from the GUI thread, _rateAllows reads on the
+        // sim thread. See setMaxPumpRateHz.
+        std::atomic<double> _minPumpGapSec { 0.0 };
         std::chrono::steady_clock::time_point _lastPump {};
+        PumpStats _stats; // sim-thread writes; see pumpStats()
         flecs::system _system {};
         flecs::query<> _entityQuery {};    // cached: built once at attach, never in pump()
         flecs::query<> _componentQuery {}; // cached: all components, for the bridged-id set
@@ -187,6 +228,9 @@ namespace rpe
         // during the (throttled) entity scan so the per-entity check is an O(1) hash
         // lookup instead of a resolveByName() registry scan per component.
         std::unordered_set<uint64_t> _bridgedIds;
+        uint64_t _reqId = 0;          // resolved required-component id (with _bridgedIds)
+        int _lastComponentCount = -1; // skip the bridged-id rebuild when unchanged...
+        uint64_t _bridgeGen = 0;      // ...unless the TypeBridge registry changed
         bool _haveSystem = false;
         bool _haveQuery = false;
 
@@ -196,10 +240,47 @@ namespace rpe
         QHash<QString, QString> _lastValueStr; // path -> last display, for dedup
         qulonglong _lastInterestEntity = 0;
         QString _lastInterestComponent;
-        QString _lastRequired;   // entity-list filter, to detect changes
-        int _entityScanTick = 0; // the all-entity scan is throttled (set rarely changes)
+        QString _lastRequired;    // entity-list filter, to detect changes
         QStringList _lastCatalog; // last published add-component catalog (dedup)
-        int _catalogScanTick = 0; // the catalog scan is throttled too
+
+        // Wall-clock throttles for the full-world scans (see setScanIntervalsMs).
+        // Epoch-initialised so the FIRST pump after attach() always scans.
+        std::chrono::duration<double> _entityScanGap { 0.5 };
+        std::chrono::duration<double> _catalogScanGap { 2.0 };
+        std::chrono::steady_clock::time_point _lastEntityScan {};
+        std::chrono::steady_clock::time_point _lastCatalogScan {};
+
+        // Selected-entity component list, rebuilt only when the entity or its
+        // archetype (flecs table) changes — NOT every pump. Building it walks the
+        // entity's components doing string allocation + a registry lookup each, so
+        // per-pump rebuilds were a constant drag at high frame rates.
+        qulonglong _compsEntity = 0;
+        const void* _compsTable = nullptr; // opaque ecs_table_t*
+        uint64_t _compsGen = 0;            // TypeBridge generation the list was built at
+        QStringList _selComps;             // full scoped names, parallel to _selCompIds
+        QVector<uint64_t> _selCompIds;
+
+        // Pinned-watch state (sim thread). Component id + RTTR type are cached by
+        // name (a findComponentEntity walk / registry lookup otherwise — per pump);
+        // the display-string dedup is cleared whenever the pin set changes so new
+        // pins publish immediately.
+        struct PinResolve
+        {
+            uint64_t compId = 0;
+            rttr::type rtype = rttr::type::get<void>();
+        };
+        QHash<QString, PinResolve> _pinRt;
+        QHash<QString, QString> _lastPinStr; // "e|comp|path" -> last display
+        QVector<MirrorChannel::PinKey> _lastPins;
+
+        // Per-pump hot-path caches (sim thread): the selected component's RTTR type
+        // (resolveByName takes a registry mutex + string normalisation) and the
+        // watched paths pre-split (splitPath allocates per read otherwise). Both
+        // refresh only when the corresponding intent field changes.
+        QString _selTypeName;
+        rttr::type _selType = rttr::type::get<void>();
+        QStringList _lastPathList;
+        std::vector<QStringList> _splitPaths;
     };
 
 } // namespace rpe

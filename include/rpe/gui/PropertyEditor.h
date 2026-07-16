@@ -69,6 +69,17 @@ namespace rpe
             refresh(rttr::instance(obj));
         }
 
+        // ── Pinning (watch list) ─────────────────────────────────────────────────
+        // When enabled, the context menu offers "Pin to watch list" / "Unpin" and
+        // emits pinRequested/unpinRequested — the host (EntityComponentBrowser +
+        // PinnedPropertiesWidget) does the actual pinning. Off by default.
+        void setPinningEnabled(bool on)
+        {
+            _pinningEnabled = on;
+        }
+        // Tint these paths as pinned in the tree (see PropertyModel::setPinnedPaths).
+        void setPinnedPaths(const QSet<QString>& paths);
+
         // ── Chrome ───────────────────────────────────────────────────────────────
         void setToolbarVisible(bool visible);
         void expandAll();
@@ -84,6 +95,9 @@ namespace rpe
 
     signals:
         void propertyEdited(const QString& path, const rttr::variant& newValue);
+        // Pin/unpin requests from the context menu (only when pinning is enabled).
+        void pinRequested(const QString& path);
+        void unpinRequested(const QString& path);
 
     private slots:
         void _onFilterChanged(const QString& text);
@@ -100,6 +114,7 @@ namespace rpe
         QWidget* _toolbar = nullptr;
         QLineEdit* _filter = nullptr;
         QToolButton* _resetBtn = nullptr;
+        bool _pinningEnabled = false;
     };
 
 } // namespace rpe

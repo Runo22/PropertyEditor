@@ -43,7 +43,7 @@ namespace rpe
 
         _resetBtn = new QToolButton(_toolbar);
         _resetBtn->setText(tr("Reset"));
-        _resetBtn->setToolTip(tr("Release all pinned/overridden values"));
+        _resetBtn->setToolTip(tr("Release all local edits (return to live values)"));
         tb->addWidget(_resetBtn);
 
         root->addWidget(_toolbar);
@@ -128,6 +128,11 @@ namespace rpe
     void PropertyEditor::setEditSink(std::function<void(const QString&, const rttr::variant&)> sink)
     {
         _model->setEditSink(std::move(sink));
+    }
+
+    void PropertyEditor::setPinnedPaths(const QSet<QString>& paths)
+    {
+        _model->setPinnedPaths(paths);
     }
 
     QStringList PropertyEditor::visibleLeafPaths(bool onlyExpanded) const
@@ -219,18 +224,30 @@ namespace rpe
         }
 
         const QString path = srcIdx.data(PropertyPathRole).toString();
-        const bool overridden = srcIdx.data(IsOverriddenRole).toBool();
+        const bool hasLocalEdit = srcIdx.data(HasLocalEditRole).toBool();
 
         QMenu menu(this);
         if (!isReadOnly())
         {
-            if (!overridden)
+            if (!hasLocalEdit)
             {
-                connect(menu.addAction(tr("Pin / Override value")), &QAction::triggered, this, [this, path] { _model->overrideNode(path); });
+                connect(menu.addAction(tr("Local edit (freeze live value)")), &QAction::triggered, this, [this, path] { _model->beginLocalEdit(path); });
             }
             else
             {
                 connect(menu.addAction(tr("Reset to live")), &QAction::triggered, this, [this, path] { _model->resetNode(path); });
+            }
+            menu.addSeparator();
+        }
+        if (_pinningEnabled && srcIdx.data(IsLeafRole).toBool())
+        {
+            if (!_model->isPinnedPath(path))
+            {
+                connect(menu.addAction(tr("Pin to watch list")), &QAction::triggered, this, [this, path] { emit pinRequested(path); });
+            }
+            else
+            {
+                connect(menu.addAction(tr("Unpin from watch list")), &QAction::triggered, this, [this, path] { emit unpinRequested(path); });
             }
             menu.addSeparator();
         }

@@ -173,7 +173,7 @@ namespace rpe
 
     void PropertyModel::_refreshNode(PropertyNode* node, const rttr::variant& valIn)
     {
-        if (node->isOverridden())
+        if (node->hasLocalEdit())
         {
             return;
         }
@@ -226,7 +226,7 @@ namespace rpe
             // live editor and dangle its QModelIndex. Defer the rebuild until the
             // edit finishes; a later refresh/injection (the size still differs) redoes
             // it. The stale row count is transient and harmless.
-            if (_anyDescendantOverridden(node))
+            if (_anyDescendantLocallyEdited(node))
             {
                 return;
             }
@@ -237,7 +237,7 @@ namespace rpe
             for (int i = 0; i < sz; ++i)
             {
                 auto* child = node->children()[i];
-                if (child->isOverridden())
+                if (child->hasLocalEdit())
                 {
                     continue;
                 }
@@ -246,11 +246,11 @@ namespace rpe
         }
     }
 
-    bool PropertyModel::_anyDescendantOverridden(const PropertyNode* node)
+    bool PropertyModel::_anyDescendantLocallyEdited(const PropertyNode* node)
     {
         for (const auto* child : node->children())
         {
-            if (child->isOverridden() || _anyDescendantOverridden(child))
+            if (child->hasLocalEdit() || _anyDescendantLocallyEdited(child))
             {
                 return true;
             }
@@ -342,7 +342,7 @@ namespace rpe
         for (auto it = batch.cbegin(); it != batch.cend(); ++it)
         {
             auto* node = _findNode(it.key());
-            if (!node || node->isOverridden())
+            if (!node || node->hasLocalEdit())
             {
                 continue;
             }
@@ -393,17 +393,17 @@ namespace rpe
         flush(static_cast<int>(ch.size()));
     }
 
-    // ── override / reset ───────────────────────────────────────────────────────────
+    // ── local edit / reset ────────────────────────────────────────────────────────────
 
-    void PropertyModel::overrideNode(const QString& path)
+    void PropertyModel::beginLocalEdit(const QString& path)
     {
         auto* node = _findNode(path);
-        if (!node || node->isOverridden())
+        if (!node || node->hasLocalEdit())
         {
             return;
         }
-        node->setOverridden(true);
-        node->setOverrideValue(node->liveValue());
+        node->setLocalEdit(true);
+        node->setLocalEditValue(node->liveValue());
         const auto idx = _indexFromNode(node);
         emit dataChanged(idx, idx.siblingAtColumn(columnCount() - 1));
     }
@@ -411,11 +411,11 @@ namespace rpe
     void PropertyModel::resetNode(const QString& path)
     {
         auto* node = _findNode(path);
-        if (!node || !node->isOverridden())
+        if (!node || !node->hasLocalEdit())
         {
             return;
         }
-        node->setOverridden(false);
+        node->setLocalEdit(false);
         const auto idx = _indexFromNode(node);
         emit dataChanged(idx, idx.siblingAtColumn(columnCount() - 1));
     }
@@ -425,9 +425,9 @@ namespace rpe
         bool any = false;
         for (auto* node : std::as_const(_nodeByPath))
         {
-            if (node->isOverridden())
+            if (node->hasLocalEdit())
             {
-                node->setOverridden(false);
+                node->setLocalEdit(false);
                 node->clearDirty();
                 any = true;
             }
@@ -438,11 +438,11 @@ namespace rpe
         }
     }
 
-    bool PropertyModel::hasAnyOverride() const
+    bool PropertyModel::hasAnyLocalEdit() const
     {
         for (auto* node : std::as_const(_nodeByPath))
         {
-            if (node->isOverridden())
+            if (node->hasLocalEdit())
             {
                 return true;
             }
@@ -480,6 +480,20 @@ namespace rpe
         _editSink = std::move(sink);
     }
 
+    void PropertyModel::setPinnedPaths(const QSet<QString>& paths)
+    {
+        if (_pinnedPaths == paths)
+        {
+            return;
+        }
+        _pinnedPaths = paths;
+        // Rare (pin/unpin/selection change) — a whole-tree repaint is fine.
+        if (!_root->children().isEmpty())
+        {
+            emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1), { Qt::ForegroundRole });
+        }
+    }
+
     QStringList PropertyModel::allLeafPaths() const
     {
         QStringList out;
@@ -499,7 +513,7 @@ namespace rpe
         {
             // Mirror mode: hand the edit off, show it optimistically, and resume
             // live updates (the sim thread will echo the applied value back).
-            node->setOverridden(false);
+            node->setLocalEdit(false);
             node->setLiveValue(newVal);
             _editSink(node->path(), newVal);
             emit propertyEdited(node->path(), newVal);
@@ -524,16 +538,16 @@ namespace rpe
             });
             if (wrote)
             {
-                node->setOverridden(false);
+                node->setLocalEdit(false);
                 node->setLiveValue(actual.is_valid() ? actual : newVal);
                 emit propertyEdited(node->path(), node->liveValue());
                 return true;
             }
-            // Write failed — fall through to override so the edit is not lost.
+            // Write failed — fall through to a local draft so the edit is not lost.
         }
 
-        node->setOverrideValue(newVal);
-        node->setOverridden(true);
+        node->setLocalEditValue(newVal);
+        node->setLocalEdit(true);
         emit propertyEdited(node->path(), newVal);
         return true;
     }
@@ -645,9 +659,9 @@ namespace rpe
             break;
 
         case Qt::ToolTipRole:
-            if (node->isOverridden())
+            if (node->hasLocalEdit())
             {
-                return QStringLiteral("Overridden — right-click to reset to live");
+                return QStringLiteral("Local edit (draft, not applied) — right-click to reset to live");
             }
             if (!node->tooltip().isEmpty())
             {
@@ -656,14 +670,18 @@ namespace rpe
             break;
 
         case Qt::ForegroundRole:
-            if (node->isOverridden())
+            if (node->hasLocalEdit())
             {
-                return QBrush(QColor(0xE5, 0x9A, 0x2E)); // amber for pinned values
+                return QBrush(QColor(0xE5, 0x9A, 0x2E)); // amber: local draft edit
+            }
+            if (!_pinnedPaths.isEmpty() && _pinnedPaths.contains(node->path()))
+            {
+                return QBrush(QColor(0x4D, 0xB6, 0xAC)); // teal: pinned to the watch list
             }
             break;
 
-        case IsOverriddenRole:
-            return node->isOverridden();
+        case HasLocalEditRole:
+            return node->hasLocalEdit();
         case PropertyPathRole:
             return node->path();
         case IsLeafRole:

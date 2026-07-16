@@ -102,6 +102,24 @@ namespace rpe
         // can never come back to life through this new attach. (The system entity is
         // reused — same name — so re-attach revives exactly one system per world.)
         _alive = std::make_shared<MirrorLiveToken>();
+        // Fresh binding → scan immediately on the first pump and rebuild the
+        // selected-entity component cache (its table pointer belongs to the old world).
+        _lastEntityScan = {};
+        _lastCatalogScan = {};
+        _compsEntity = 0;
+        _compsTable = nullptr;
+        _selComps.clear();
+        _selCompIds.clear();
+        _pinRt.clear(); // component ids/types belong to the old world
+        _lastPinStr.clear();
+        _lastPins.clear();
+        _selTypeName.clear();
+        _lastPathList.clear();
+        _splitPaths.clear();
+        _stats = {};
+        _bridgedIds.clear(); // ids belong to the old world
+        _reqId = 0;
+        _lastComponentCount = -1;
         ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
@@ -262,6 +280,21 @@ namespace rpe
         _ch->queueStructural(MirrorChannel::StructuralKind::RemoveComponent, entity, component);
     }
 
+    void EcsMirror::setPins(const QVector<PinKey>& pins)
+    {
+        _ch->setPins(pins);
+    }
+
+    void EcsMirror::queuePinEdit(const PinKey& key, rttr::variant value)
+    {
+        _ch->queuePinEdit(key, std::move(value));
+    }
+
+    std::vector<EcsMirror::PinValue> EcsMirror::pollPinValues()
+    {
+        return _ch->pollPinValues();
+    }
+
     bool EcsMirror::pollEntities(QVector<EntityEntry>& out)
     {
         return _ch->pollEntities(out);
@@ -286,18 +319,26 @@ namespace rpe
 
     void EcsMirror::setMaxPumpRateHz(double hz)
     {
-        _minPumpGap = std::chrono::duration<double>(hz > 0.0 ? 1.0 / hz : 0.0);
+        _minPumpGapSec.store(hz > 0.0 ? 1.0 / hz : 0.0, std::memory_order_relaxed);
+    }
+
+    void EcsMirror::setScanIntervalsMs(int entityListMs, int catalogMs)
+    {
+        _entityScanGap = std::chrono::duration<double>(entityListMs > 0 ? entityListMs / 1000.0 : 0.0);
+        _catalogScanGap = std::chrono::duration<double>(catalogMs > 0 ? catalogMs / 1000.0 : 0.0);
     }
 
     bool EcsMirror::_rateAllows()
     {
-        if (_minPumpGap.count() <= 0.0)
+        const double gap = _minPumpGapSec.load(std::memory_order_relaxed);
+        if (gap <= 0.0)
         {
             return true;
         }
         const auto now = std::chrono::steady_clock::now();
-        if (now - _lastPump < _minPumpGap)
+        if (std::chrono::duration<double>(now - _lastPump).count() < gap)
         {
+            ++_stats.skipped;
             return false;
         }
         _lastPump = now;
@@ -324,6 +365,23 @@ namespace rpe
 
     void EcsMirror::_pumpImpl(const flecs::world& world)
     {
+        // Time the whole pump (RAII — covers every early return) for pumpStats().
+        struct PumpTimer
+        {
+            PumpStats& s;
+            std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+            ~PumpTimer()
+            {
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                ++s.pumps;
+                s.lastPumpMs = ms;
+                if (ms > s.maxPumpMs)
+                {
+                    s.maxPumpMs = ms;
+                }
+            }
+        } pumpTimer { _stats };
+
         // Snapshot GUI intent from the shared channel.
         MirrorChannel::Intent in = _ch->takeIntent();
         const qulonglong entity = in.entity;
@@ -406,45 +464,62 @@ namespace rpe
         // else id) that has at least one *bridged* component, so the inspector
         // lists exactly the entities it can show. Optionally filtered to those
         // carrying the required component (matched by short name). This scans all
-        // entities, so it is throttled — the visible set rarely changes.
+        // entities, so it is throttled on WALL CLOCK (not pump count): a per-N-pumps
+        // gate ties the scan rate to the frame rate — on a fast sim that produced a
+        // full-world scan burst (and a frame-time spike) every fraction of a second.
+        const auto scanNow = std::chrono::steady_clock::now();
         const bool requiredChanged = (required != _lastRequired);
         _lastRequired = required;
-        const bool scanEntities = requiredChanged || (_entityScanTick++ % 10 == 0);
+        const bool scanEntities = requiredChanged || structuralApplied
+            || (scanNow - _lastEntityScan >= _entityScanGap);
         if (scanEntities && _haveQuery)
         {
+            _lastEntityScan = scanNow;
+            const auto scanT0 = std::chrono::steady_clock::now();
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);
 
             // Refresh the set of bridged component ids (and locate the required one).
-            // This runs resolveByName once per COMPONENT TYPE (a few dozen), not once
-            // per component-instance per entity — so the entity scan below is O(1) id
-            // lookups instead of O(registry) string work per component.
-            _bridgedIds.clear();
-            uint64_t reqId = 0;
-            _componentQuery.each([&](flecs::entity comp) {
-                const char* cn = comp.name();
-                if (!cn || cn[0] == '\0')
-                {
-                    return;
-                }
-                const flecs::string path = comp.path(".", "");
-                const char* pc = path.c_str();
-                if (!pc)
-                {
-                    return; // no path → nothing to resolve (also avoids string_view(nullptr))
-                }
-                if (QString::fromUtf8(pc).startsWith(QStringLiteral("flecs")))
-                {
-                    return; // skip flecs' own components
-                }
-                if (TypeBridge::resolveByName(pc).is_valid())
-                {
-                    _bridgedIds.insert(comp.raw_id());
-                }
-                if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
-                {
-                    reqId = comp.raw_id();
-                }
-            });
+            // String work (flecs path allocation + registry lookup) per component
+            // TYPE — worth skipping entirely when nothing could have changed: the
+            // component-type count is a cheap, exact-enough change signal (new types
+            // only ever get ADDED; bridge registrations are picked up by the count
+            // check at startup and by the structural/filter forces below).
+            const int compCount = _componentQuery.count();
+            const uint64_t bridgeGen = TypeBridge::registryGeneration();
+            if (compCount != _lastComponentCount || bridgeGen != _bridgeGen
+                || requiredChanged || structuralApplied || _bridgedIds.empty())
+            {
+                _lastComponentCount = compCount;
+                _bridgeGen = bridgeGen;
+                _bridgedIds.clear();
+                _reqId = 0;
+                _componentQuery.each([&](flecs::entity comp) {
+                    const char* cn = comp.name();
+                    if (!cn || cn[0] == '\0')
+                    {
+                        return;
+                    }
+                    const flecs::string path = comp.path(".", "");
+                    const char* pc = path.c_str();
+                    if (!pc)
+                    {
+                        return; // no path → nothing to resolve (also avoids string_view(nullptr))
+                    }
+                    if (QString::fromUtf8(pc).startsWith(QStringLiteral("flecs")))
+                    {
+                        return; // skip flecs' own components
+                    }
+                    if (TypeBridge::resolveByName(pc).is_valid())
+                    {
+                        _bridgedIds.insert(comp.raw_id());
+                    }
+                    if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
+                    {
+                        _reqId = comp.raw_id();
+                    }
+                });
+            }
+            const uint64_t reqId = _reqId;
 
             // Narrow the entity query to the required component when the filter
             // changes: flecs then visits ONLY entities that have it, instead of every
@@ -496,15 +571,17 @@ namespace rpe
                 _lastEntities = ents;
                 _ch->publishEntities(ents);
             }
+            _stats.lastScanMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scanT0).count();
         }
 
         // ── Add-component catalog ──────────────────────────────────────────────────
         // The set of bridged component names in the world, for the GUI's "add
         // component" picker. Scanning every component is cheap but not free, so it is
         // throttled like the entity scan (the catalog rarely changes).
-        const bool scanCatalog = structuralApplied || (_catalogScanTick++ % 30 == 0);
+        const bool scanCatalog = structuralApplied || (scanNow - _lastCatalogScan >= _catalogScanGap);
         if (scanCatalog)
         {
+            _lastCatalogScan = scanNow;
             QStringList catalog;
             for (const ComponentResolution& c : scanComponents(world))
             {
@@ -523,6 +600,124 @@ namespace rpe
             }
         }
 
+        // ── Pinned watches (independent of the selection) ──────────────────────────
+        // Apply queued pin edits, then mirror every pinned leaf — pins keep flowing
+        // for entities/components that are NOT selected, feeding the watch widget.
+        if (!in.pinEdits.empty() || !in.pins.isEmpty())
+        {
+            const auto dedupKey = [](const MirrorChannel::PinKey& k) {
+                return QStringLiteral("%1|%2|%3").arg(k.entity).arg(k.component, k.path);
+            };
+            // Entity + component-pointer + type resolution for one pin. Component id
+            // AND RTTR type are cached by name — resolveByName takes a registry
+            // mutex + string work, far too heavy per pin per pump. A stale id
+            // (dead/re-created component entity) re-resolves once.
+            const auto resolvePin = [&](const MirrorChannel::PinKey& k, void*& ptrOut, rttr::type& tOut, uint64_t& cidOut) -> bool {
+                flecs::entity pe = world.entity(k.entity);
+                if (!pe.is_alive())
+                {
+                    return false;
+                }
+                PinResolve pr = _pinRt.value(k.component);
+                if (pr.compId == 0 || !world.entity(pr.compId).is_alive())
+                {
+                    const flecs::entity comp = findComponentEntity(world, k.component);
+                    if (!comp.is_valid())
+                    {
+                        return false;
+                    }
+                    pr.compId = comp.raw_id();
+                    pr.rtype = TypeBridge::resolveByName(k.component.toUtf8().constData());
+                    _pinRt.insert(k.component, pr);
+                }
+                else if (!pr.rtype.is_valid())
+                {
+                    // Never cache an invalid type: the bridge registration may land
+                    // after the pin was created (plugin load order) — retry.
+                    pr.rtype = TypeBridge::resolveByName(k.component.toUtf8().constData());
+                    if (pr.rtype.is_valid())
+                    {
+                        _pinRt.insert(k.component, pr);
+                    }
+                }
+                tOut = pr.rtype;
+                cidOut = pr.compId;
+                if (!tOut.is_valid())
+                {
+                    return false;
+                }
+                ptrOut = pe.get_mut(pr.compId);
+                return ptrOut != nullptr;
+            };
+
+            for (auto& [k, v] : in.pinEdits)
+            {
+                void* pp = nullptr;
+                rttr::type pt = rttr::type::get<void>();
+                uint64_t cid = 0;
+                if (!resolvePin(k, pp, pt, cid))
+                {
+                    continue;
+                }
+                rttr::variant access = TypeBridge::wrap(pt, pp);
+                if (!access.is_valid())
+                {
+                    continue;
+                }
+                rttr::instance pinst(access);
+                if (bridge::setValueByPath(pinst, k.path, v))
+                {
+                    // Announce the write like a hand-written set<T>() would: OnSet
+                    // observers and query change detection see inspector edits too.
+                    ecs_modified_id(world.c_ptr(), k.entity, cid);
+                }
+                _lastPinStr.remove(dedupKey(k)); // force an echo of the applied value
+            }
+
+            // The pin set changed → clear the dedup so newly pinned leaves publish
+            // immediately (and dropped ones stop occupying the cache).
+            if (in.pins != _lastPins)
+            {
+                _lastPins = in.pins;
+                _lastPinStr.clear();
+            }
+
+            std::vector<MirrorChannel::PinValue> pinUpdates;
+            for (const MirrorChannel::PinKey& k : in.pins)
+            {
+                void* pp = nullptr;
+                rttr::type pt = rttr::type::get<void>();
+                uint64_t cid = 0;
+                if (!resolvePin(k, pp, pt, cid))
+                {
+                    continue;
+                }
+                rttr::variant access = TypeBridge::wrap(pt, pp);
+                if (!access.is_valid())
+                {
+                    continue;
+                }
+                rttr::instance pinst(access);
+                rttr::variant val = bridge::getValueByPath(pinst, k.path);
+                if (!val.is_valid())
+                {
+                    continue;
+                }
+                const QString kk = dedupKey(k);
+                const QString s = TypeRenderer::toDisplayString(val);
+                if (_lastPinStr.value(kk) == s)
+                {
+                    continue;
+                }
+                _lastPinStr.insert(kk, s);
+                pinUpdates.push_back({ k, std::move(val) });
+            }
+            if (!pinUpdates.empty())
+            {
+                _ch->publishPinValues(std::move(pinUpdates));
+            }
+        }
+
         if (entity == 0)
         {
             return;
@@ -534,53 +729,73 @@ namespace rpe
         }
 
         // ── Components of the interest entity + resolve the selected one ──────────
-        QStringList comps;
-        flecs::id selId;
-        bool haveSel = false;
-        e.each([&](flecs::id id) {
-            if (!id.is_entity())
-            {
-                return;
-            }
-            const char* n = id.entity().name();
-            if (!n || n[0] == '\0')
-            {
-                return;
-            }
-            // Identify the component by its FULL scoped path ("game.Transform"),
-            // which is unique even when two components share a leaf name. The GUI
-            // displays the leaf; resolveByName matches the path exactly against the
-            // RTTR full name. (Pass the path, not the leaf, so resolution is
-            // unambiguous.)
-            const flecs::string p = id.entity().path(".", "");
-            const QString qn = QString::fromUtf8(p.c_str());
-            if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
-            {
-                return;
-            }
-            comps.append(qn);
-            if (qn == component)
-            {
-                selId = id;
-                haveSel = true;
-            }
-        });
-        if (comps != _lastComponents)
+        // Rebuilt only when the entity or its ARCHETYPE (flecs table) changes —
+        // add/remove component moves the entity to another table, so the table
+        // pointer is a exact, O(1) change detector. Building the list walks every
+        // component doing a string allocation + registry lookup each; doing that
+        // every pump was a constant per-frame drag on an uncapped sim.
+        // The list also depends on WHICH components are bridged, so a late bridge
+        // registration (plugin load order) must rebuild it too — the registry
+        // generation catches that; the table alone wouldn't change.
+        const void* table = ecs_get_table(world.c_ptr(), e.id());
+        const uint64_t compsGen = TypeBridge::registryGeneration();
+        if (entity != _compsEntity || table != _compsTable || compsGen != _compsGen)
         {
-            _lastComponents = comps;
-            _ch->publishComponents(comps);
+            _compsEntity = entity;
+            _compsTable = table;
+            _compsGen = compsGen;
+            _selComps.clear();
+            _selCompIds.clear();
+            e.each([&](flecs::id id) {
+                if (!id.is_entity())
+                {
+                    return;
+                }
+                const char* n = id.entity().name();
+                if (!n || n[0] == '\0')
+                {
+                    return;
+                }
+                // Identify the component by its FULL scoped path ("game.Transform"),
+                // which is unique even when two components share a leaf name. The GUI
+                // displays the leaf; resolveByName matches the path exactly against
+                // the RTTR full name.
+                const flecs::string p = id.entity().path(".", "");
+                const QString qn = QString::fromUtf8(p.c_str());
+                if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
+                {
+                    return;
+                }
+                _selComps.append(qn);
+                _selCompIds.append(id.raw_id());
+            });
+        }
+        if (_selComps != _lastComponents)
+        {
+            _lastComponents = _selComps;
+            _ch->publishComponents(_selComps);
         }
 
-        if (!haveSel)
+        const int selIdx = _selComps.indexOf(component);
+        if (selIdx < 0)
         {
             return;
         }
-        const rttr::type t = TypeBridge::resolveByName(component.toUtf8().constData());
+        // Cache the selected component's RTTR type by name — resolveByName does
+        // mutex-guarded registry + string work, needless every pump. An INVALID
+        // result is never cached: the bridge may register a moment later (plugin
+        // load order), and the pre-cache behaviour was to retry every pump.
+        if (component != _selTypeName || !_selType.is_valid())
+        {
+            _selTypeName = component;
+            _selType = TypeBridge::resolveByName(component.toUtf8().constData());
+        }
+        const rttr::type t = _selType;
         if (!t.is_valid())
         {
             return;
         }
-        void* ptr = e.get_mut(selId.raw_id());
+        void* ptr = e.get_mut(_selCompIds[selIdx]);
         if (!ptr)
         {
             return;
@@ -593,17 +808,34 @@ namespace rpe
         }
         rttr::instance inst(access);
 
-        // Apply queued edits (GUI -> sim).
+        // Apply queued edits (GUI -> sim). The modified() announcement happens at
+        // the END of this function: an OnSet observer may add/remove components on
+        // `e`, which moves it to another table and DANGLES `ptr`/`inst` — so it must
+        // come after our last read through them.
+        bool wroteAny = false;
         for (auto& [p, v] : edits)
         {
-            bridge::setValueByPath(inst, p, v);
+            wroteAny = bridge::setValueByPath(inst, p, v) || wroteAny;
         }
 
-        // Read watched leaves (sim -> GUI), de-duplicated by display string.
-        std::vector<ValueUpdate> updates;
-        for (const QString& p : paths)
+        // Read watched leaves (sim -> GUI), de-duplicated by display string. The
+        // paths are pre-split once per interest change — splitPath would otherwise
+        // allocate per path per pump, which adds up on a fast (or debug) sim.
+        if (paths != _lastPathList)
         {
-            rttr::variant val = bridge::getValueByPath(inst, p);
+            _lastPathList = paths;
+            _splitPaths.clear();
+            _splitPaths.reserve(static_cast<size_t>(paths.size()));
+            for (const QString& p : paths)
+            {
+                _splitPaths.push_back(bridge::splitPath(p));
+            }
+        }
+        std::vector<ValueUpdate> updates;
+        for (int i = 0; i < paths.size(); ++i)
+        {
+            const QString& p = paths[i];
+            rttr::variant val = bridge::getValueByPath(inst, _splitPaths[static_cast<size_t>(i)]);
             if (!val.is_valid())
             {
                 continue;
@@ -619,6 +851,15 @@ namespace rpe
         if (!updates.empty())
         {
             _ch->publishValues(std::move(updates));
+        }
+
+        // Announce the edits like a hand-written set<T>() — one modified() per
+        // component per batch, so OnSet observers / query change detection see
+        // inspector edits. LAST on purpose: observers may structurally change `e`
+        // (archetype move), which invalidates the `ptr` the reads above used.
+        if (wroteAny)
+        {
+            ecs_modified_id(world.c_ptr(), e.id(), _selCompIds[selIdx]);
         }
     }
 

@@ -2,6 +2,7 @@
 
 #include "rpe/core/rttr_prelude.h"
 
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
@@ -115,6 +116,12 @@ namespace rpe
         // unregistered). The result owns its data and is safe to hand to another
         // thread.
         static rttr::variant clone(rttr::type t, void* obj);
+
+        // Monotonic counter bumped by every registration change (registerEntry,
+        // registerAlias, unregisterType). Lets a consumer cache derived data (e.g.
+        // "which flecs components are bridged") and rebuild only when this moves —
+        // late plugin registrations are then picked up without polling the registry.
+        static uint64_t registryGeneration();
 
         static bool has(rttr::type t);
         static bool isRegistered(rttr::type t)

@@ -54,6 +54,9 @@ namespace rpe
         // appears. Returns true if it was selected immediately. Call on the GUI thread.
         bool selectById(qulonglong id);
 
+        // Display label of the currently selected entity (empty if none).
+        QString currentLabel() const;
+
     signals:
         void entitySelected(flecs::entity e); // direct mode (world available)
         void entityIdSelected(qulonglong id); // always; mirror mode uses this

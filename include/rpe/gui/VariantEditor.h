@@ -32,7 +32,14 @@ namespace rpe
         explicit VariantEditor(QWidget* parent = nullptr);
 
         // Edit an owned copy of `v`. Retrieve the (possibly edited) value via variant().
+        // Rebuilds the whole tree — use updateVariant() for subsequent value updates.
         void setVariant(const rttr::variant& v);
+
+        // Update the VALUES of the owned copy from `v` WITHOUT rebuilding the tree:
+        // the schema, expansion state and any open inline editor survive (the row
+        // being edited is pinned and skipped, exactly like a live refresh). Falls
+        // back to a full setVariant() when the type differs or nothing is bound.
+        void updateVariant(const rttr::variant& v);
 
         // Edit an external object in place; caller guarantees its lifetime.
         void setLinked(rttr::type type, void* obj);

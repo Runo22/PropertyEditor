@@ -1,5 +1,6 @@
 #include "rpe/gui/VariantEditor.h"
 
+#include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/PropertyEditor.h"
 
 #include <QLabel>
@@ -39,6 +40,22 @@ namespace rpe
     {
         _wrapper = RttrVariantWrapper(v);
         _rebind();
+    }
+
+    void VariantEditor::updateVariant(const rttr::variant& v)
+    {
+        // Values-only path: replace the owned copy and re-read through the existing
+        // schema. Locally-edited rows (including the one behind an open inline
+        // editor, which is pinned while editing) are skipped by refresh(), so live
+        // updates never stomp the user's typing.
+        if (!_wrapper.isValid() || _wrapper.isLinked() || !v.is_valid()
+            || TypeRenderer::rawType(v.get_type()) != _wrapper.type())
+        {
+            setVariant(v); // type changed / nothing bound → full rebuild
+            return;
+        }
+        _wrapper.value() = v;
+        _editor->refresh(_wrapper.instance());
     }
 
     void VariantEditor::setLinked(rttr::type type, void* obj)

@@ -106,7 +106,7 @@ int main(int argc, char** argv)
     }
 
     // ── A resize is deferred while an element has an open editor (no teardown) ──
-    // overrideNode() is exactly the pin createEditor applies; the destructive
+    // beginLocalEdit() is exactly the pin createEditor applies; the destructive
     // rebuild must not free a pinned element node out from under a live editor.
     {
         std::vector<int> base { 1, 2, 3 };
@@ -114,7 +114,7 @@ int main(int argc, char** argv)
         QCoreApplication::processEvents();
         check("array has 3 rows before pin", model.rowCount(topIndex(model, QStringLiteral("nums"))) == 3);
 
-        model.overrideNode(QStringLiteral("nums.[1]")); // an editor is open on element [1]
+        model.beginLocalEdit(QStringLiteral("nums.[1]")); // an editor is open on element [1]
         std::vector<int> grown { 1, 2, 3, 4, 5 };
         model.setPropertyValue(QStringLiteral("nums"), rttr::variant(grown));
         QCoreApplication::processEvents();

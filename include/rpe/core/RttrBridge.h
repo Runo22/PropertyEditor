@@ -25,6 +25,10 @@ namespace rpe::bridge
 
     // Read the value at a dot path relative to `root`. Returns an invalid variant on failure.
     rttr::variant getValueByPath(const rttr::instance& root, const QString& path);
+    // Same, with the path already split (see splitPath). Lets a hot caller (the
+    // mirror reads every watched leaf every pump) split once per interest change
+    // instead of re-splitting per read.
+    rttr::variant getValueByPath(const rttr::instance& root, const QStringList& segments);
 
     // Write `value` at the dot path relative to `root`. Returns true on success.
     bool setValueByPath(rttr::instance root, const QString& path, const rttr::variant& value);

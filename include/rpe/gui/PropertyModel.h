@@ -7,6 +7,7 @@
 
 #include <QAbstractItemModel>
 #include <QHash>
+#include <QSet>
 #include <QMutex>
 
 #include <atomic>
@@ -23,7 +24,7 @@ namespace rpe
     //  the metadata the delegate needs is surfaced through plain roles instead.)
     enum PropertyRole
     {
-        IsOverriddenRole = Qt::UserRole + 1,
+        HasLocalEditRole = Qt::UserRole + 1,
         PropertyPathRole, // QString dot-path
         RttrVariantRole,  // current effective rttr::variant
         IsLeafRole,       // bool — true if directly editable leaf
@@ -39,7 +40,10 @@ namespace rpe
     // How committed edits are applied.
     enum class EditPolicy
     {
-        Override,  // freeze the edited value on top of live updates (does not touch the object)
+        // Keep the edit as a LOCAL DRAFT: the row shows your value and stops
+        // following live updates until reset. The bound object/world is never
+        // touched. (Formerly named "Override" — nothing is ever written.)
+        LocalEdit,
         WriteBack, // write the value straight into the bound object (true "set data")
     };
 
@@ -52,7 +56,7 @@ namespace rpe
     //     allocations — so dozens of these can update at 50Hz+.
     //   • setPropertyValue() is thread-safe: values pushed from a worker/sim thread
     //     are coalesced and flushed on the GUI thread.
-    //   • Two edit policies (override vs. write-back), selectable per instance.
+    //   • Two edit policies (local-edit vs. write-back), selectable per instance.
     // ─────────────────────────────────────────────────────────────────────────────
     class PropertyModel : public QAbstractItemModel
     {
@@ -109,11 +113,19 @@ namespace rpe
         // Dot-paths of every directly-editable leaf in the current schema.
         QStringList allLeafPaths() const;
 
-        // ── Override / reset ─────────────────────────────────────────────────────
-        void overrideNode(const QString& path);
+        // Paths pinned to a watch list (PinnedPropertiesWidget). Purely visual
+        // here: pinned rows are tinted so they are recognisable in the main tree.
+        void setPinnedPaths(const QSet<QString>& paths);
+        bool isPinnedPath(const QString& path) const
+        {
+            return _pinnedPaths.contains(path);
+        }
+
+        // ── Local edit / reset ──────────────────────────────────────────────────────
+        void beginLocalEdit(const QString& path);
         void resetNode(const QString& path);
         void resetAll();
-        bool hasAnyOverride() const;
+        bool hasAnyLocalEdit() const;
 
         // ── QAbstractItemModel ───────────────────────────────────────────────────
         QModelIndex index(int row, int column, const QModelIndex& parent = {}) const override;
@@ -138,7 +150,7 @@ namespace rpe
         void _refreshNode(PropertyNode* node, const rttr::variant& val);
         void _refreshSequential(PropertyNode* node, const rttr::variant& val);
         void _rebuildArrayChildren(PropertyNode* node, const rttr::variant& arrayVal);
-        static bool _anyDescendantOverridden(const PropertyNode* node);
+        static bool _anyDescendantLocallyEdited(const PropertyNode* node);
         void _applyBatch(const QHash<QString, rttr::variant>& batch);
         void _emitDirtyRanges(PropertyNode* parent);
         void _collectNodes(PropertyNode* node, QHash<QString, PropertyNode*>& out) const;
@@ -154,7 +166,8 @@ namespace rpe
         std::atomic<bool> _flushScheduled { false };
 
         bool _readOnly = false;
-        EditPolicy _editPolicy = EditPolicy::Override;
+        QSet<QString> _pinnedPaths; // watch-list tint (see setPinnedPaths)
+        EditPolicy _editPolicy = EditPolicy::LocalEdit;
         std::function<rttr::instance()> _instanceProvider;
         AccessGuard _writeGuard;
         std::function<void(const QString&, const rttr::variant&)> _editSink;
