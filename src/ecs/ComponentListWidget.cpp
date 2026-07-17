@@ -472,6 +472,15 @@ namespace rpe
                     return;
                 }
 
+                // Only DATA components: a zero-size tag (or a plain entity attached
+                // to this entity) can name-match a bridged type via the short-name
+                // fallback, and get_mut on a dataless id asserts in debug flecs.
+                const flecs::Component* cd = comp.try_get<flecs::Component>();
+                if (!cd || cd->size <= 0)
+                {
+                    return;
+                }
+
                 // Only components we can actually inspect/edit (a TypeBridge wrapper
                 // turns the raw component pointer into an RTTR instance). resolveByName
                 // bridges flecs' short component name to the registered RTTR type, which

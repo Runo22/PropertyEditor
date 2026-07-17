@@ -632,6 +632,13 @@ namespace rpe
                     {
                         return false;
                     }
+                    // Data components only — get_mut on a tag/plain-entity id asserts
+                    // in debug flecs builds (see the selected-component listing).
+                    const flecs::Component* cd = comp.try_get<flecs::Component>();
+                    if (!cd || cd->size <= 0)
+                    {
+                        return false;
+                    }
                     pr.compId = comp.raw_id();
                     pr.rtype = TypeBridge::resolveByName(k.component.toUtf8().constData());
                     _pinRt.insert(k.component, pr);
@@ -759,6 +766,16 @@ namespace rpe
                 }
                 const char* n = id.entity().name();
                 if (!n || n[0] == '\0')
+                {
+                    return;
+                }
+                // Only DATA components are inspectable. A zero-size tag — or a plain
+                // entity attached to this entity — can still NAME-match a bridged
+                // type through resolveByName's short-name fallback; listing it would
+                // let the GUI select it, and get_mut on a dataless id ASSERTS in
+                // debug flecs builds (returns null in release).
+                const flecs::Component* cd = id.entity().try_get<flecs::Component>();
+                if (!cd || cd->size <= 0)
                 {
                     return;
                 }

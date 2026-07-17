@@ -167,6 +167,32 @@ int main(int argc, char** argv)
         check("clearing pins clears the tint", !model.data(idx, Qt::ForegroundRole).isValid());
     }
 
+    // ── 4b. Tags / name-colliding plain entities never reach the component list ─
+    // A marker entity named "Speed" (in a scope, so the leaf collides with the
+    // bridged type) attached to the entity would pass the name-based resolve and
+    // then ASSERT in debug flecs when the GUI selects it (get_mut on a dataless
+    // id). It must be filtered out of the published component list.
+    {
+        auto scopeParent = world.entity("markers");
+        auto marker = world.scope(scopeParent).entity("Speed"); // leaf "Speed", no data
+        b.add(marker);
+
+        mirror.setInterest(bid, "Speed", { QStringLiteral("v") });
+        world.progress(0.016f);
+        mirror.pump();
+        QStringList comps;
+        mirror.pollComponents(comps);
+        check("dataless name-colliding id is NOT listed as a component",
+              comps.contains(QStringLiteral("Speed")) && !comps.contains(QStringLiteral("markers.Speed")));
+
+        // Selecting the real component still works (values flow, no assert).
+        bool gotV = false;
+        for (const auto& u : mirror.pollValues())
+            gotV |= (u.path == QStringLiteral("v"));
+        check("real component still mirrors alongside the marker", gotV);
+        b.remove(marker);
+    }
+
     // ── 5. A LATE bridge registration is picked up (registry generation) ───────
     // Plugin load order: the flecs component exists first, the RPE bridge arrives
     // later. The bridged-id cache must rebuild on the registry-generation bump —
