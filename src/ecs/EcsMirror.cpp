@@ -572,6 +572,10 @@ namespace rpe
                 _ch->publishEntities(ents);
             }
             _stats.lastScanMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scanT0).count();
+            if (_stats.lastScanMs > _stats.maxScanMs)
+            {
+                _stats.maxScanMs = _stats.lastScanMs;
+            }
         }
 
         // ── Add-component catalog ──────────────────────────────────────────────────
@@ -582,6 +586,7 @@ namespace rpe
         if (scanCatalog)
         {
             _lastCatalogScan = scanNow;
+            const auto catT0 = std::chrono::steady_clock::now();
             QStringList catalog;
             for (const ComponentResolution& c : scanComponents(world))
             {
@@ -598,6 +603,7 @@ namespace rpe
                 _lastCatalog = catalog;
                 _ch->publishCatalog(catalog);
             }
+            _stats.lastCatalogMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - catT0).count();
         }
 
         // ── Pinned watches (independent of the selection) ──────────────────────────

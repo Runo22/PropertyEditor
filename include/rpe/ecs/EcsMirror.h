@@ -129,11 +129,13 @@ namespace rpe
         // data needed to tell mirror cost apart from everything else in a build.
         struct PumpStats
         {
-            quint64 pumps = 0;       // pumps actually executed since attach()
-            quint64 skipped = 0;     // pumps skipped by the rate cap since attach()
-            double lastPumpMs = 0.0; // duration of the most recent pump
-            double maxPumpMs = 0.0;  // worst pump since attach()
-            double lastScanMs = 0.0; // duration of the most recent entity-list scan
+            quint64 pumps = 0;          // pumps actually executed since attach()
+            quint64 skipped = 0;        // pumps skipped by the rate cap since attach()
+            double lastPumpMs = 0.0;    // duration of the most recent pump
+            double maxPumpMs = 0.0;     // worst pump since attach()
+            double lastScanMs = 0.0;    // duration of the most recent entity-list scan
+            double maxScanMs = 0.0;     // worst entity-list scan since attach()
+            double lastCatalogMs = 0.0; // duration of the most recent catalog scan
         };
         PumpStats pumpStats() const
         {
