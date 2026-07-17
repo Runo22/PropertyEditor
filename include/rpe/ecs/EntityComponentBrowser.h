@@ -8,6 +8,7 @@
 #include "rpe/gui/PropertyModel.h"
 
 #include <QMetaType>
+#include <QSet>
 #include <QWidget>
 
 #include <memory>
@@ -186,6 +187,7 @@ namespace rpe
         void componentDeselected();
 
     private slots:
+        void _onRemoveComponentId(qulonglong rawId);
         void _onEntitySelected(flecs::entity e);
         void _onEntityDeselected();
         void _onComponentSelected(ComponentInfo info);
@@ -240,8 +242,9 @@ namespace rpe
         bool _openFieldsOnly = true;
 
         // Add/remove-component state (mirror mode).
-        QStringList _catalog;       // all bridged component names in the world
-        QStringList _currentComps;  // components on the selected entity
+        QVector<MirrorChannel::CatalogEntry> _catalog; // addable data comps + tags
+        QStringList _currentComps;  // DATA components on the selected entity
+        QSet<QString> _currentTags; // TAG rows on the selected entity
         Settings _settings;
 
         PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)

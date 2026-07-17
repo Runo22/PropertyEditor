@@ -37,6 +37,8 @@ namespace rpe
             ComponentResolution r;
             r.name = QString::fromUtf8(raw);
             r.path = path;
+            const flecs::Component* cd = comp.try_get<flecs::Component>();
+            r.tag = !cd || cd->size <= 0;
             const rttr::type t = TypeBridge::resolveByName(raw);
             r.bridged = t.is_valid();
             if (r.bridged)

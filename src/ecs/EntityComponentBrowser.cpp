@@ -75,6 +75,7 @@ namespace rpe
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
         connect(_componentList, &ComponentListWidget::addComponentRequested, this, &EntityComponentBrowser::_onAddComponent);
         connect(_componentList, &ComponentListWidget::removeComponentRequested, this, &EntityComponentBrowser::_onRemoveComponent);
+        connect(_componentList, &ComponentListWidget::removeComponentIdRequested, this, &EntityComponentBrowser::_onRemoveComponentId);
         connect(_propertyEditor, &PropertyEditor::propertyEdited, this, &EntityComponentBrowser::propertyEdited);
         connect(_writeCheck, &QCheckBox::toggled, this, &EntityComponentBrowser::_onWriteToggled);
     }
@@ -437,16 +438,28 @@ namespace rpe
             _entityList->setEntries(rows);
         }
 
-        QStringList comps;
-        if (_channel->pollComponents(comps))
+        QVector<MirrorChannel::ComponentRow> compRows;
+        if (_channel->pollComponentRows(compRows))
         {
-            _componentList->setComponentNames(comps);
-            _currentComps = comps;
+            _componentList->setComponentRows(compRows);
+            _currentComps.clear();
+            _currentTags.clear();
+            for (const auto& r : compRows)
+            {
+                if (r.kind == MirrorChannel::RowKind::Data)
+                {
+                    _currentComps.append(r.name);
+                }
+                else if (r.kind == MirrorChannel::RowKind::Tag)
+                {
+                    _currentTags.insert(r.name);
+                }
+            }
             _updateAddable();
         }
 
-        QStringList catalog;
-        if (_channel->pollCatalog(catalog))
+        QVector<MirrorChannel::CatalogEntry> catalog;
+        if (_channel->pollCatalogEntries(catalog))
         {
             _catalog = catalog;
             _updateAddable();
@@ -464,17 +477,19 @@ namespace rpe
     void EntityComponentBrowser::_updateAddable()
     {
         // Offer every catalogued component the entity does not already have. Both
-        // the catalog and the entity's current components are full scoped paths now,
-        // so compare directly.
-        QStringList addable;
-        for (const QString& full : _catalog)
+        // the catalog and the entity's current components are full scoped paths, so
+        // compare directly (tags check the tag rows, data the data rows).
+        QVector<MirrorChannel::CatalogEntry> addable;
+        for (const MirrorChannel::CatalogEntry& entry : _catalog)
         {
-            if (!_currentComps.contains(full))
+            const bool present = entry.tag ? _currentTags.contains(entry.path)
+                                           : _currentComps.contains(entry.path);
+            if (!present)
             {
-                addable.append(full);
+                addable.append(entry);
             }
         }
-        _componentList->setAddableComponents(addable);
+        _componentList->setAddableEntries(addable);
     }
 
     void EntityComponentBrowser::_onAddComponent(const QString& name)
@@ -498,6 +513,28 @@ namespace rpe
                 {
                     _selectedEntity.add(comp);
                 }
+            });
+            _componentList->setEntity(_world, _selectedEntity);
+        }
+    }
+
+    void EntityComponentBrowser::_onRemoveComponentId(qulonglong rawId)
+    {
+        // Tag/pair rows carry a flecs id — the only correct removal identity for a
+        // pair, and unambiguous for tags.
+        if (rawId == 0)
+        {
+            return;
+        }
+        if (_channel && _mirrorEntity != 0)
+        {
+            _channel->queueStructuralById(MirrorChannel::StructuralKind::RemoveComponent, _mirrorEntity, rawId);
+            _channel->requestResync();
+        }
+        else if (_world && _selectedEntity.is_alive())
+        {
+            withGuard(_guard, [&] {
+                _selectedEntity.remove(static_cast<flecs::id_t>(rawId));
             });
             _componentList->setEntity(_world, _selectedEntity);
         }

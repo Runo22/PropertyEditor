@@ -5,6 +5,8 @@
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/ecs/ComponentScan.h"
 
+#include <algorithm>
+
 namespace rpe
 {
 
@@ -110,6 +112,8 @@ namespace rpe
         _compsTable = nullptr;
         _selComps.clear();
         _selCompIds.clear();
+        _selRows.clear();
+        _lastCompRows.clear();
         _pinRt.clear(); // component ids/types belong to the old world
         _lastPinStr.clear();
         _lastPins.clear();
@@ -403,16 +407,32 @@ namespace rpe
             {
                 continue;
             }
-            if (s.kind == MirrorChannel::StructuralKind::AddComponent)
+            // By-id form: exact, and the ONLY way to address a pair. Also used for
+            // tag rows so a leaf-name collision can never remove the wrong thing.
+            if (s.rawId != 0)
             {
-                flecs::entity comp = findComponentEntity(world, s.component);
+                if (s.kind == MirrorChannel::StructuralKind::AddComponent)
+                {
+                    e.add(static_cast<flecs::id_t>(s.rawId));
+                }
+                else
+                {
+                    e.remove(static_cast<flecs::id_t>(s.rawId));
+                }
+                structuralApplied = true;
+            }
+            else if (s.kind == MirrorChannel::StructuralKind::AddComponent)
+            {
+                // bridgedOnly=false: the add catalog legitimately offers zero-size
+                // TAGS, which have no RTTR bridge (nothing to inspect, only add).
+                flecs::entity comp = findComponentEntity(world, s.component, /*bridgedOnly=*/false);
                 if (comp.is_valid())
                 {
                     e.add(comp);
                     structuralApplied = true;
                 }
             }
-            else // RemoveComponent
+            else // RemoveComponent (by name)
             {
                 // Remove by the component currently on the entity (unambiguous).
                 e.each([&](flecs::id id) {
@@ -431,7 +451,7 @@ namespace rpe
         }
         if (structuralApplied)
         {
-            _lastComponents.clear();
+            _lastCompRows.clear();
             _lastEntities.clear();
             _lastCatalog.clear();
         }
@@ -447,8 +467,8 @@ namespace rpe
         {
             _lastValueStr.clear();
             _ch->publishEntities(_lastEntities);
-            _ch->publishComponents(_lastComponents);
-            _ch->publishCatalog(_lastCatalog);
+            _ch->publishComponentRows(_lastCompRows);
+            _ch->publishCatalogEntries(_lastCatalog);
         }
 
         // Interest changed → reset per-leaf dedup so the new selection refreshes fully.
@@ -587,21 +607,26 @@ namespace rpe
         {
             _lastCatalogScan = scanNow;
             const auto catT0 = std::chrono::steady_clock::now();
-            QStringList catalog;
+            // Addable = bridged data components + zero-size TAGS (presence markers
+            // need no bridge — there is nothing to inspect, only add/remove).
+            QVector<MirrorChannel::CatalogEntry> catalog;
             for (const ComponentResolution& c : scanComponents(world))
             {
-                if (c.bridged)
+                if (c.bridged || c.tag)
                 {
                     // Full scoped path so the GUI's add picker can group by namespace;
                     // findComponentEntity accepts either the path or the leaf name.
-                    catalog.append(c.path.isEmpty() ? c.name : c.path);
+                    catalog.append({ c.path.isEmpty() ? c.name : c.path, c.tag });
                 }
             }
-            catalog.sort();
+            std::sort(catalog.begin(), catalog.end(),
+                      [](const MirrorChannel::CatalogEntry& a, const MirrorChannel::CatalogEntry& b) {
+                          return a.path < b.path;
+                      });
             if (catalog != _lastCatalog)
             {
                 _lastCatalog = catalog;
-                _ch->publishCatalog(catalog);
+                _ch->publishCatalogEntries(catalog);
             }
             _stats.lastCatalogMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - catT0).count();
         }
@@ -759,7 +784,33 @@ namespace rpe
             _compsGen = compsGen;
             _selComps.clear();
             _selCompIds.clear();
+            _selRows.clear();
             e.each([&](flecs::id id) {
+                // PAIRS: pure presence state ("Likes → Bob"). Skip flecs-internal
+                // relations (ChildOf/IsA/Identifier… live under the flecs scope).
+                if (id.is_pair())
+                {
+                    const flecs::entity rel = id.first();
+                    const char* rn = rel.name();
+                    if (!rn || rn[0] == '\0')
+                    {
+                        return;
+                    }
+                    const flecs::string rp = rel.path(".", "");
+                    const QString relPath = rp.c_str() ? QString::fromUtf8(rp.c_str()) : QString();
+                    if (relPath.startsWith(QStringLiteral("flecs")))
+                    {
+                        return;
+                    }
+                    const flecs::entity tgt = id.second();
+                    const char* tn = tgt.name();
+                    const QString target = (tn && tn[0] != '\0')
+                        ? QString::fromUtf8(tn)
+                        : QStringLiteral("#%1").arg(static_cast<qulonglong>(tgt.id()));
+                    _selRows.append({ relPath, target, MirrorChannel::RowKind::Pair,
+                                      static_cast<qulonglong>(id.raw_id()) });
+                    return;
+                }
                 if (!id.is_entity())
                 {
                     return;
@@ -769,34 +820,40 @@ namespace rpe
                 {
                     return;
                 }
+                const flecs::string p = id.entity().path(".", "");
+                const QString qn = QString::fromUtf8(p.c_str());
+                if (qn.startsWith(QStringLiteral("flecs")))
+                {
+                    return;
+                }
                 // Only DATA components are inspectable. A zero-size tag — or a plain
-                // entity attached to this entity — can still NAME-match a bridged
-                // type through resolveByName's short-name fallback; listing it would
-                // let the GUI select it, and get_mut on a dataless id ASSERTS in
-                // debug flecs builds (returns null in release).
+                // entity attached to this entity — has nothing to edit; it is shown
+                // as a TAG row (get_mut on a dataless id ASSERTS in debug flecs).
                 const flecs::Component* cd = id.entity().try_get<flecs::Component>();
                 if (!cd || cd->size <= 0)
                 {
+                    _selRows.append({ qn, QString(), MirrorChannel::RowKind::Tag,
+                                      static_cast<qulonglong>(id.raw_id()) });
                     return;
                 }
                 // Identify the component by its FULL scoped path ("game.Transform"),
                 // which is unique even when two components share a leaf name. The GUI
                 // displays the leaf; resolveByName matches the path exactly against
                 // the RTTR full name.
-                const flecs::string p = id.entity().path(".", "");
-                const QString qn = QString::fromUtf8(p.c_str());
                 if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
                 {
-                    return;
+                    return; // data component without a bridge → not inspectable, hidden
                 }
                 _selComps.append(qn);
                 _selCompIds.append(id.raw_id());
+                _selRows.append({ qn, QString(), MirrorChannel::RowKind::Data,
+                                  static_cast<qulonglong>(id.raw_id()) });
             });
         }
-        if (_selComps != _lastComponents)
+        if (_selRows != _lastCompRows)
         {
-            _lastComponents = _selComps;
-            _ch->publishComponents(_selComps);
+            _lastCompRows = _selRows;
+            _ch->publishComponentRows(_selRows);
         }
 
         const int selIdx = _selComps.indexOf(component);

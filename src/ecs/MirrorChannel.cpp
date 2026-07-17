@@ -42,7 +42,13 @@ namespace rpe
     void MirrorChannel::queueStructural(StructuralKind kind, qulonglong entity, const QString& component)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _structurals.push_back(StructuralEdit { kind, entity, component });
+        _structurals.push_back(StructuralEdit { kind, entity, component, 0 });
+    }
+
+    void MirrorChannel::queueStructuralById(StructuralKind kind, qulonglong entity, qulonglong rawId)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _structurals.push_back(StructuralEdit { kind, entity, QString(), rawId });
     }
 
     // ── GUI thread: pinned watches ──────────────────────────────────────────────
@@ -93,12 +99,47 @@ namespace rpe
         {
             return false;
         }
+        out.clear();
+        for (const ComponentRow& r : _outComponents)
+        {
+            if (r.kind == RowKind::Data)
+            {
+                out.append(r.name);
+            }
+        }
+        _outComponentsDirty = false;
+        return true;
+    }
+
+    bool MirrorChannel::pollComponentRows(QVector<ComponentRow>& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outComponentsDirty)
+        {
+            return false;
+        }
         out = _outComponents;
         _outComponentsDirty = false;
         return true;
     }
 
     bool MirrorChannel::pollCatalog(QStringList& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outCatalogDirty)
+        {
+            return false;
+        }
+        out.clear();
+        for (const CatalogEntry& e : _outCatalog)
+        {
+            out.append(e.path);
+        }
+        _outCatalogDirty = false;
+        return true;
+    }
+
+    bool MirrorChannel::pollCatalogEntries(QVector<CatalogEntry>& out)
     {
         std::lock_guard<std::mutex> lk(_m);
         if (!_outCatalogDirty)
@@ -151,15 +192,37 @@ namespace rpe
 
     void MirrorChannel::publishComponents(const QStringList& components)
     {
+        QVector<ComponentRow> rows;
+        rows.reserve(components.size());
+        for (const QString& c : components)
+        {
+            rows.append(ComponentRow { c, QString(), RowKind::Data, 0 });
+        }
+        publishComponentRows(rows);
+    }
+
+    void MirrorChannel::publishComponentRows(const QVector<ComponentRow>& rows)
+    {
         std::lock_guard<std::mutex> lk(_m);
-        _outComponents = components;
+        _outComponents = rows;
         _outComponentsDirty = true;
     }
 
     void MirrorChannel::publishCatalog(const QStringList& catalog)
     {
+        QVector<CatalogEntry> entries;
+        entries.reserve(catalog.size());
+        for (const QString& c : catalog)
+        {
+            entries.append(CatalogEntry { c, false });
+        }
+        publishCatalogEntries(entries);
+    }
+
+    void MirrorChannel::publishCatalogEntries(const QVector<CatalogEntry>& entries)
+    {
         std::lock_guard<std::mutex> lk(_m);
-        _outCatalog = catalog;
+        _outCatalog = entries;
         _outCatalogDirty = true;
     }
 

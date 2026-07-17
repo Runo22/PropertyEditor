@@ -46,6 +46,9 @@ struct Health
     std::vector<int> resistances = { 10, 5, 0 };
     fs::path deathSound = "sfx/die.wav";
 };
+struct Burning // zero-size tag → badge row
+{
+};
 namespace physics
 {
     struct RigidBody
@@ -117,6 +120,11 @@ int main(int argc, char* argv[])
     world.component<physics::RigidBody>();
     auto player = world.entity("Player").set<Transform>({ { 12.5, 3.0, -4.0 }, 1.0 }).set<Health>({ 87, 40, false, { 10, 5, 0 } }).set<physics::RigidBody>({ 2.0 });
     auto enemy = world.entity("Enemy").set<Transform>({ { -8, 0, 2 }, 1.2 }).set<Health>({ 50, 10, false, { 3, 1 } });
+    // Presence state: a zero-size tag and a relationship pair → badge rows.
+    world.component<Burning>();
+    auto likes = world.entity("Likes");
+    enemy.add<Burning>();
+    enemy.add(likes, player);
 
     rpe::EcsMirror mirror;
     mirror.attach(&world);

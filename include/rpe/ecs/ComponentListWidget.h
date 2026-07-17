@@ -7,6 +7,7 @@
 #include <QWidget>
 
 #include "rpe/core/AccessGuard.h"
+#include "rpe/ecs/MirrorChannel.h"
 #include "rpe/ecs/flecs_prelude.h"
 
 class QListWidget;
@@ -46,8 +47,14 @@ namespace rpe
         void setWorldAccess(AccessGuard guard);
 
         // Externally provided component names (mirror mode); selection is reported
-        // via componentNameSelected.
+        // via componentNameSelected. Convenience wrapper over setComponentRows with
+        // every entry as a DATA row.
         void setComponentNames(const QStringList& names);
+
+        // Full composition (mirror mode): data components plus TAG / PAIR badge
+        // rows. Tag/pair rows are not selectable (nothing to inspect) but carry the
+        // flecs id so the per-row remove works on them too.
+        void setComponentRows(const QVector<MirrorChannel::ComponentRow>& rows);
 
         // Currently-selected component name, or empty if none. Used to re-bind the
         // property tree to the same component after an entity switch (the list keeps
@@ -63,8 +70,10 @@ namespace rpe
         }
 
         // Component names offered by the "+" picker (typically the world catalog
-        // minus the components already on the entity).
+        // minus the components already on the entity). Entries flagged as tags are
+        // rendered dimmed/italic in the picker.
         void setAddableComponents(const QStringList& names);
+        void setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries);
 
     signals:
         void componentSelected(ComponentInfo info);      // direct mode (world available)
@@ -74,6 +83,8 @@ namespace rpe
         // Structural-edit requests (only emitted when editing is enabled).
         void addComponentRequested(const QString& name);
         void removeComponentRequested(const QString& name);
+        // By flecs id — emitted for rows that carry one (tags, pairs; mirror rows).
+        void removeComponentIdRequested(qulonglong rawId);
 
     protected:
         // Reverts a pending delete-confirm when the list loses focus.
@@ -90,8 +101,8 @@ namespace rpe
         QToolButton* _addBtn = nullptr;
         QStyledItemDelegate* _rowDelegate = nullptr; // actually a RemoveButtonDelegate
         QVector<ComponentInfo> _components;
-        QStringList _mirrorNames;  // last externally-fed name set (dedup)
-        QStringList _addable;      // names offered by the "+" picker
+        QVector<MirrorChannel::ComponentRow> _mirrorRows; // last externally-fed set (dedup)
+        QVector<MirrorChannel::CatalogEntry> _addable;    // "+" picker entries
         bool _editingEnabled = false;
         AccessGuard _guard;
     };

@@ -16,6 +16,7 @@ namespace rpe
         QString name;     // flecs component name (the unscoped/leaf name)
         QString path;     // flecs full scoped path (e.g. "game.Transform")
         bool bridged = false; // resolves to a bridged RTTR type the inspector can show
+        bool tag = false;     // zero-size component: addable presence marker, no data
         QString rttrType;     // the RTTR type name it resolved to ("" if unresolved)
     };
 

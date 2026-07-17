@@ -50,6 +50,46 @@ namespace rpe
             rttr::variant value;
         };
 
+        // One row of the selected entity's composition. Besides bridged DATA
+        // components (inspectable/editable), the list carries zero-size TAGS and
+        // PAIRS — pure presence state with nothing to edit, shown as badge rows.
+        enum class RowKind : quint8
+        {
+            Data = 0,
+            Tag = 1,
+            Pair = 2,
+        };
+        struct ComponentRow
+        {
+            QString name;       // full scoped path (pairs: the RELATION's path)
+            QString pairTarget; // pairs only: target's display name
+            RowKind kind = RowKind::Data;
+            qulonglong rawId = 0; // flecs id (pair-encoded for pairs) — removal identity
+            bool operator==(const ComponentRow& o) const
+            {
+                return name == o.name && pairTarget == o.pairTarget && kind == o.kind && rawId == o.rawId;
+            }
+            bool operator!=(const ComponentRow& o) const
+            {
+                return !(*this == o);
+            }
+        };
+
+        // Add-component catalog entry (tag == zero-size component: addable, no data).
+        struct CatalogEntry
+        {
+            QString path;
+            bool tag = false;
+            bool operator==(const CatalogEntry& o) const
+            {
+                return path == o.path && tag == o.tag;
+            }
+            bool operator!=(const CatalogEntry& o) const
+            {
+                return !(*this == o);
+            }
+        };
+
         // A pinned (watched) property, independent of the current selection: any
         // entity + component + leaf path. Pins are mirrored every pump alongside the
         // selected component, so a watch widget can show values from several
@@ -93,9 +133,12 @@ namespace rpe
         {
             StructuralKind kind;
             qulonglong entity = 0;
-            QString component;
+            QString component;    // by-name form (empty when rawId is used)
+            qulonglong rawId = 0; // by-id form — required for pairs, exact for tags
         };
         void queueStructural(StructuralKind kind, qulonglong entity, const QString& component);
+        // By flecs id — the only way to address a PAIR, and unambiguous for tags.
+        void queueStructuralById(StructuralKind kind, qulonglong entity, qulonglong rawId);
 
         // ── GUI thread: pinned watches ───────────────────────────────────────────
         // Replace the full pin set (atomic swap; the producer reads it next pump).
@@ -109,11 +152,13 @@ namespace rpe
 
         // ── GUI thread: results ──────────────────────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out);
-        bool pollComponents(QStringList& out);
+        bool pollComponents(QStringList& out); // legacy: DATA row names only
+        bool pollComponentRows(QVector<ComponentRow>& out); // full composition
         std::vector<ValueUpdate> pollValues();
-        // Catalog of all bridged component names present in the world (for the "add
-        // component" picker). True if changed since the last poll.
-        bool pollCatalog(QStringList& out);
+        // Catalog of addable components (bridged data types + zero-size tags) for
+        // the "add component" picker. True if changed since the last poll.
+        bool pollCatalog(QStringList& out); // legacy: paths only
+        bool pollCatalogEntries(QVector<CatalogEntry>& out);
 
         // True until the producing EcsMirror is destroyed.
         bool producerAlive() const
@@ -136,10 +181,12 @@ namespace rpe
         };
         Intent takeIntent();
         void publishEntities(const QVector<EntityEntry>& entities);
-        void publishComponents(const QStringList& components);
+        void publishComponents(const QStringList& components); // legacy → data rows
+        void publishComponentRows(const QVector<ComponentRow>& rows);
         void publishValues(std::vector<ValueUpdate>&& values);
         void publishPinValues(std::vector<PinValue>&& values);
-        void publishCatalog(const QStringList& catalog);
+        void publishCatalog(const QStringList& catalog); // legacy → non-tag entries
+        void publishCatalogEntries(const QVector<CatalogEntry>& entries);
         void markProducerGone()
         {
             _producerAlive.store(false, std::memory_order_release);
@@ -162,9 +209,9 @@ namespace rpe
         // sim -> GUI
         QVector<EntityEntry> _outEntities;
         bool _outEntitiesDirty = false;
-        QStringList _outComponents;
+        QVector<ComponentRow> _outComponents;
         bool _outComponentsDirty = false;
-        QStringList _outCatalog;
+        QVector<CatalogEntry> _outCatalog;
         bool _outCatalogDirty = false;
         // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
         // consumer can't make this grow unbounded.

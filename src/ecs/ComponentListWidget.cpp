@@ -81,6 +81,45 @@ namespace rpe
             return p >= 0 ? path.mid(p + s) : path;
         }
 
+        // Item-data roles shared by the list rows. UserRole keeps its historical
+        // meaning (full path in mirror mode / int index in direct mode).
+        enum CompItemRole
+        {
+            CompKindRole = Qt::UserRole + 1,  // int (MirrorChannel::RowKind)
+            CompRawIdRole = Qt::UserRole + 2, // qulonglong flecs id
+        };
+
+        // Row display text: data/tag rows show the leaf name; pairs "Rel \u2192 Target".
+        QString rowDisplay(const MirrorChannel::ComponentRow& r)
+        {
+            if (r.kind == MirrorChannel::RowKind::Pair)
+            {
+                return componentLeaf(r.name) + QStringLiteral(" \u2192 ") + r.pairTarget;
+            }
+            return componentLeaf(r.name);
+        }
+
+        // Sort: data first, then tags, then pairs; each group alphabetically by the
+        // displayed leaf, full name (then pair target) as deterministic tiebreaks.
+        bool rowLess(const MirrorChannel::ComponentRow& a, const MirrorChannel::ComponentRow& b)
+        {
+            if (a.kind != b.kind)
+            {
+                return static_cast<quint8>(a.kind) < static_cast<quint8>(b.kind);
+            }
+            const int l = componentLeaf(a.name).compare(componentLeaf(b.name), Qt::CaseInsensitive);
+            if (l != 0)
+            {
+                return l < 0;
+            }
+            const int f = a.name.compare(b.name, Qt::CaseInsensitive);
+            if (f != 0)
+            {
+                return f < 0;
+            }
+            return a.pairTarget.compare(b.pairTarget, Qt::CaseInsensitive) < 0;
+        }
+
         // Per-row remove affordance with a two-step confirm. A row's trailing icon
         // is normally the trash (remove.png). Clicking it once "arms" that row: the
         // icon becomes a warning-coloured button (confirm.png). Clicking again
@@ -95,7 +134,7 @@ namespace rpe
             bool enabled = false;
             QString confirmName;       // component currently armed for delete
             QListWidget* list = nullptr;
-            std::function<void(const QString&)> onRemove;
+            std::function<void(const QString&, int kind, qulonglong rawId)> onRemove;
 
             static QRect glyphRect(const QStyleOptionViewItem& opt)
             {
@@ -118,11 +157,48 @@ namespace rpe
 
             void paint(QPainter* p, const QStyleOptionViewItem& opt, const QModelIndex& index) const override
             {
-                // Reserve room on the right so the text doesn't run under the icon.
+                const int kind = index.data(CompKindRole).toInt();
+
+                // Reserve room on the right so the text doesn't run under the icon,
+                // plus a badge chip for tag/pair rows.
                 QStyleOptionViewItem o(opt);
                 if (enabled)
                     o.rect.adjust(0, 0, -o.rect.height(), 0);
+                if (kind != 0)
+                {
+                    // Presence rows (tag/pair): nothing to inspect — render dimmed +
+                    // italic so they read as state, not editable data.
+                    o.font.setItalic(true);
+                    QColor dim = opt.palette.color(QPalette::Text);
+                    dim.setAlpha(150);
+                    o.palette.setColor(QPalette::Text, dim);
+                    o.rect.adjust(0, 0, -o.rect.height() - 30, 0);
+                }
                 QStyledItemDelegate::paint(p, o, index);
+
+                if (kind != 0)
+                {
+                    // Badge chip ("tag" / "pair"), right-aligned before the trash.
+                    const QString label = kind == 1 ? QStringLiteral("tag") : QStringLiteral("pair");
+                    const int reserve = enabled ? opt.rect.height() : 0;
+                    QRect badge(opt.rect.right() - reserve - 32, opt.rect.top() + 3,
+                                30, opt.rect.height() - 6);
+                    p->save();
+                    p->setRenderHint(QPainter::Antialiasing, true);
+                    QColor bg = opt.palette.color(QPalette::Text);
+                    bg.setAlpha(28);
+                    p->setPen(Qt::NoPen);
+                    p->setBrush(bg);
+                    p->drawRoundedRect(badge, 4, 4);
+                    QColor fg = opt.palette.color(QPalette::Text);
+                    fg.setAlpha(170);
+                    p->setPen(fg);
+                    QFont bf = opt.font;
+                    bf.setPointSizeF(bf.pointSizeF() * 0.8);
+                    p->setFont(bf);
+                    p->drawText(badge, Qt::AlignCenter, label);
+                    p->restore();
+                }
                 if (!enabled)
                     return;
 
@@ -172,7 +248,10 @@ namespace rpe
                     {
                         confirmName.clear();
                         if (onRemove)
-                            onRemove(name); // second click → remove
+                        {
+                            onRemove(name, index.data(CompKindRole).toInt(),
+                                     index.data(CompRawIdRole).toULongLong()); // second click → remove
+                        }
                     }
                     else
                     {
@@ -223,8 +302,12 @@ namespace rpe
         _list->setMouseTracking(true); // so the row icon can highlight on hover
         auto* del = new RemoveButtonDelegate(_list);
         del->list = _list;
-        del->onRemove = [this](const QString& name) {
-            if (!name.isEmpty())
+        del->onRemove = [this](const QString& name, int kind, qulonglong rawId) {
+            // Data rows keep the historical by-name request; tag/pair rows carry a
+            // flecs id and MUST use it (pairs are unaddressable by name).
+            if (kind != 0 && rawId != 0)
+                emit removeComponentIdRequested(rawId);
+            else if (!name.isEmpty())
                 emit removeComponentRequested(name);
         };
         _list->setItemDelegate(del);
@@ -259,7 +342,18 @@ namespace rpe
 
     void ComponentListWidget::setAddableComponents(const QStringList& names)
     {
-        _addable = names;
+        QVector<MirrorChannel::CatalogEntry> entries;
+        entries.reserve(names.size());
+        for (const QString& n : names)
+        {
+            entries.append(MirrorChannel::CatalogEntry { n, false });
+        }
+        setAddableEntries(entries);
+    }
+
+    void ComponentListWidget::setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries)
+    {
+        _addable = entries;
     }
 
     void ComponentListWidget::_onAddClicked()
@@ -294,8 +388,9 @@ namespace rpe
             // Group by namespace (everything before the last "::" or "."); the leaf
             // is shown, and the full catalogued name is carried for the add request.
             QHash<QString, QTreeWidgetItem*> groups;
-            for (const QString& full : _addable)
+            for (const MirrorChannel::CatalogEntry& entry : _addable)
             {
+                const QString& full = entry.path;
                 int cut = full.lastIndexOf(QStringLiteral("::"));
                 int sep = 2;
                 if (cut < 0)
@@ -303,7 +398,9 @@ namespace rpe
                     cut = full.lastIndexOf(QLatin1Char('.'));
                     sep = 1;
                 }
-                const QString ns = cut >= 0 ? full.left(cut) : tr("(global)");
+                // Tags group under one "(tags)" node — they are presence markers,
+                // not namespaced data components.
+                const QString ns = entry.tag ? tr("(tags)") : (cut >= 0 ? full.left(cut) : tr("(global)"));
                 const QString leaf = cut >= 0 ? full.mid(cut + sep) : full;
                 QTreeWidgetItem*& g = groups[ns];
                 if (!g)
@@ -314,6 +411,12 @@ namespace rpe
                 }
                 auto* item = new QTreeWidgetItem(g, { leaf });
                 item->setData(0, Qt::UserRole, full);
+                if (entry.tag)
+                {
+                    QFont f = item->font(0);
+                    f.setItalic(true);
+                    item->setFont(0, f);
+                }
             }
         }
 
@@ -450,17 +553,43 @@ namespace rpe
     void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
     {
         _components.clear();
-        _mirrorNames.clear();
+        _mirrorRows.clear();
 
         // Collect under the guard (entity/component reads touch the world);
         // populate the widget afterwards without holding it.
         QStringList names;
+        QVector<MirrorChannel::ComponentRow> extraRows; // tags + pairs
         withGuard(_guard, [&] {
             if (!world || !e.is_alive())
             {
                 return;
             }
             e.each([&](flecs::id id) {
+                // Pairs: presence state ("Likes \u2192 Bob"); flecs-internal relations
+                // (ChildOf/IsA/Identifier under the flecs scope) stay hidden.
+                if (id.is_pair())
+                {
+                    const flecs::entity rel = id.first();
+                    const char* rn = rel.name();
+                    if (!rn || rn[0] == '\0')
+                    {
+                        return;
+                    }
+                    const flecs::string rp = rel.path(".", "");
+                    const QString relPath = rp.c_str() ? QString::fromUtf8(rp.c_str()) : QString();
+                    if (relPath.startsWith(QStringLiteral("flecs")))
+                    {
+                        return;
+                    }
+                    const flecs::entity tgt = id.second();
+                    const char* tn = tgt.name();
+                    const QString target = (tn && tn[0] != '\0')
+                        ? QString::fromUtf8(tn)
+                        : QStringLiteral("#%1").arg(static_cast<qulonglong>(tgt.id()));
+                    extraRows.append({ relPath, target, MirrorChannel::RowKind::Pair,
+                                       static_cast<qulonglong>(id.raw_id()) });
+                    return;
+                }
                 if (!id.is_entity())
                 {
                     return;
@@ -471,13 +600,21 @@ namespace rpe
                 {
                     return;
                 }
+                const flecs::string fp = comp.path(".", "");
+                const QString fullPath = fp.c_str() ? QString::fromUtf8(fp.c_str()) : QString();
+                if (fullPath.startsWith(QStringLiteral("flecs")))
+                {
+                    return;
+                }
 
-                // Only DATA components: a zero-size tag (or a plain entity attached
-                // to this entity) can name-match a bridged type via the short-name
-                // fallback, and get_mut on a dataless id asserts in debug flecs.
+                // Zero-size tags (and plain attached entities) become TAG rows: pure
+                // presence, nothing to inspect — and get_mut on a dataless id asserts
+                // in debug flecs, so they must never enter the data path.
                 const flecs::Component* cd = comp.try_get<flecs::Component>();
                 if (!cd || cd->size <= 0)
                 {
+                    extraRows.append({ fullPath, QString(), MirrorChannel::RowKind::Tag,
+                                       static_cast<qulonglong>(id.raw_id()) });
                     return;
                 }
 
@@ -523,17 +660,28 @@ namespace rpe
             _components = sortedInfos;
         }
 
+        std::sort(extraRows.begin(), extraRows.end(), rowLess);
+
         _list->blockSignals(true);
         _list->clear();
         for (int i = 0; i < names.size(); ++i)
         {
             auto* item = new QListWidgetItem(names[i], _list);
             item->setData(Qt::UserRole, i);
+            item->setData(CompKindRole, 0);
+            item->setData(CompRawIdRole, static_cast<qulonglong>(_components[i].id.raw_id()));
+        }
+        for (const auto& r : extraRows)
+        {
+            auto* item = new QListWidgetItem(rowDisplay(r), _list);
+            item->setData(CompKindRole, static_cast<int>(r.kind));
+            item->setData(CompRawIdRole, r.rawId);
+            item->setFlags(Qt::ItemIsEnabled); // presence row: removable, not selectable
         }
         _list->blockSignals(false);
-        if (_list->count() > 0)
+        if (!names.isEmpty())
         {
-            _list->setCurrentRow(0); // auto-select first → drives the editor
+            _list->setCurrentRow(0); // auto-select first DATA row → drives the editor
         }
         else
         {
@@ -548,31 +696,36 @@ namespace rpe
 
     void ComponentListWidget::setComponentNames(const QStringList& namesIn)
     {
-        // Show components sorted alphabetically by their displayed leaf name.
-        QStringList names = namesIn;
-        std::sort(names.begin(), names.end(), [](const QString& a, const QString& b) {
-            const int c = componentLeaf(a).compare(componentLeaf(b), Qt::CaseInsensitive);
-            // Full name breaks leaf ties (e.g. physics::Collider vs render::Collider)
-            // so the order is deterministic — std::sort isn't stable.
-            return c != 0 ? c < 0 : a.compare(b, Qt::CaseInsensitive) < 0;
-        });
+        QVector<MirrorChannel::ComponentRow> rows;
+        rows.reserve(namesIn.size());
+        for (const QString& n : namesIn)
+        {
+            rows.append(MirrorChannel::ComponentRow { n, QString(), MirrorChannel::RowKind::Data, 0 });
+        }
+        setComponentRows(rows);
+    }
 
-        if (names == _mirrorNames)
+    void ComponentListWidget::setComponentRows(const QVector<MirrorChannel::ComponentRow>& rowsIn)
+    {
+        // Data components first (alphabetical), then tags, then pairs.
+        QVector<MirrorChannel::ComponentRow> rows = rowsIn;
+        std::sort(rows.begin(), rows.end(), rowLess);
+
+        if (rows == _mirrorRows)
         {
             return; // unchanged → keep selection, no flicker
         }
-        // `names` are full scoped paths; the rows DISPLAY the leaf but carry the
-        // path (Qt::UserRole) so selection/resolution stay unambiguous.
-        // Drop a pending delete-confirm (keyed on the leaf) if it is no longer shown.
+        // Drop a pending delete-confirm (keyed on the display text) if its row is
+        // no longer shown.
         if (auto* del = static_cast<RemoveButtonDelegate*>(_rowDelegate); del && !del->confirmName.isEmpty())
         {
             bool stillThere = false;
-            for (const QString& path : names)
-                stillThere |= (componentLeaf(path) == del->confirmName);
+            for (const auto& r : rows)
+                stillThere |= (rowDisplay(r) == del->confirmName);
             if (!stillThere)
                 del->clearConfirm();
         }
-        _mirrorNames = names;
+        _mirrorRows = rows;
         _components.clear(); // mirror mode has no world-backed infos
 
         // Preserve selection across the rebuild by PATH (Qt::UserRole).
@@ -581,13 +734,32 @@ namespace rpe
         _list->blockSignals(true);
         _list->clear();
         QListWidgetItem* reselect = nullptr;
-        for (const QString& path : names)
+        QListWidgetItem* firstData = nullptr;
+        for (const auto& r : rows)
         {
-            auto* item = new QListWidgetItem(componentLeaf(path), _list);
-            item->setData(Qt::UserRole, path); // full path (string) → mirror mode
-            if (path == prevSelPath)
+            auto* item = new QListWidgetItem(rowDisplay(r), _list);
+            item->setData(Qt::UserRole, r.name); // full path (string) → mirror mode
+            item->setData(CompKindRole, static_cast<int>(r.kind));
+            item->setData(CompRawIdRole, r.rawId);
+            if (r.kind == MirrorChannel::RowKind::Data)
             {
-                reselect = item;
+                if (!firstData)
+                {
+                    firstData = item;
+                }
+                if (r.name == prevSelPath)
+                {
+                    reselect = item;
+                }
+            }
+            else
+            {
+                // Presence rows: nothing to inspect — enabled (so the trash works)
+                // but never selectable/current.
+                item->setFlags(Qt::ItemIsEnabled);
+                item->setToolTip(r.kind == MirrorChannel::RowKind::Pair
+                                     ? QStringLiteral("(%1, %2) — relationship pair").arg(r.name, r.pairTarget)
+                                     : QStringLiteral("%1 — tag (no data)").arg(r.name));
             }
         }
         _list->blockSignals(false);
@@ -596,9 +768,9 @@ namespace rpe
         {
             _list->setCurrentItem(reselect);
         }
-        else if (_list->count())
+        else if (firstData)
         {
-            _list->setCurrentRow(0);
+            _list->setCurrentItem(firstData);
         }
         else
         {
@@ -622,7 +794,7 @@ namespace rpe
     void ComponentListWidget::clearEntity()
     {
         _components.clear();
-        _mirrorNames.clear();
+        _mirrorRows.clear();
         _list->clear();
         emit componentDeselected();
     }

@@ -238,12 +238,12 @@ namespace rpe
 
         // Simulation-thread-only state (no lock needed).
         QVector<EntityEntry> _lastEntities;
-        QStringList _lastComponents;
+        QVector<MirrorChannel::ComponentRow> _lastCompRows; // published dedup
         QHash<QString, QString> _lastValueStr; // path -> last display, for dedup
         qulonglong _lastInterestEntity = 0;
         QString _lastInterestComponent;
         QString _lastRequired;    // entity-list filter, to detect changes
-        QStringList _lastCatalog; // last published add-component catalog (dedup)
+        QVector<MirrorChannel::CatalogEntry> _lastCatalog; // published catalog (dedup)
 
         // Wall-clock throttles for the full-world scans (see setScanIntervalsMs).
         // Epoch-initialised so the FIRST pump after attach() always scans.
@@ -259,8 +259,9 @@ namespace rpe
         qulonglong _compsEntity = 0;
         const void* _compsTable = nullptr; // opaque ecs_table_t*
         uint64_t _compsGen = 0;            // TypeBridge generation the list was built at
-        QStringList _selComps;             // full scoped names, parallel to _selCompIds
+        QStringList _selComps;             // DATA rows: full scoped names, ∥ _selCompIds
         QVector<uint64_t> _selCompIds;
+        QVector<MirrorChannel::ComponentRow> _selRows; // full composition (data+tag+pair)
 
         // Pinned-watch state (sim thread). Component id + RTTR type are cached by
         // name (a findComponentEntity walk / registry lookup otherwise — per pump);
