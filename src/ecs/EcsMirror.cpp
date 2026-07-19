@@ -117,7 +117,7 @@ namespace rpe
         _pinRt.clear(); // component ids/types belong to the old world
         _lastPinStr.clear();
         _lastPins.clear();
-        _selTypeName.clear();
+        _selTypes.clear();
         _lastPathList.clear();
         _splitPaths.clear();
         _stats = {};
@@ -784,10 +784,14 @@ namespace rpe
             _compsGen = compsGen;
             _selComps.clear();
             _selCompIds.clear();
+            _selTypes.clear();
             _selRows.clear();
             e.each([&](flecs::id id) {
-                // PAIRS: pure presence state ("Likes → Bob"). Skip flecs-internal
-                // relations (ChildOf/IsA/Identifier… live under the flecs scope).
+                // PAIRS. Which side carries data is flecs' own rule (ecs_get_typeid:
+                // the relation's type first, else the target's). A data-carrying
+                // pair whose type is bridged becomes a SELECTABLE, editable row
+                // ("Damage \u2192 Fire"); dataless pairs stay badge rows. flecs-internal
+                // relations (ChildOf/IsA/Identifier…) stay hidden.
                 if (id.is_pair())
                 {
                     const flecs::entity rel = id.first();
@@ -807,6 +811,27 @@ namespace rpe
                     const QString target = (tn && tn[0] != '\0')
                         ? QString::fromUtf8(tn)
                         : QStringLiteral("#%1").arg(static_cast<qulonglong>(tgt.id()));
+
+                    const ecs_entity_t tid = ecs_get_typeid(world.c_ptr(), id.raw_id());
+                    if (tid != 0)
+                    {
+                        const flecs::entity typeEnt = world.entity(tid);
+                        const flecs::string tp = typeEnt.path(".", "");
+                        const QString typePath = tp.c_str() ? QString::fromUtf8(tp.c_str()) : QString();
+                        const rttr::type rt = TypeBridge::resolveByName(typePath.toUtf8().constData());
+                        if (rt.is_valid())
+                        {
+                            MirrorChannel::ComponentRow row { relPath, target,
+                                                              MirrorChannel::RowKind::PairData,
+                                                              static_cast<qulonglong>(id.raw_id()),
+                                                              typePath };
+                            _selComps.append(row.key());
+                            _selCompIds.append(id.raw_id());
+                            _selTypes.push_back(rt);
+                            _selRows.append(row);
+                            return;
+                        }
+                    }
                     _selRows.append({ relPath, target, MirrorChannel::RowKind::Pair,
                                       static_cast<qulonglong>(id.raw_id()) });
                     return;
@@ -840,12 +865,14 @@ namespace rpe
                 // which is unique even when two components share a leaf name. The GUI
                 // displays the leaf; resolveByName matches the path exactly against
                 // the RTTR full name.
-                if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
+                const rttr::type dt = TypeBridge::resolveByName(qn.toUtf8().constData());
+                if (!dt.is_valid())
                 {
                     return; // data component without a bridge → not inspectable, hidden
                 }
                 _selComps.append(qn);
                 _selCompIds.append(id.raw_id());
+                _selTypes.push_back(dt);
                 _selRows.append({ qn, QString(), MirrorChannel::RowKind::Data,
                                   static_cast<qulonglong>(id.raw_id()) });
             });
@@ -861,16 +888,9 @@ namespace rpe
         {
             return;
         }
-        // Cache the selected component's RTTR type by name — resolveByName does
-        // mutex-guarded registry + string work, needless every pump. An INVALID
-        // result is never cached: the bridge may register a moment later (plugin
-        // load order), and the pre-cache behaviour was to retry every pump.
-        if (component != _selTypeName || !_selType.is_valid())
-        {
-            _selTypeName = component;
-            _selType = TypeBridge::resolveByName(component.toUtf8().constData());
-        }
-        const rttr::type t = _selType;
+        // The row's RTTR type was resolved at listing rebuild (parallel array) —
+        // for a data pair this is the type the PAIR carries, not the relation name.
+        const rttr::type t = _selTypes[static_cast<size_t>(selIdx)];
         if (!t.is_valid())
         {
             return;

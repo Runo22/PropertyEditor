@@ -57,7 +57,8 @@ namespace rpe
         {
             Data = 0,
             Tag = 1,
-            Pair = 2,
+            Pair = 2,     // DATALESS pair: presence only, badge row
+            PairData = 3, // pair that CARRIES data (ecs_get_typeid) — selectable/editable
         };
         struct ComponentRow
         {
@@ -65,9 +66,23 @@ namespace rpe
             QString pairTarget; // pairs only: target's display name
             RowKind kind = RowKind::Data;
             qulonglong rawId = 0; // flecs id (pair-encoded for pairs) — removal identity
+            // PairData only: the RTTR-resolvable name of the type the pair carries
+            // (usually the relation's type). Empty for other kinds.
+            QString typeName;
+
+            // Unique selection/interest identity. A relation can pair with several
+            // targets carrying the same type ((Damage,Fire), (Damage,Ice)), so the
+            // name alone is ambiguous for pairs.
+            QString key() const
+            {
+                return (kind == RowKind::Pair || kind == RowKind::PairData)
+                    ? name + QStringLiteral(" (") + pairTarget + QLatin1Char(')')
+                    : name;
+            }
             bool operator==(const ComponentRow& o) const
             {
-                return name == o.name && pairTarget == o.pairTarget && kind == o.kind && rawId == o.rawId;
+                return name == o.name && pairTarget == o.pairTarget && kind == o.kind
+                    && rawId == o.rawId && typeName == o.typeName;
             }
             bool operator!=(const ComponentRow& o) const
             {

@@ -74,6 +74,16 @@ request is remembered and applied when it appears.
 `entitySelected(flecs::entity)` additionally fires in **direct mode only**
 (mirror mode has no world handle on the GUI thread).
 
+## Tags & pairs
+
+The component list shows the entity's full composition. Zero-size **tags** and
+dataless **pairs** appear as dimmed badge rows — presence state, removable but
+not selectable. A pair that **carries data** (flecs' `ecs_get_typeid` rule: the
+relation's type first, else the target's) is a normal selectable row displayed
+as `Damage → Fire` with a `pair` badge: clicking it opens the regular property
+editor for the carried type, and edits write back to that pair instance.
+Zero-size tags are also offered by the "+ Add" picker under a *(tags)* group.
+
 ## Add / remove components
 
 With `allowComponentEditing = true` the component panel gains a **"+ Add"**

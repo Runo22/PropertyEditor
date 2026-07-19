@@ -383,7 +383,10 @@ namespace rpe
             });
             w->setChannel(_channel);
             connect(_propertyEditor, &PropertyEditor::pinRequested, this, [this](const QString& path) {
-                if (_pinWidget && _mirrorEntity != 0 && !_mirrorComponent.isEmpty())
+                // Pair rows can't be pinned: the pin resolver addresses components
+                // by NAME; a pair needs its id. (Menu action simply no-ops here.)
+                if (_pinWidget && _mirrorEntity != 0 && !_mirrorComponent.isEmpty()
+                    && !_pairTypeName.contains(_mirrorComponent))
                 {
                     _pinWidget->pin(_mirrorEntity, _entityList->currentLabel(), _mirrorComponent, path);
                 }
@@ -444,6 +447,7 @@ namespace rpe
             _componentList->setComponentRows(compRows);
             _currentComps.clear();
             _currentTags.clear();
+            _pairTypeName.clear();
             for (const auto& r : compRows)
             {
                 if (r.kind == MirrorChannel::RowKind::Data)
@@ -453,6 +457,10 @@ namespace rpe
                 else if (r.kind == MirrorChannel::RowKind::Tag)
                 {
                     _currentTags.insert(r.name);
+                }
+                else if (r.kind == MirrorChannel::RowKind::PairData)
+                {
+                    _pairTypeName.insert(r.key(), r.typeName);
                 }
             }
             _updateAddable();
@@ -604,10 +612,11 @@ namespace rpe
             return; // direct mode uses _onComponentSelected
         }
         _mirrorComponent = name;
-        // `name` is the component's full flecs path (the list displays only the
-        // leaf). resolveByName matches it exactly against the RTTR type — even when
-        // two components share a leaf name — so the schema binds to the right type.
-        const rttr::type t = TypeBridge::resolveByName(name.toUtf8().constData());
+        // `name` is the row's selection key: the component's full flecs path, or for
+        // a data-carrying pair the "Rel (Target)" identity — in that case the schema
+        // binds the TYPE THE PAIR CARRIES (mapped via _pairTypeName).
+        const QString typeName = _pairTypeName.value(name, name);
+        const rttr::type t = TypeBridge::resolveByName(typeName.toUtf8().constData());
         if (t.is_valid())
         {
             _propertyEditor->bindType(t); // schema only — no instance/world touch

@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 #include "rpe/ecs/flecs_prelude.h"
 #include "rpe/ecs/MirrorChannel.h"
@@ -276,12 +277,11 @@ namespace rpe
         QHash<QString, QString> _lastPinStr; // "e|comp|path" -> last display
         QVector<MirrorChannel::PinKey> _lastPins;
 
-        // Per-pump hot-path caches (sim thread): the selected component's RTTR type
-        // (resolveByName takes a registry mutex + string normalisation) and the
-        // watched paths pre-split (splitPath allocates per read otherwise). Both
-        // refresh only when the corresponding intent field changes.
-        QString _selTypeName;
-        rttr::type _selType = rttr::type::get<void>();
+        // Per-pump hot-path caches (sim thread): RTTR types are resolved once per
+        // listing rebuild (parallel to _selComps/_selCompIds — resolveByName takes a
+        // registry mutex + string work), and the watched paths are pre-split
+        // (splitPath allocates per read otherwise).
+        std::vector<rttr::type> _selTypes;
         QStringList _lastPathList;
         std::vector<QStringList> _splitPaths;
     };

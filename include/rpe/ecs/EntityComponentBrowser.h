@@ -245,6 +245,10 @@ namespace rpe
         QVector<MirrorChannel::CatalogEntry> _catalog; // addable data comps + tags
         QStringList _currentComps;  // DATA components on the selected entity
         QSet<QString> _currentTags; // TAG rows on the selected entity
+        // PairData rows: selection key → the RTTR type name the pair carries. The
+        // property tree binds THIS type; pins are disabled for such rows (the pin
+        // resolver addresses components by name, not pair ids).
+        QHash<QString, QString> _pairTypeName;
         Settings _settings;
 
         PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)

@@ -19,10 +19,15 @@ struct Health
 struct Burning // zero-size flecs TAG (empty struct)
 {
 };
+struct Damage // data carried by a PAIR: (Damage, Fire)
+{
+    int amount = 10;
+};
 
 RTTR_REGISTRATION
 {
     rttr::registration::class_<Health>("Health").property("hp", &Health::hp);
+    rttr::registration::class_<Damage>("Damage").property("amount", &Damage::amount);
 }
 
 static int g_fails = 0;
@@ -49,15 +54,17 @@ int main(int argc, char** argv)
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
 
-    rpe::TypeBridge::registerType<Health>();
+    rpe::TypeBridge::registerTypes<Health, Damage>();
 
     flecs::world world;
     world.component<Burning>(); // registers the zero-size tag type
     auto likes = world.entity("Likes");
     auto bob = world.entity("Bob");
+    auto fire = world.entity("Fire");
     auto e = world.entity("E").set<Health>({ 70 });
     e.add<Burning>();
-    e.add(likes, bob); // relationship pair (Likes, Bob)
+    e.add(likes, bob);          // DATALESS pair (Likes, Bob) → badge row
+    e.set<Damage>(fire, { 10 }); // DATA pair (Damage, Fire) → selectable/editable
 
     rpe::EcsMirror mirror;
     mirror.attach(&world, rpe::EcsMirror::PumpMode::Manual);
@@ -74,9 +81,28 @@ int main(int argc, char** argv)
     const Row* data = findRow(rows, QStringLiteral("Health"), Kind::Data);
     const Row* tag = findRow(rows, QStringLiteral("Burning"), Kind::Tag);
     const Row* pair = findRow(rows, QStringLiteral("Likes"), Kind::Pair);
+    const Row* dpair = findRow(rows, QStringLiteral("Damage"), Kind::PairData);
     check("data row listed", data != nullptr);
     check("tag row listed with its id", tag && tag->rawId != 0);
-    check("pair row listed with target + id", pair && pair->pairTarget == QStringLiteral("Bob") && pair->rawId != 0);
+    check("dataless pair listed with target + id", pair && pair->pairTarget == QStringLiteral("Bob") && pair->rawId != 0);
+    check("DATA pair classified via ecs_get_typeid",
+          dpair && dpair->pairTarget == QStringLiteral("Fire") && dpair->typeName == QStringLiteral("Damage")
+              && dpair->key() == QStringLiteral("Damage (Fire)"));
+
+    // ── 1b. A data pair is fully inspectable/editable through its key ──────────
+    mirror.setInterest(static_cast<qulonglong>(e.id()), "Damage (Fire)", { QStringLiteral("amount") });
+    world.progress(0.016f);
+    mirror.pump();
+    bool gotAmount = false;
+    for (const auto& u : ch->pollValues())
+        gotAmount |= (u.path == QStringLiteral("amount") && u.value.to_int64() == 10);
+    check("pair value mirrors (amount == 10)", gotAmount);
+
+    ch->queueEdit(QStringLiteral("amount"), rttr::variant(25));
+    world.progress(0.016f);
+    mirror.pump();
+    check("pair edit reached the world (amount == 25)", e.get<Damage>(fire).amount == 25);
+    mirror.setInterest(static_cast<qulonglong>(e.id()), "Health", { QStringLiteral("hp") });
 
     // Legacy name poll must expose ONLY data rows (drives interest/selection).
     // (Rows were drained above; republish via resync to exercise the adapter.)
@@ -123,16 +149,22 @@ int main(int argc, char** argv)
         QVector<Row> uiRows = {
             { QStringLiteral("Likes"), QStringLiteral("Bob"), Kind::Pair, 42 },
             { QStringLiteral("Burning"), QString(), Kind::Tag, 7 },
+            { QStringLiteral("Damage"), QStringLiteral("Fire"), Kind::PairData, 43, QStringLiteral("Damage") },
             { QStringLiteral("Health"), QString(), Kind::Data, 0 },
         };
         w.setComponentRows(uiRows);
         auto* lw = w.findChild<QListWidget*>();
-        check("rows ordered data < tag < pair",
-              lw->item(0)->text() == QStringLiteral("Health") && lw->item(1)->text() == QStringLiteral("Burning")
-                  && lw->item(2)->text().startsWith(QStringLiteral("Likes")));
+        check("rows ordered data < dataPair < tag < pair",
+              lw->item(0)->text() == QStringLiteral("Health")
+                  && lw->item(1)->text().startsWith(QStringLiteral("Damage"))
+                  && lw->item(2)->text() == QStringLiteral("Burning")
+                  && lw->item(3)->text().startsWith(QStringLiteral("Likes")));
         check("data row auto-selected, emits its path", selected == QStringLiteral("Health"));
-        check("tag row is not selectable", !(lw->item(1)->flags() & Qt::ItemIsSelectable));
-        check("pair row displays Rel → Target", lw->item(2)->text().contains(QStringLiteral("Bob")));
+        check("data pair IS selectable and carries its key",
+              (lw->item(1)->flags() & Qt::ItemIsSelectable)
+                  && lw->item(1)->data(Qt::UserRole).toString() == QStringLiteral("Damage (Fire)"));
+        check("tag row is not selectable", !(lw->item(2)->flags() & Qt::ItemIsSelectable));
+        check("pair row displays Rel → Target", lw->item(3)->text().contains(QStringLiteral("Bob")));
     }
 
     mirror.detach();

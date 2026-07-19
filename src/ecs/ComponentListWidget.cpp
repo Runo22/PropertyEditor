@@ -92,7 +92,7 @@ namespace rpe
         // Row display text: data/tag rows show the leaf name; pairs "Rel \u2192 Target".
         QString rowDisplay(const MirrorChannel::ComponentRow& r)
         {
-            if (r.kind == MirrorChannel::RowKind::Pair)
+            if (r.kind == MirrorChannel::RowKind::Pair || r.kind == MirrorChannel::RowKind::PairData)
             {
                 return componentLeaf(r.name) + QStringLiteral(" \u2192 ") + r.pairTarget;
             }
@@ -101,11 +101,24 @@ namespace rpe
 
         // Sort: data first, then tags, then pairs; each group alphabetically by the
         // displayed leaf, full name (then pair target) as deterministic tiebreaks.
+        // Visual order: data, data-carrying pairs, tags, dataless pairs.
+        int rowRank(MirrorChannel::RowKind k)
+        {
+            switch (k)
+            {
+            case MirrorChannel::RowKind::Data: return 0;
+            case MirrorChannel::RowKind::PairData: return 1;
+            case MirrorChannel::RowKind::Tag: return 2;
+            case MirrorChannel::RowKind::Pair: return 3;
+            }
+            return 4;
+        }
+
         bool rowLess(const MirrorChannel::ComponentRow& a, const MirrorChannel::ComponentRow& b)
         {
             if (a.kind != b.kind)
             {
-                return static_cast<quint8>(a.kind) < static_cast<quint8>(b.kind);
+                return rowRank(a.kind) < rowRank(b.kind);
             }
             const int l = componentLeaf(a.name).compare(componentLeaf(b.name), Qt::CaseInsensitive);
             if (l != 0)
@@ -164,14 +177,17 @@ namespace rpe
                 QStyleOptionViewItem o(opt);
                 if (enabled)
                     o.rect.adjust(0, 0, -o.rect.height(), 0);
-                if (kind != 0)
+                if (kind == 1 || kind == 2)
                 {
-                    // Presence rows (tag/pair): nothing to inspect — render dimmed +
-                    // italic so they read as state, not editable data.
+                    // Presence rows (tag / dataless pair): nothing to inspect —
+                    // render dimmed + italic so they read as state, not data.
                     o.font.setItalic(true);
                     QColor dim = opt.palette.color(QPalette::Text);
                     dim.setAlpha(150);
                     o.palette.setColor(QPalette::Text, dim);
+                }
+                if (kind != 0)
+                {
                     o.rect.adjust(0, 0, -o.rect.height() - 30, 0);
                 }
                 QStyledItemDelegate::paint(p, o, index);
@@ -558,14 +574,17 @@ namespace rpe
         // Collect under the guard (entity/component reads touch the world);
         // populate the widget afterwards without holding it.
         QStringList names;
-        QVector<MirrorChannel::ComponentRow> extraRows; // tags + pairs
+        QVector<int> dataKinds; // 0 = component, 3 = data-carrying pair (badge)
+        QVector<MirrorChannel::ComponentRow> extraRows; // tags + dataless pairs
         withGuard(_guard, [&] {
             if (!world || !e.is_alive())
             {
                 return;
             }
             e.each([&](flecs::id id) {
-                // Pairs: presence state ("Likes \u2192 Bob"); flecs-internal relations
+                // Pairs. flecs' ecs_get_typeid says which side carries data (the
+                // relation first, else the target): such pairs become SELECTABLE,
+                // editable rows; dataless ones stay badges. flecs-internal relations
                 // (ChildOf/IsA/Identifier under the flecs scope) stay hidden.
                 if (id.is_pair())
                 {
@@ -586,6 +605,21 @@ namespace rpe
                     const QString target = (tn && tn[0] != '\0')
                         ? QString::fromUtf8(tn)
                         : QStringLiteral("#%1").arg(static_cast<qulonglong>(tgt.id()));
+
+                    const ecs_entity_t tid = ecs_get_typeid(world->c_ptr(), id.raw_id());
+                    if (tid != 0)
+                    {
+                        const flecs::entity typeEnt = world->entity(tid);
+                        const flecs::string tp = typeEnt.path(".", "");
+                        const rttr::type rt = TypeBridge::resolveByName(tp.c_str() ? tp.c_str() : "");
+                        if (rt.is_valid())
+                        {
+                            _components.append(ComponentInfo { id, rt });
+                            names.append(componentLeaf(relPath) + QStringLiteral(" \u2192 ") + target);
+                            dataKinds.append(3);
+                            return;
+                        }
+                    }
                     extraRows.append({ relPath, target, MirrorChannel::RowKind::Pair,
                                        static_cast<qulonglong>(id.raw_id()) });
                     return;
@@ -630,6 +664,7 @@ namespace rpe
 
                 _components.append(ComponentInfo { id, t });
                 names.append(QString::fromUtf8(raw));
+                dataKinds.append(0);
             });
         });
 
@@ -649,15 +684,19 @@ namespace rpe
             });
             QStringList sortedNames;
             QVector<ComponentInfo> sortedInfos;
+            QVector<int> sortedKinds;
             sortedNames.reserve(names.size());
             sortedInfos.reserve(_components.size());
+            sortedKinds.reserve(dataKinds.size());
             for (int i : order)
             {
                 sortedNames.append(names[i]);
                 sortedInfos.append(_components[i]);
+                sortedKinds.append(dataKinds[i]);
             }
             names = sortedNames;
             _components = sortedInfos;
+            dataKinds = sortedKinds;
         }
 
         std::sort(extraRows.begin(), extraRows.end(), rowLess);
@@ -668,7 +707,7 @@ namespace rpe
         {
             auto* item = new QListWidgetItem(names[i], _list);
             item->setData(Qt::UserRole, i);
-            item->setData(CompKindRole, 0);
+            item->setData(CompKindRole, dataKinds[i]);
             item->setData(CompRawIdRole, static_cast<qulonglong>(_components[i].id.raw_id()));
         }
         for (const auto& r : extraRows)
@@ -738,18 +777,25 @@ namespace rpe
         for (const auto& r : rows)
         {
             auto* item = new QListWidgetItem(rowDisplay(r), _list);
-            item->setData(Qt::UserRole, r.name); // full path (string) → mirror mode
+            item->setData(Qt::UserRole, r.key()); // unique identity (string) → mirror mode
             item->setData(CompKindRole, static_cast<int>(r.kind));
             item->setData(CompRawIdRole, r.rawId);
-            if (r.kind == MirrorChannel::RowKind::Data)
+            const bool selectable = r.kind == MirrorChannel::RowKind::Data
+                || r.kind == MirrorChannel::RowKind::PairData;
+            if (selectable)
             {
                 if (!firstData)
                 {
                     firstData = item;
                 }
-                if (r.name == prevSelPath)
+                if (r.key() == prevSelPath)
                 {
                     reselect = item;
+                }
+                if (r.kind == MirrorChannel::RowKind::PairData)
+                {
+                    item->setToolTip(QStringLiteral("(%1, %2) — pair carrying %3")
+                                         .arg(r.name, r.pairTarget, r.typeName));
                 }
             }
             else
@@ -758,7 +804,7 @@ namespace rpe
                 // but never selectable/current.
                 item->setFlags(Qt::ItemIsEnabled);
                 item->setToolTip(r.kind == MirrorChannel::RowKind::Pair
-                                     ? QStringLiteral("(%1, %2) — relationship pair").arg(r.name, r.pairTarget)
+                                     ? QStringLiteral("(%1, %2) — relationship pair (no data)").arg(r.name, r.pairTarget)
                                      : QStringLiteral("%1 — tag (no data)").arg(r.name));
             }
         }

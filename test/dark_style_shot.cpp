@@ -49,6 +49,10 @@ struct Health
 struct Burning // zero-size tag → badge row
 {
 };
+struct Damage // data carried by a pair → selectable "Damage → Fire" row
+{
+    int amount = 12;
+};
 namespace physics
 {
     struct RigidBody
@@ -77,6 +81,7 @@ RTTR_REGISTRATION
         .property("resistances", &Health::resistances)
         .property("deathSound", &Health::deathSound);
     registration::class_<physics::RigidBody>("physics::RigidBody").property("mass", &physics::RigidBody::mass);
+    registration::class_<Damage>("Damage").property("amount", &Damage::amount);
     registration::class_<Material>("Material")
         .property("albedoTexture", &Material::albedoTexture)
         .property("contentRoot", &Material::contentRoot)
@@ -111,7 +116,7 @@ int main(int argc, char* argv[])
     // Apply the dark theme app-wide so popups/menus are styled too.
     app.setStyleSheet(rpe::darkStyleSheet());
 
-    rpe::TypeBridge::registerTypes<Transform, Health, physics::RigidBody, Material>();
+    rpe::TypeBridge::registerTypes<Transform, Health, physics::RigidBody, Material, Damage>();
 
     // ── Part 1: the full browser (entities, components, property tree) ────────
     flecs::world world;
@@ -123,8 +128,10 @@ int main(int argc, char* argv[])
     // Presence state: a zero-size tag and a relationship pair → badge rows.
     world.component<Burning>();
     auto likes = world.entity("Likes");
+    auto fire = world.entity("Fire");
     enemy.add<Burning>();
     enemy.add(likes, player);
+    enemy.set<Damage>(fire, { 12 }); // data pair → editable row
 
     rpe::EcsMirror mirror;
     mirror.attach(&world);
