@@ -233,65 +233,92 @@ namespace rpe
         // Show entities sorted alphabetically by label (case-insensitive), id as a
         // stable tiebreaker for same-named entities.
         QVector<QPair<qulonglong, QString>> entries = entriesIn;
-        std::sort(entries.begin(), entries.end(), [](const QPair<qulonglong, QString>& a, const QPair<qulonglong, QString>& b) {
+        const auto less = [](const QPair<qulonglong, QString>& a, const QPair<qulonglong, QString>& b) {
             const int c = a.second.compare(b.second, Qt::CaseInsensitive);
             return c != 0 ? c < 0 : a.first < b.first;
-        });
+        };
+        std::sort(entries.begin(), entries.end(), less);
 
-        // Skip the rebuild when the visible set is unchanged — avoids flicker.
+        // Skip entirely when the visible set is unchanged — avoids flicker.
         if (entries == _lastEntries)
         {
             return;
         }
-        _lastEntries = entries;
 
-        // Remember current selection so it survives the rebuild.
+        // Remember current selection so it survives the update.
         qulonglong selectedId = 0;
         if (auto* cur = _list->currentItem())
         {
             selectedId = cur->data(Qt::UserRole).toULongLong();
         }
 
+        // DIFF update instead of clear+rebuild: both lists are sorted by the same
+        // comparator, so a single merge pass finds exactly the added/removed rows.
+        // A dynamic world then costs a handful of row operations per publish, not
+        // thousands — a full rebuild of a big list (item churn on the GUI thread,
+        // serialized process-wide by the Windows debug heap) was a periodic stall.
         _list->blockSignals(true);
-        _list->clear();
-
-        QListWidgetItem* reselect = nullptr;
-        QListWidgetItem* requested = nullptr;
-        for (const auto& entry : entries)
-        { // .first/.second: Qt 5.12 has no QPair bindings
-            auto* item = new QListWidgetItem(entry.second, _list);
-            item->setData(Qt::UserRole, entry.first);
-            if (entry.first == selectedId)
+        _list->setUpdatesEnabled(false);
+        int row = 0; // widget row cursor (= kept + inserted so far)
+        int i = 0;   // index into _lastEntries (mirrors the widget's current rows)
+        int j = 0;   // index into the new entries
+        while (i < _lastEntries.size() || j < entries.size())
+        {
+            const bool haveOld = i < _lastEntries.size();
+            const bool haveNew = j < entries.size();
+            if (haveOld && haveNew && _lastEntries[i] == entries[j])
             {
-                _list->setCurrentItem(item);
-                reselect = item;
+                ++i;
+                ++j;
+                ++row; // unchanged row — item (and any selection on it) untouched
             }
-            if (_requestedId != 0 && entry.first == _requestedId)
+            else if (haveOld && (!haveNew || less(_lastEntries[i], entries[j])))
             {
-                requested = item;
+                delete _list->takeItem(row); // removed entity
+                ++i;
+            }
+            else
+            {
+                auto* item = new QListWidgetItem(entries[j].second);
+                item->setData(Qt::UserRole, entries[j].first);
+                _list->insertItem(row, item); // added entity
+                ++j;
+                ++row;
             }
         }
-
+        _lastEntries = entries;
+        _list->setUpdatesEnabled(true);
         _list->blockSignals(false);
 
-        // A pending selectById() request wins — the entity it asked for has now
-        // appeared. Select it (with signals live so listeners hear about it).
+        // Selection: a pending selectById() request wins; else the user's selection
+        // (if its row survived); else auto-select the top row so the panel is never
+        // blank. Signals are live here, so listeners hear about real changes only
+        // (setCurrentItem on the already-current item does not re-emit).
+        QListWidgetItem* reselect = nullptr;
+        QListWidgetItem* requested = nullptr;
+        for (int r = 0; r < _list->count(); ++r)
+        {
+            auto* it = _list->item(r);
+            const qulonglong id = it->data(Qt::UserRole).toULongLong();
+            if (id == selectedId)
+            {
+                reselect = it;
+            }
+            if (_requestedId != 0 && id == _requestedId)
+            {
+                requested = it;
+            }
+        }
         if (requested)
         {
             _requestedId = 0;
             _list->setCurrentItem(requested);
-            return;
         }
-
-        if (reselect)
+        else if (reselect)
         {
-            return; // the user's selection survived — leave it (and don't re-emit)
+            _list->setCurrentItem(reselect);
         }
-
-        // Nothing was reselected: if any entity exists, select the top one so the
-        // panel is never left blank on first populate (or after the selected entity
-        // disappeared). Signals are unblocked here, so listeners are notified.
-        if (_list->count() > 0)
+        else if (_list->count() > 0)
         {
             _list->setCurrentRow(0);
         }

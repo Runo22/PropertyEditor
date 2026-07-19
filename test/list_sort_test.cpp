@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QListWidget>
+#include <QListWidgetItem>
 
 #include <cstdio>
 
@@ -85,6 +86,23 @@ int main(int argc, char** argv)
         list.setEntries({ { 10, QStringLiteral("apple") }, { 20, QStringLiteral("Mango") }, { 30, QStringLiteral("Zebra") } });
         check("pending request applied once the entity appears",
               lw->currentItem()->data(Qt::UserRole).toULongLong() == 30ull && lastSel == 30ull);
+
+        // DIFF update, not a rebuild: adding one entity must leave the existing
+        // rows' QListWidgetItem OBJECTS untouched (a clear+rebuild would recreate
+        // them — the very churn that stalled big lists once per scan cycle).
+        QListWidgetItem* mangoBefore = nullptr;
+        for (int i = 0; i < lw->count(); ++i)
+            if (lw->item(i)->text() == QStringLiteral("Mango"))
+                mangoBefore = lw->item(i);
+        list.setEntries({ { 10, QStringLiteral("apple") }, { 15, QStringLiteral("Kiwi") },
+                          { 20, QStringLiteral("Mango") }, { 30, QStringLiteral("Zebra") } });
+        QListWidgetItem* mangoAfter = nullptr;
+        for (int i = 0; i < lw->count(); ++i)
+            if (lw->item(i)->text() == QStringLiteral("Mango"))
+                mangoAfter = lw->item(i);
+        check("diff update keeps existing row objects (no rebuild)",
+              lw->count() == 4 && mangoAfter != nullptr && mangoAfter == mangoBefore);
+        check("diff update preserved the selection", lw->currentItem()->data(Qt::UserRole).toULongLong() == 30ull);
     }
 
     // ── Components: sorted alphabetically by displayed leaf name ───────────────
