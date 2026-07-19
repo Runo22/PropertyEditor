@@ -124,6 +124,12 @@ namespace rpe
         _bridgedIds.clear(); // ids belong to the old world
         _reqId = 0;
         _lastComponentCount = -1;
+        _scanActive = false; // cycle state belongs to the old world
+        _scanIds.clear();
+        _scanPos = 0;
+        _scanStaging.clear();
+        _scanVerdict.clear();
+        _scanWorkMs = 0.0;
         ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
@@ -490,20 +496,27 @@ namespace rpe
         const auto scanNow = std::chrono::steady_clock::now();
         const bool requiredChanged = (required != _lastRequired);
         _lastRequired = required;
-        const bool scanEntities = requiredChanged || structuralApplied
+        const bool scanDue = requiredChanged || structuralApplied
             || (scanNow - _lastEntityScan >= _entityScanGap);
-        if (scanEntities && _haveQuery)
+
+        // A filter/structural change invalidates an in-flight cycle: restart with
+        // fresh parameters instead of finishing a stale pass.
+        if ((requiredChanged || structuralApplied) && _scanActive)
         {
-            _lastEntityScan = scanNow;
-            const auto scanT0 = std::chrono::steady_clock::now();
+            _scanActive = false;
+        }
+
+        if (!_scanActive && scanDue && _haveQuery)
+        {
+            // ── Begin a scan cycle ────────────────────────────────────────────────
+            const auto beginT0 = std::chrono::steady_clock::now();
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);
 
             // Refresh the set of bridged component ids (and locate the required one).
             // String work (flecs path allocation + registry lookup) per component
-            // TYPE — worth skipping entirely when nothing could have changed: the
-            // component-type count is a cheap, exact-enough change signal (new types
-            // only ever get ADDED; bridge registrations are picked up by the count
-            // check at startup and by the structural/filter forces below).
+            // TYPE — skipped entirely when nothing could have changed: the type
+            // count only ever grows, and bridge registrations bump the registry
+            // generation.
             const int compCount = _componentQuery.count();
             const uint64_t bridgeGen = TypeBridge::registryGeneration();
             if (compCount != _lastComponentCount || bridgeGen != _bridgeGen
@@ -539,18 +552,16 @@ namespace rpe
                     }
                 });
             }
-            const uint64_t reqId = _reqId;
 
             // Narrow the entity query to the required component when the filter
             // changes: flecs then visits ONLY entities that have it, instead of every
-            // entity in the world. This is the big win for large worlds with a
-            // filtered view. Rebuilt only on change (cheap, rare).
+            // entity in the world. Rebuilt only on change (cheap, rare).
             if (requiredChanged)
             {
                 flecs::world w = world; // the (non-staged) world in immediate mode
-                if (!reqShort.isEmpty() && reqId)
+                if (!reqShort.isEmpty() && _reqId)
                 {
-                    _entityQuery = w.query_builder().with(reqId).build();
+                    _entityQuery = w.query_builder().with(_reqId).build();
                 }
                 else if (reqShort.isEmpty())
                 {
@@ -558,43 +569,116 @@ namespace rpe
                 }
             }
 
-            // A list of more than a few thousand entities is not usefully browsable;
-            // cap it so an unfiltered scan of a huge world can't spend all its time
-            // building labels. (Use the required-component filter to narrow instead.)
-            constexpr int kMaxEntities = 5000;
-            QVector<EntityEntry> ents;
-            _entityQuery.each([&](flecs::entity ent) {
-                if (ents.size() >= kMaxEntities || !ent.is_alive())
+            // Fast id snapshot, TABLE-wise (no labels, no per-entity component
+            // walks) — bounded by the table count, so it stays cheap even when the
+            // labelling work below is spread over many pumps.
+            _scanIds.clear();
+            _scanPos = 0;
+            _scanStaging.clear();
+            _scanVerdict.clear();
+            _scanReqShort = reqShort;
+            constexpr size_t kMaxSnapshot = 1000000; // memory bound, far above any browsable set
+            _entityQuery.run([&](flecs::iter& it) {
+                while (it.next())
                 {
-                    return;
-                }
-                bool hasBridged = false;
-                bool hasReq = reqShort.isEmpty();
-                ent.each([&](flecs::id id) {
-                    const uint64_t rid = id.raw_id();
-                    if (_bridgedIds.count(rid))
+                    for (size_t i = 0; i < it.count(); ++i)
                     {
-                        hasBridged = true;
+                        if (_scanIds.size() >= kMaxSnapshot)
+                        {
+                            return;
+                        }
+                        _scanIds.push_back(it.entity(i).id());
                     }
-                    if (reqId && rid == reqId)
-                    {
-                        hasReq = true;
-                    }
-                });
-                if (hasBridged && hasReq)
-                {
-                    ents.append({ static_cast<qulonglong>(ent.id()), entityLabel(ent) });
                 }
             });
-            if (ents != _lastEntities)
+            _scanActive = true;
+            _scanWorkMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beginT0).count();
+        }
+
+        if (_scanActive)
+        {
+            // ── One budgeted slice ────────────────────────────────────────────────
+            // The bridged/required check is resolved per TABLE (all entities of a
+            // table share their type), so the per-entity work is a hash lookup plus
+            // the label build for actual matches.
+            const double budget = _scanBudgetMs.load(std::memory_order_relaxed);
+            const auto sliceT0 = std::chrono::steady_clock::now();
+            constexpr int kMaxEntities = 5000; // larger lists aren't usefully browsable
+            const uint64_t reqId = _reqId;
+            const bool reqEmpty = _scanReqShort.isEmpty();
+            size_t processed = 0;
+            while (_scanPos < _scanIds.size())
             {
-                _lastEntities = ents;
-                _ch->publishEntities(ents);
+                if (_scanStaging.size() >= kMaxEntities)
+                {
+                    _scanPos = _scanIds.size();
+                    break;
+                }
+                const flecs::entity ent = world.entity(_scanIds[_scanPos]);
+                ++_scanPos;
+                ++processed;
+                if (ent.is_alive())
+                {
+                    const void* tbl = ecs_get_table(world.c_ptr(), ent.id());
+                    quint8 v = 0;
+                    const auto itv = _scanVerdict.constFind(tbl);
+                    if (itv != _scanVerdict.constEnd())
+                    {
+                        v = itv.value();
+                    }
+                    else
+                    {
+                        const ecs_type_t* type = tbl
+                            ? ecs_table_get_type(static_cast<const ecs_table_t*>(tbl))
+                            : nullptr;
+                        if (type)
+                        {
+                            for (int32_t k = 0; k < type->count; ++k)
+                            {
+                                const uint64_t rid = type->array[k];
+                                if (_bridgedIds.count(rid))
+                                {
+                                    v |= 1;
+                                }
+                                if (reqId && rid == reqId)
+                                {
+                                    v |= 2;
+                                }
+                            }
+                        }
+                        _scanVerdict.insert(tbl, v);
+                    }
+                    if ((v & 1) && (reqEmpty || (v & 2)))
+                    {
+                        _scanStaging.append({ static_cast<qulonglong>(ent.id()), entityLabel(ent) });
+                    }
+                }
+                // Budget check every 32 entities: guarantees forward progress even
+                // with a microscopic budget, and keeps the clock reads rare.
+                if ((processed & 31u) == 0 && budget > 0.0
+                    && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceT0).count() >= budget)
+                {
+                    break;
+                }
             }
-            _stats.lastScanMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scanT0).count();
-            if (_stats.lastScanMs > _stats.maxScanMs)
+            _scanWorkMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceT0).count();
+
+            if (_scanPos >= _scanIds.size())
             {
-                _stats.maxScanMs = _stats.lastScanMs;
+                // ── Cycle complete: publish + reschedule ─────────────────────────
+                if (_scanStaging != _lastEntities)
+                {
+                    _lastEntities = _scanStaging;
+                    _ch->publishEntities(_scanStaging);
+                }
+                _stats.lastScanMs = _scanWorkMs;
+                if (_scanWorkMs > _stats.maxScanMs)
+                {
+                    _stats.maxScanMs = _scanWorkMs;
+                }
+                _scanActive = false;
+                _scanVerdict.clear();
+                _lastEntityScan = std::chrono::steady_clock::now(); // next cycle after the gap
             }
         }
 

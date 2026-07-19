@@ -186,6 +186,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_variant_editor_test test/variant_editor_test.cpp)
     target_link_libraries(rpe_variant_editor_test PRIVATE rpe_gui)
 
+    add_executable(rpe_scan_budget_test test/scan_budget_test.cpp)
+    target_link_libraries(rpe_scan_budget_test PRIVATE rpe_gui)
+
     add_executable(rpe_tags_pairs_test test/tags_pairs_test.cpp)
     target_link_libraries(rpe_tags_pairs_test PRIVATE rpe_gui)
 

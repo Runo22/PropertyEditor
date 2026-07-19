@@ -134,13 +134,25 @@ namespace rpe
             quint64 skipped = 0;        // pumps skipped by the rate cap since attach()
             double lastPumpMs = 0.0;    // duration of the most recent pump
             double maxPumpMs = 0.0;     // worst pump since attach()
-            double lastScanMs = 0.0;    // duration of the most recent entity-list scan
-            double maxScanMs = 0.0;     // worst entity-list scan since attach()
+            double lastScanMs = 0.0;    // TOTAL work of the last completed scan cycle
+                                        // (spread over pumps by the scan budget)
+            double maxScanMs = 0.0;     // worst completed scan cycle since attach()
             double lastCatalogMs = 0.0; // duration of the most recent catalog scan
         };
         PumpStats pumpStats() const
         {
             return _stats;
+        }
+
+        // Per-pump wall-clock budget (ms) for the INCREMENTAL entity scan. A scan
+        // cycle snapshots the matched entity ids quickly (table-wise), then labels
+        // and filters them in slices of at most this much work per pump, publishing
+        // when the cycle completes — the per-frame spike of a monolithic scan
+        // becomes a flat, bounded cost. Default 1.0 ms; <= 0 restores the old
+        // single-shot scan (everything in one pump). GUI-thread safe.
+        void setScanBudgetMsPerPump(double ms)
+        {
+            _scanBudgetMs.store(ms, std::memory_order_relaxed);
         }
 
         // Wall-clock intervals for the two FULL-WORLD scans the pump performs on the
@@ -252,6 +264,19 @@ namespace rpe
         std::chrono::duration<double> _catalogScanGap { 2.0 };
         std::chrono::steady_clock::time_point _lastEntityScan {};
         std::chrono::steady_clock::time_point _lastCatalogScan {};
+
+        // Incremental entity-scan cycle (sim thread). A cycle = fast id snapshot →
+        // budgeted label/filter slices → publish on completion. The per-TABLE
+        // verdict cache collapses the bridged/required check to O(tables) instead
+        // of O(entities × components).
+        std::atomic<double> _scanBudgetMs { 1.0 };
+        std::vector<uint64_t> _scanIds; // id snapshot for the current cycle
+        size_t _scanPos = 0;
+        QVector<EntityEntry> _scanStaging;
+        QHash<const void*, quint8> _scanVerdict; // table → bit0 bridged, bit1 required
+        bool _scanActive = false;
+        double _scanWorkMs = 0.0;
+        QString _scanReqShort; // required-filter leaf, frozen for the cycle
 
         // Selected-entity component list, rebuilt only when the entity or its
         // archetype (flecs table) changes — NOT every pump. Building it walks the
