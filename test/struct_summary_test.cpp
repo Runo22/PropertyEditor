@@ -37,7 +37,8 @@ namespace
 
 RTTR_REGISTRATION
 {
-    RPE_REGISTER_PAIR(int, double);
+    rpe::registerPair<int, double>(); // primary, macro-free form
+    RPE_REGISTER_PAIR(float, float);  // macro shorthand — same registration
     rttr::registration::class_<Wide>("Wide")
         .property("a", &Wide::a)
         .property("b", &Wide::b)
@@ -95,8 +96,12 @@ int main(int argc, char** argv)
     auto* view = editor.view();
     auto* proxy = static_cast<QAbstractItemModel*>(view->model());
 
-    // ── pair registered via the macro shows up as a two-row struct ─────────────
+    // ── registered pair shows up as a two-row struct ───────────────────────────
     {
+        check("registerPair names the type deterministically",
+              rttr::type::get<std::pair<int, double>>().get_name() == "std::pair<int,double>");
+        check("macro shorthand registers too",
+              rttr::type::get<std::pair<float, float>>().get_properties().size() == 2);
         check("pair row exists with children first/second",
               findByPath(model, QStringLiteral("range.first")).isValid()
                   && findByPath(model, QStringLiteral("range.second")).isValid());

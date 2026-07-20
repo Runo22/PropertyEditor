@@ -65,9 +65,12 @@ A few type-specific behaviours:
 - **`std::string_view`** properties display their text but are deliberately
   read-only (the view points into memory the object owns — editing it through
   the grid would be unsafe).
-- **`std::pair<A, B>`** needs one macro call next to your registrations:
-  `RPE_REGISTER_PAIR(int, double);` (from `rpe/core/PairSupport.h`) — the pair
-  then behaves like a two-field struct everywhere, including inside containers.
+- **`std::pair<A, B>`** just needs its `first`/`second` registered like any
+  struct — plain RTTR registration is enough, nothing rpe-specific is
+  required. `rpe::registerPair<int, double>();` (from `rpe/core/PairSupport.h`)
+  is a one-line shorthand for exactly that (an `RPE_REGISTER_PAIR` macro form
+  also exists). The pair then behaves like a two-field struct everywhere,
+  including inside containers.
 - **Small structs (≤ 4 fields)** show a compact `[x, y, z]` summary in the
   value column while their row is collapsed; expanding the row hides the
   summary and the fields edit individually. Wider structs show nothing when
