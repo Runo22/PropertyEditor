@@ -6,6 +6,8 @@
 #include <rpe/gui/PropertyModel.h>
 
 #include <QApplication>
+#include <QLineEdit>
+#include <QStyleOptionViewItem>
 #include <QTreeView>
 
 #include <cstdio>
@@ -32,6 +34,7 @@ namespace
         std::pair<int, double> range { 3, 1.5 };
         Wide wide;
         std::string_view label { "hello" };
+        std::wstring title { L"başlık" }; // "başlık" — non-ASCII round-trip
     };
 } // namespace
 
@@ -48,7 +51,8 @@ RTTR_REGISTRATION
     rttr::registration::class_<Holder>("Holder")
         .property("range", &Holder::range)
         .property("wide", &Holder::wide)
-        .property("label", &Holder::label);
+        .property("label", &Holder::label)
+        .property("title", &Holder::title);
 }
 
 // Depth-first search for the column-0 index whose PropertyPathRole == path.
@@ -86,6 +90,20 @@ int main(int argc, char** argv)
               rpe::TypeRenderer::toDisplayString(rttr::variant(std::string_view {})).isEmpty());
         check("string_view is NOT inline-editable",
               !rpe::TypeRenderer::isInlineEditable(rttr::type::get<std::string_view>()));
+    }
+
+    // ── wstring: full display + edit support; wstring_view read-only ───────────
+    {
+        const std::wstring ws { L"başlık" };
+        check("wstring renders its text (non-ASCII intact)",
+              rpe::TypeRenderer::toDisplayString(rttr::variant(ws)) == QString::fromUtf8("başlık"));
+        check("wstring IS inline-editable",
+              rpe::TypeRenderer::isInlineEditable(rttr::type::get<std::wstring>()));
+        const std::wstring_view wv { L"görünüm" };
+        check("wstring_view renders its text",
+              rpe::TypeRenderer::toDisplayString(rttr::variant(wv)) == QString::fromUtf8("görünüm"));
+        check("wstring_view is NOT inline-editable",
+              !rpe::TypeRenderer::isInlineEditable(rttr::type::get<std::wstring_view>()));
     }
 
     Holder holder;
@@ -147,6 +165,27 @@ int main(int argc, char** argv)
         check("edit reached the object", holder.range.first == 7);
         check("collapsed summary follows the edit",
               valueText(model, QStringLiteral("range")) == QStringLiteral("[7, 1.5]"));
+    }
+
+    // ── wstring edited end-to-end through the DELEGATE (line-edit branch) ──────
+    {
+        auto* dlg = view->itemDelegateForColumn(1);
+        const QModelIndex titleVal = findByPath(proxy, QStringLiteral("title")).siblingAtColumn(1);
+        check("wstring cell is editable in the grid",
+              proxy->flags(titleVal) & Qt::ItemIsEditable);
+        QWidget* ed = dlg->createEditor(view->viewport(), QStyleOptionViewItem(), titleVal);
+        auto* le = qobject_cast<QLineEdit*>(ed);
+        check("wstring gets a line-edit editor", le != nullptr);
+        if (le)
+        {
+            dlg->setEditorData(le, titleVal);
+            check("editor pre-filled with current text", le->text() == QString::fromUtf8("başlık"));
+            le->setText(QString::fromUtf8("yeni değer"));
+            dlg->setModelData(le, proxy, titleVal);
+            check("delegate commit reached the object as wstring",
+                  holder.title == L"yeni değer");
+        }
+        delete ed;
     }
 
     // ── child change while collapsed repaints the parent's value cell ──────────

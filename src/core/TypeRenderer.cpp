@@ -101,6 +101,10 @@ namespace rpe
         {
             return true;
         }
+        if (r == rttr::type::get<std::wstring>())
+        {
+            return true;
+        }
         if (r == rttr::type::get<QString>())
         {
             return true;
@@ -151,6 +155,10 @@ namespace rpe
         {
             return QString::fromStdString(v.get_value<std::string>());
         }
+        if (t == rttr::type::get<std::wstring>())
+        {
+            return QString::fromStdWString(v.get_value<std::wstring>());
+        }
         if (t == rttr::type::get<QString>())
         {
             return v.get_value<QString>();
@@ -165,6 +173,12 @@ namespace rpe
             // it is safe, editing it is not (and it is deliberately not editable).
             const std::string_view sv = v.get_value<std::string_view>();
             return sv.data() ? QString::fromUtf8(sv.data(), static_cast<int>(sv.size())) : QString();
+        }
+        if (t == rttr::type::get<std::wstring_view>())
+        {
+            // Same read-only rule as string_view.
+            const std::wstring_view wv = v.get_value<std::wstring_view>();
+            return wv.data() ? QString::fromWCharArray(wv.data(), static_cast<int>(wv.size())) : QString();
         }
         if (t == rttr::type::get<std::filesystem::path>())
         {

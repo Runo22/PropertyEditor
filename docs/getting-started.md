@@ -62,9 +62,12 @@ Available hints (`rpe/core/EditorHints.h`): `Min`, `Max`, `Step`, `Decimals`,
 
 A few type-specific behaviours:
 
-- **`std::string_view`** properties display their text but are deliberately
-  read-only (the view points into memory the object owns — editing it through
-  the grid would be unsafe).
+- **`std::string_view` / `std::wstring_view`** properties display their text
+  but are deliberately read-only (the view points into memory the object owns
+  — editing it through the grid would be unsafe).
+- **`std::wstring`** is fully supported alongside `std::string` and `QString`:
+  it displays and edits with the same line-edit / multiline / color / path
+  editors.
 - **`std::pair<A, B>`** just needs its `first`/`second` registered like any
   struct — plain RTTR registration is enough, nothing rpe-specific is
   required. `rpe::registerPair<int, double>();` (from `rpe/core/PairSupport.h`)

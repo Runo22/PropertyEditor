@@ -124,7 +124,8 @@ namespace rpe
         }
 
         // strings
-        if (t == rttr::type::get<std::string>() || t == rttr::type::get<QString>())
+        if (t == rttr::type::get<std::string>() || t == rttr::type::get<std::wstring>()
+            || t == rttr::type::get<QString>())
         {
             if (ed == QLatin1String(editor::FilePath))
             {
@@ -333,12 +334,20 @@ namespace rpe
             {
                 newVal = ce->color().name(QColor::HexArgb).toStdString();
             }
+            else if (t == rttr::type::get<std::wstring>())
+            {
+                newVal = ce->color().name(QColor::HexArgb).toStdWString();
+            }
         }
         else if (auto* te = qobject_cast<QPlainTextEdit*>(editor))
         {
             if (t == rttr::type::get<QString>())
             {
                 newVal = te->toPlainText();
+            }
+            else if (t == rttr::type::get<std::wstring>())
+            {
+                newVal = te->toPlainText().toStdWString();
             }
             else
             {
@@ -352,6 +361,10 @@ namespace rpe
             if (TypeRenderer::isFilePath(t) || t == rttr::type::get<QString>())
             {
                 newVal = fe->path();
+            }
+            else if (t == rttr::type::get<std::wstring>())
+            {
+                newVal = fe->path().toStdWString();
             }
             else
             {
@@ -367,6 +380,10 @@ namespace rpe
             else if (t == rttr::type::get<std::string>())
             {
                 newVal = le->text().toStdString();
+            }
+            else if (t == rttr::type::get<std::wstring>())
+            {
+                newVal = le->text().toStdWString();
             }
             else if (t.is_arithmetic())
             {
