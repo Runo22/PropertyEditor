@@ -99,6 +99,7 @@ namespace rpe
         beginResetModel();
         _resetRoot();
         _boundType = type;
+        _expandedPaths.clear();
         if (type.is_valid())
         {
             _buildTree(_root.get(), type, QString());
@@ -112,6 +113,7 @@ namespace rpe
         beginResetModel();
         _resetRoot();
         _boundType = rttr::type::get<void>();
+        _expandedPaths.clear();
         endResetModel();
     }
 
@@ -355,10 +357,11 @@ namespace rpe
         _emitDirtyRanges(_root.get());
     }
 
-    void PropertyModel::_emitDirtyRanges(PropertyNode* parent)
+    bool PropertyModel::_emitDirtyRanges(PropertyNode* parent)
     {
         auto& ch = parent->children();
         int rangeStart = -1;
+        bool subtreeDirty = false;
 
         auto flush = [&](int endExclusive) {
             if (rangeStart < 0)
@@ -376,6 +379,7 @@ namespace rpe
             if (node->isDirty())
             {
                 node->clearDirty();
+                subtreeDirty = true;
                 if (rangeStart < 0)
                 {
                     rangeStart = i;
@@ -387,10 +391,21 @@ namespace rpe
             }
             if (!node->children().isEmpty())
             {
-                _emitDirtyRanges(node);
+                subtreeDirty |= _emitDirtyRanges(node);
             }
         }
         flush(static_cast<int>(ch.size()));
+
+        // A collapsed struct row summarises its children in its own value cell —
+        // when any descendant changed, that cell is stale too, even though the
+        // parent node itself carries no dirty flag. Repaint just that cell.
+        if (subtreeDirty && parent != _root.get() && parent->isExpandable()
+            && parent->arraySize() < 0 && !_expandedPaths.contains(parent->path()))
+        {
+            const QModelIndex idx = _indexFromNode(parent, 1);
+            emit dataChanged(idx, idx, { Qt::DisplayRole });
+        }
+        return subtreeDirty;
     }
 
     // ── local edit / reset ────────────────────────────────────────────────────────────
@@ -492,6 +507,67 @@ namespace rpe
         {
             emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1), { Qt::ForegroundRole });
         }
+    }
+
+    void PropertyModel::setPathExpanded(const QString& path, bool expanded)
+    {
+        if (expanded == _expandedPaths.contains(path))
+        {
+            return;
+        }
+        if (expanded)
+        {
+            _expandedPaths.insert(path);
+        }
+        else
+        {
+            _expandedPaths.remove(path);
+        }
+        // Only a non-array expandable row renders differently (summary ↔ blank).
+        auto* node = _findNode(path);
+        if (node && node->isExpandable() && node->arraySize() < 0)
+        {
+            const QModelIndex idx = _indexFromNode(node, 1);
+            emit dataChanged(idx, idx, { Qt::DisplayRole });
+        }
+    }
+
+    // Compact one-line summary of a small struct's fields: "[3, 1.5]". Nested
+    // non-leaf fields show as "…". Empty when the struct is too wide (>4 fields —
+    // a summary that long stops being scannable) or when nothing has a value yet
+    // (e.g. mirror mode before the first snapshot arrives): blank, as before.
+    QString PropertyModel::_structSummary(PropertyNode* node) const
+    {
+        const auto& ch = node->children();
+        if (ch.isEmpty() || ch.size() > 4)
+        {
+            return {};
+        }
+        QStringList parts;
+        bool anyValue = false;
+        for (auto* c : ch)
+        {
+            const rttr::variant v = c->effectiveValue();
+            if (c->isLeaf() && v.is_valid())
+            {
+                parts << TypeRenderer::toDisplayString(v);
+                anyValue = true;
+            }
+            else
+            {
+                parts << QStringLiteral("…");
+            }
+        }
+        if (!anyValue)
+        {
+            return {};
+        }
+        QString s = QLatin1Char('[') + parts.join(QStringLiteral(", ")) + QLatin1Char(']');
+        if (s.size() > 44)
+        {
+            s = s.left(42) + QStringLiteral("…]");
+        }
+        return s;
     }
 
     QStringList PropertyModel::allLeafPaths() const
@@ -615,13 +691,19 @@ namespace rpe
             }
             if (index.column() == 1)
             {
-                // Expandable rows (structs, arrays) show no scalar value of their own
-                // — the children carry the values. Show an element count for sized
-                // arrays, else nothing. Avoids a bare "<invalid>" on the parent,
-                // especially in mirror mode where only leaf values are mirrored.
+                // Expandable rows carry no scalar value of their own — the children
+                // do. Arrays show their element count. A COLLAPSED small struct
+                // shows a compact "[a, b]" summary of its fields; expanding it
+                // blanks the cell (the children now display the values), so the
+                // same data is never on screen twice. Wide structs stay blank —
+                // never a bare "<invalid>".
                 if (node->isExpandable())
                 {
-                    return node->arraySize() >= 0 ? QStringLiteral("[%1]").arg(node->arraySize()) : QString();
+                    if (node->arraySize() >= 0)
+                    {
+                        return QStringLiteral("[%1]").arg(node->arraySize());
+                    }
+                    return _expandedPaths.contains(node->path()) ? QString() : _structSummary(node);
                 }
                 // Leaf with no value yet (e.g. not mirrored): blank, not "<invalid>".
                 const rttr::variant v = node->effectiveValue();

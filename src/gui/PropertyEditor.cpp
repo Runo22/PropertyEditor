@@ -71,6 +71,42 @@ namespace rpe
         connect(_filter, &QLineEdit::textChanged, this, &PropertyEditor::_onFilterChanged);
         connect(_resetBtn, &QToolButton::clicked, this, &PropertyEditor::_onResetAll);
         connect(_view, &QTreeView::customContextMenuRequested, this, &PropertyEditor::_onContextMenu);
+
+        // Keep the model's notion of expansion in sync with the view, so collapsed
+        // struct rows can show a "[a, b]" summary that disappears on expand.
+        // (Custom roles pass through the proxy, so no mapToSource needed here.)
+        connect(_view, &QTreeView::expanded, this, [this](const QModelIndex& idx) {
+            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), true);
+        });
+        connect(_view, &QTreeView::collapsed, this, [this](const QModelIndex& idx) {
+            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), false);
+        });
+    }
+
+    // Bulk expansion calls (expandAll / expandToDepth / collapseAll) do NOT emit
+    // the per-row expanded/collapsed signals, so after any of them the model's
+    // expansion set must be rebuilt by walking the view.
+    void PropertyEditor::_pushExpansionState()
+    {
+        QList<QModelIndex> stack;
+        for (int r = _proxy->rowCount({}) - 1; r >= 0; --r)
+        {
+            stack.append(_proxy->index(r, 0, {}));
+        }
+        while (!stack.isEmpty())
+        {
+            const QModelIndex idx = stack.takeLast();
+            const int rows = _proxy->rowCount(idx);
+            if (rows == 0)
+            {
+                continue;
+            }
+            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), _view->isExpanded(idx));
+            for (int r = rows - 1; r >= 0; --r)
+            {
+                stack.append(_proxy->index(r, 0, idx));
+            }
+        }
     }
 
     // ── data / schema ────────────────────────────────────────────────────────────
@@ -79,6 +115,7 @@ namespace rpe
     {
         _model->bindType(type);
         _view->expandToDepth(0);
+        _pushExpansionState();
     }
 
     void PropertyEditor::unbind()
@@ -175,6 +212,22 @@ namespace rpe
                     stack.append(_proxy->index(r, 0, idx));
                 }
             }
+            else if (!idx.data(IsArrayRole).toBool() && rows <= 4)
+            {
+                // A collapsed small struct shows a "[a, b]" summary of its direct
+                // leaf children — those leaves must be watched even though their
+                // rows are hidden, or the summary would stay forever blank in
+                // mirror mode. Nested structs inside it render as "…" and need no
+                // watch.
+                for (int r = 0; r < rows; ++r)
+                {
+                    const QModelIndex c = _proxy->index(r, 0, idx);
+                    if (_proxy->rowCount(c) == 0)
+                    {
+                        out.append(c.data(PropertyPathRole).toString());
+                    }
+                }
+            }
         }
         return out;
     }
@@ -188,6 +241,7 @@ namespace rpe
     void PropertyEditor::expandAll()
     {
         _view->expandAll();
+        _pushExpansionState();
     }
 
     // ── slots ─────────────────────────────────────────────────────────────────────
@@ -203,6 +257,7 @@ namespace rpe
         {
             _view->expandAll();
         }
+        _pushExpansionState();
     }
 
     void PropertyEditor::_onResetAll()

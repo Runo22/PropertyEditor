@@ -60,6 +60,19 @@ Available hints (`rpe/core/EditorHints.h`): `Min`, `Max`, `Step`, `Decimals`,
 `Editor` (`rpe::editor::FilePath` / `SaveFile` / `Directory` / `Color` /
 `Multiline`), `Label`, `Tooltip`, `ReadOnly`.
 
+A few type-specific behaviours:
+
+- **`std::string_view`** properties display their text but are deliberately
+  read-only (the view points into memory the object owns — editing it through
+  the grid would be unsafe).
+- **`std::pair<A, B>`** needs one macro call next to your registrations:
+  `RPE_REGISTER_PAIR(int, double);` (from `rpe/core/PairSupport.h`) — the pair
+  then behaves like a two-field struct everywhere, including inside containers.
+- **Small structs (≤ 4 fields)** show a compact `[x, y, z]` summary in the
+  value column while their row is collapsed; expanding the row hides the
+  summary and the fields edit individually. Wider structs show nothing when
+  collapsed; arrays always show their element count `[N]`.
+
 For anything that types a **raw pointer** (the ECS browser, mirror mode,
 `VariantEditor::setLinked`), additionally register the bridge next to the RTTR
 registration:

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <filesystem>
+#include <string_view>
 
 #include <rttr/enumeration.h>
 #include <rttr/variant_sequential_view.h>
@@ -157,6 +158,13 @@ namespace rpe
         if (t == rttr::type::get<QColor>())
         {
             return v.get_value<QColor>().name(QColor::HexArgb);
+        }
+        if (t == rttr::type::get<std::string_view>())
+        {
+            // Read-only display: a view points into memory the OBJECT owns — showing
+            // it is safe, editing it is not (and it is deliberately not editable).
+            const std::string_view sv = v.get_value<std::string_view>();
+            return sv.data() ? QString::fromUtf8(sv.data(), static_cast<int>(sv.size())) : QString();
         }
         if (t == rttr::type::get<std::filesystem::path>())
         {

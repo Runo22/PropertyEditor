@@ -106,6 +106,7 @@ namespace rpe
 
     private:
         void _setupUi();
+        void _pushExpansionState();
 
         PropertyModel* _model = nullptr;
         PropertyDelegate* _delegate = nullptr;
