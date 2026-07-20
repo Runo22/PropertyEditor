@@ -30,6 +30,17 @@ namespace rpe
         // True if the type is a sequential container (std::vector<T>, arrays, …).
         static bool isSequential(rttr::type t);
 
+        // True if the type is an associative container (std::map / unordered_map).
+        // Shown as one row per key ("[key]"), values editable like array elements.
+        static bool isAssociative(rttr::type t);
+
+        // std::chrono durations — the six standard aliases (nanoseconds …hours).
+        // Displayed and edited as the tick count with a unit suffix ("250 ms").
+        static bool isChronoDuration(rttr::type t);
+        static QString chronoSuffix(rttr::type t);          // "ns"/"us"/"ms"/"s"/"min"/"h"
+        static qint64 chronoCount(const rttr::variant& v);  // tick count (0 if not a duration)
+        static rttr::variant makeChronoDuration(rttr::type t, qint64 count); // invalid if not one
+
         // True if the type maps to a built-in inline editor (number/bool/string/enum).
         static bool isInlineEditable(rttr::type t);
 

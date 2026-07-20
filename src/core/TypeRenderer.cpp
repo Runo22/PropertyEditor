@@ -3,14 +3,17 @@
 #include "rpe/core/OptionalSupport.h"
 
 #include <QColor>
+#include <QDateTime>
 #include <QStringList>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <string_view>
 
 #include <rttr/enumeration.h>
+#include <rttr/variant_associative_view.h>
 #include <rttr/variant_sequential_view.h>
 
 namespace rpe
@@ -69,7 +72,14 @@ namespace rpe
 
     rttr::type TypeRenderer::rawType(rttr::type t)
     {
-        return t.is_wrapper() ? t.get_wrapped_type() : t;
+        rttr::type r = t.is_wrapper() ? t.get_wrapped_type() : t;
+        // A wrapper may unwrap to a POINTER (std::shared_ptr<T> → T*): resolve on
+        // to the pointee class so schema/editor decisions see T, not T*.
+        if (r.is_pointer())
+        {
+            r = r.get_raw_type();
+        }
+        return r;
     }
 
     rttr::variant TypeRenderer::unwrap(const rttr::variant& v)
@@ -94,10 +104,16 @@ namespace rpe
         return rawType(t).is_sequential_container();
     }
 
+    bool TypeRenderer::isAssociative(rttr::type t)
+    {
+        return rawType(t).is_associative_container();
+    }
+
     bool TypeRenderer::isExpandable(rttr::type t)
     {
         const rttr::type r = rawType(t);
-        return r.is_sequential_container() || !r.get_properties().empty();
+        return r.is_sequential_container() || r.is_associative_container()
+            || !r.get_properties().empty();
     }
 
     bool TypeRenderer::isInlineEditable(rttr::type t)
@@ -119,6 +135,10 @@ namespace rpe
         {
             return true;
         }
+        if (r == rttr::type::get<std::u16string>() || r == rttr::type::get<std::u32string>())
+        {
+            return true;
+        }
         if (r == rttr::type::get<QString>())
         {
             return true;
@@ -131,11 +151,123 @@ namespace rpe
         {
             return true;
         }
+        if (r == rttr::type::get<QDateTime>())
+        {
+            return true;
+        }
+        if (isChronoDuration(r))
+        {
+            return true;
+        }
         if (isFilePath(r))
         {
             return true;
         }
         return false;
+    }
+
+    // ── std::chrono durations ────────────────────────────────────────────────────
+
+    bool TypeRenderer::isChronoDuration(rttr::type tIn)
+    {
+        const rttr::type t = rawType(tIn);
+        return t == rttr::type::get<std::chrono::nanoseconds>()
+            || t == rttr::type::get<std::chrono::microseconds>()
+            || t == rttr::type::get<std::chrono::milliseconds>()
+            || t == rttr::type::get<std::chrono::seconds>()
+            || t == rttr::type::get<std::chrono::minutes>()
+            || t == rttr::type::get<std::chrono::hours>();
+    }
+
+    QString TypeRenderer::chronoSuffix(rttr::type tIn)
+    {
+        const rttr::type t = rawType(tIn);
+        if (t == rttr::type::get<std::chrono::nanoseconds>())
+        {
+            return QStringLiteral("ns");
+        }
+        if (t == rttr::type::get<std::chrono::microseconds>())
+        {
+            return QStringLiteral("us");
+        }
+        if (t == rttr::type::get<std::chrono::milliseconds>())
+        {
+            return QStringLiteral("ms");
+        }
+        if (t == rttr::type::get<std::chrono::seconds>())
+        {
+            return QStringLiteral("s");
+        }
+        if (t == rttr::type::get<std::chrono::minutes>())
+        {
+            return QStringLiteral("min");
+        }
+        if (t == rttr::type::get<std::chrono::hours>())
+        {
+            return QStringLiteral("h");
+        }
+        return {};
+    }
+
+    qint64 TypeRenderer::chronoCount(const rttr::variant& vIn)
+    {
+        const rttr::variant v = unwrap(vIn);
+        const rttr::type t = v.get_type();
+        if (t == rttr::type::get<std::chrono::nanoseconds>())
+        {
+            return static_cast<qint64>(v.get_value<std::chrono::nanoseconds>().count());
+        }
+        if (t == rttr::type::get<std::chrono::microseconds>())
+        {
+            return static_cast<qint64>(v.get_value<std::chrono::microseconds>().count());
+        }
+        if (t == rttr::type::get<std::chrono::milliseconds>())
+        {
+            return static_cast<qint64>(v.get_value<std::chrono::milliseconds>().count());
+        }
+        if (t == rttr::type::get<std::chrono::seconds>())
+        {
+            return static_cast<qint64>(v.get_value<std::chrono::seconds>().count());
+        }
+        if (t == rttr::type::get<std::chrono::minutes>())
+        {
+            return static_cast<qint64>(v.get_value<std::chrono::minutes>().count());
+        }
+        if (t == rttr::type::get<std::chrono::hours>())
+        {
+            return static_cast<qint64>(v.get_value<std::chrono::hours>().count());
+        }
+        return 0;
+    }
+
+    rttr::variant TypeRenderer::makeChronoDuration(rttr::type tIn, qint64 count)
+    {
+        const rttr::type t = rawType(tIn);
+        if (t == rttr::type::get<std::chrono::nanoseconds>())
+        {
+            return rttr::variant(std::chrono::nanoseconds(count));
+        }
+        if (t == rttr::type::get<std::chrono::microseconds>())
+        {
+            return rttr::variant(std::chrono::microseconds(count));
+        }
+        if (t == rttr::type::get<std::chrono::milliseconds>())
+        {
+            return rttr::variant(std::chrono::milliseconds(count));
+        }
+        if (t == rttr::type::get<std::chrono::seconds>())
+        {
+            return rttr::variant(std::chrono::seconds(count));
+        }
+        if (t == rttr::type::get<std::chrono::minutes>())
+        {
+            return rttr::variant(std::chrono::minutes(static_cast<std::chrono::minutes::rep>(count)));
+        }
+        if (t == rttr::type::get<std::chrono::hours>())
+        {
+            return rttr::variant(std::chrono::hours(static_cast<std::chrono::hours::rep>(count)));
+        }
+        return {};
     }
 
     bool TypeRenderer::isFilePath(rttr::type t)
@@ -180,6 +312,14 @@ namespace rpe
         {
             return QString::fromStdWString(v.get_value<std::wstring>());
         }
+        if (t == rttr::type::get<std::u16string>())
+        {
+            return QString::fromStdU16String(v.get_value<std::u16string>());
+        }
+        if (t == rttr::type::get<std::u32string>())
+        {
+            return QString::fromStdU32String(v.get_value<std::u32string>());
+        }
         if (t == rttr::type::get<QString>())
         {
             return v.get_value<QString>();
@@ -187,6 +327,14 @@ namespace rpe
         if (t == rttr::type::get<QColor>())
         {
             return v.get_value<QColor>().name(QColor::HexArgb);
+        }
+        if (t == rttr::type::get<QDateTime>())
+        {
+            return v.get_value<QDateTime>().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        }
+        if (isChronoDuration(t))
+        {
+            return QStringLiteral("%1 %2").arg(chronoCount(v)).arg(chronoSuffix(t));
         }
         if (t == rttr::type::get<std::string_view>())
         {
@@ -234,6 +382,14 @@ namespace rpe
         if (t.is_sequential_container())
         {
             auto view = v.create_sequential_view();
+            return QStringLiteral("[%1 %2]")
+                .arg(view.get_size())
+                .arg(view.get_size() == 1 ? QStringLiteral("item") : QStringLiteral("items"));
+        }
+
+        if (t.is_associative_container())
+        {
+            auto view = v.create_associative_view();
             return QStringLiteral("[%1 %2]")
                 .arg(view.get_size())
                 .arg(view.get_size() == 1 ? QStringLiteral("item") : QStringLiteral("items"));

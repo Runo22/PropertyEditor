@@ -158,6 +158,10 @@ namespace rpe
         void _refreshNode(PropertyNode* node, const rttr::variant& val);
         void _refreshSequential(PropertyNode* node, const rttr::variant& val);
         void _rebuildArrayChildren(PropertyNode* node, const rttr::variant& arrayVal);
+        void _refreshAssociative(PropertyNode* node, const rttr::variant& val);
+        void _rebuildAssocChildren(PropertyNode* node,
+                                   const QVector<QPair<QString, rttr::variant>>& entries,
+                                   rttr::type valueType);
         static bool _anyDescendantLocallyEdited(const PropertyNode* node);
         void _applyBatch(const QHash<QString, rttr::variant>& batch);
         bool _emitDirtyRanges(PropertyNode* parent);

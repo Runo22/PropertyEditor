@@ -9,6 +9,8 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
+#include <QDateTimeEdit>
 #include <QDoubleSpinBox>
 #include <QLineEdit>
 #include <QPainter>
@@ -19,6 +21,7 @@
 #include <QStyle>
 
 #include <limits>
+#include <string>
 
 #include <rttr/enumeration.h>
 
@@ -62,6 +65,42 @@ namespace rpe
                 || t == rttr::type::get<long long>()
                 || t == rttr::type::get<unsigned long long>()
                 || t == rttr::type::get<unsigned int>();
+        }
+
+        bool isStringFamily(rttr::type t)
+        {
+            return t == rttr::type::get<QString>()
+                || t == rttr::type::get<std::string>()
+                || t == rttr::type::get<std::wstring>()
+                || t == rttr::type::get<std::u16string>()
+                || t == rttr::type::get<std::u32string>();
+        }
+
+        // Editor text → a variant of the exact declared string type (invalid if
+        // the target isn't one of the string family).
+        rttr::variant stringVariantFor(rttr::type t, const QString& s)
+        {
+            if (t == rttr::type::get<QString>())
+            {
+                return rttr::variant(s);
+            }
+            if (t == rttr::type::get<std::string>())
+            {
+                return rttr::variant(s.toStdString());
+            }
+            if (t == rttr::type::get<std::wstring>())
+            {
+                return rttr::variant(s.toStdWString());
+            }
+            if (t == rttr::type::get<std::u16string>())
+            {
+                return rttr::variant(s.toStdU16String());
+            }
+            if (t == rttr::type::get<std::u32string>())
+            {
+                return rttr::variant(s.toStdU32String());
+            }
+            return {};
         }
 
     } // namespace
@@ -124,9 +163,28 @@ namespace rpe
             return new FilePathEditor(m, parent);
         }
 
+        // QDateTime → calendar-popup date/time editor.
+        if (t == rttr::type::get<QDateTime>())
+        {
+            auto* dte = new QDateTimeEdit(parent);
+            dte->setCalendarPopup(true);
+            dte->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+            return dte;
+        }
+
+        // chrono duration → integer spin with the unit as suffix ("250 ms").
+        if (TypeRenderer::isChronoDuration(t))
+        {
+            auto* sb = new QDoubleSpinBox(parent);
+            sb->setDecimals(0);
+            sb->setRange(-9e15, 9e15);
+            sb->setSingleStep(roleDouble(index, StepRole, 1));
+            sb->setSuffix(QLatin1Char(' ') + TypeRenderer::chronoSuffix(t));
+            return sb;
+        }
+
         // strings
-        if (t == rttr::type::get<std::string>() || t == rttr::type::get<std::wstring>()
-            || t == rttr::type::get<QString>())
+        if (isStringFamily(t))
         {
             if (ed == QLatin1String(editor::FilePath))
             {
@@ -294,9 +352,24 @@ namespace rpe
             }
             return;
         }
+        if (auto* dte = qobject_cast<QDateTimeEdit*>(editor))
+        {
+            if (v.is_valid() && t == rttr::type::get<QDateTime>())
+            {
+                dte->setDateTime(v.get_value<QDateTime>());
+            }
+            return;
+        }
         if (auto* sb = qobject_cast<QDoubleSpinBox*>(editor))
         {
-            sb->setValue(v.to_double());
+            if (TypeRenderer::isChronoDuration(t))
+            {
+                sb->setValue(static_cast<double>(TypeRenderer::chronoCount(v)));
+            }
+            else
+            {
+                sb->setValue(v.to_double());
+            }
             return;
         }
         if (auto* sb = qobject_cast<QSpinBox*>(editor))
@@ -332,30 +405,15 @@ namespace rpe
             {
                 newVal = ce->color();
             }
-            else if (t == rttr::type::get<QString>())
+            else if (const rttr::variant sv = stringVariantFor(t, ce->color().name(QColor::HexArgb)); sv.is_valid())
             {
-                newVal = ce->color().name(QColor::HexArgb);
-            }
-            else if (t == rttr::type::get<std::string>())
-            {
-                newVal = ce->color().name(QColor::HexArgb).toStdString();
-            }
-            else if (t == rttr::type::get<std::wstring>())
-            {
-                newVal = ce->color().name(QColor::HexArgb).toStdWString();
+                newVal = sv;
             }
         }
         else if (auto* te = qobject_cast<QPlainTextEdit*>(editor))
         {
-            if (t == rttr::type::get<QString>())
-            {
-                newVal = te->toPlainText();
-            }
-            else if (t == rttr::type::get<std::wstring>())
-            {
-                newVal = te->toPlainText().toStdWString();
-            }
-            else
+            newVal = stringVariantFor(t, te->toPlainText());
+            if (!newVal.is_valid())
             {
                 newVal = te->toPlainText().toStdString();
             }
@@ -363,33 +421,25 @@ namespace rpe
         else if (auto* fe = qobject_cast<FilePathEditor*>(editor))
         {
             // Emit a QString for path (the bridge builds std::filesystem::path from
-            // it) and for QString targets; a std::string target gets a std::string.
-            if (TypeRenderer::isFilePath(t) || t == rttr::type::get<QString>())
+            // it); string-family targets get their exact type, others a std::string.
+            if (TypeRenderer::isFilePath(t))
             {
                 newVal = fe->path();
             }
-            else if (t == rttr::type::get<std::wstring>())
-            {
-                newVal = fe->path().toStdWString();
-            }
             else
             {
-                newVal = fe->path().toStdString();
+                newVal = stringVariantFor(t, fe->path());
+                if (!newVal.is_valid())
+                {
+                    newVal = fe->path().toStdString();
+                }
             }
         }
         else if (auto* le = qobject_cast<QLineEdit*>(editor))
         {
-            if (t == rttr::type::get<QString>())
+            if (const rttr::variant sv = stringVariantFor(t, le->text()); sv.is_valid())
             {
-                newVal = le->text();
-            }
-            else if (t == rttr::type::get<std::string>())
-            {
-                newVal = le->text().toStdString();
-            }
-            else if (t == rttr::type::get<std::wstring>())
-            {
-                newVal = le->text().toStdWString();
+                newVal = sv;
             }
             else if (t.is_arithmetic())
             {
@@ -420,9 +470,19 @@ namespace rpe
                 newVal = t.get_enumeration().name_to_value(combo->currentText().toStdString());
             }
         }
+        else if (auto* dte = qobject_cast<QDateTimeEdit*>(editor))
+        {
+            newVal = dte->dateTime();
+        }
         else if (auto* dsb = qobject_cast<QDoubleSpinBox*>(editor))
         {
-            if (t == rttr::type::get<float>())
+            if (TypeRenderer::isChronoDuration(t))
+            {
+                // Commit the exact duration type so LocalEdit rows display with
+                // their unit too (coerce() would fix WriteBack either way).
+                newVal = TypeRenderer::makeChronoDuration(t, static_cast<qint64>(dsb->value()));
+            }
+            else if (t == rttr::type::get<float>())
             {
                 newVal = static_cast<float>(dsb->value());
             }

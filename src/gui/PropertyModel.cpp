@@ -8,6 +8,9 @@
 #include <QColor>
 #include <QMetaObject>
 
+#include <algorithm>
+
+#include <rttr/variant_associative_view.h>
 #include <rttr/variant_sequential_view.h>
 
 namespace rpe
@@ -187,6 +190,10 @@ namespace rpe
         {
             _refreshSequential(node, val);
         }
+        else if (TypeRenderer::isAssociative(t))
+        {
+            _refreshAssociative(node, val);
+        }
         else if (TypeRenderer::isExpandable(t))
         {
             node->setLiveValue(val);
@@ -245,6 +252,112 @@ namespace rpe
                 }
                 _refreshNode(child, view.get_value(static_cast<size_t>(i)));
             }
+        }
+    }
+
+    // Sync an associative node's rows to a map value: one child row per key,
+    // named "[key]" (displayed as the bare key), value refreshed/edited exactly
+    // like an array element. Rows are sorted by key display string so
+    // unordered_map doesn't reshuffle the UI between refreshes. Key-only
+    // containers (std::set) show just their count. Same local-edit guard and
+    // rebuild-vs-in-place split as _refreshSequential.
+    void PropertyModel::_refreshAssociative(PropertyNode* node, const rttr::variant& val)
+    {
+        node->setLiveValue(val);
+        if (!val.is_valid() || !val.is_associative_container())
+        {
+            return;
+        }
+        auto view = val.create_associative_view();
+        if (view.is_key_only_type())
+        {
+            node->setArraySize(static_cast<int>(view.get_size()));
+            return;
+        }
+
+        QVector<QPair<QString, rttr::variant>> entries; // (key display, value)
+        for (auto it = view.begin(); it != view.end(); ++it)
+        {
+            entries.append({ TypeRenderer::toDisplayString(TypeRenderer::unwrap(it.get_key())),
+                             TypeRenderer::unwrap(it.get_value()) });
+        }
+        std::sort(entries.begin(), entries.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        bool sameKeys = entries.size() == node->children().size();
+        for (int i = 0; sameKeys && i < entries.size(); ++i)
+        {
+            sameKeys = node->children()[i]->name() == QLatin1Char('[') + entries[i].first + QLatin1Char(']');
+        }
+
+        if (!sameKeys)
+        {
+            // Same deferral rule as arrays: never tear down rows under an open editor.
+            if (_anyDescendantLocallyEdited(node))
+            {
+                return;
+            }
+            _rebuildAssocChildren(node, entries, view.get_value_type());
+        }
+        else
+        {
+            for (int i = 0; i < entries.size(); ++i)
+            {
+                auto* child = node->children()[i];
+                if (!child->hasLocalEdit())
+                {
+                    _refreshNode(child, entries[i].second);
+                }
+            }
+        }
+    }
+
+    void PropertyModel::_rebuildAssocChildren(PropertyNode* node,
+                                              const QVector<QPair<QString, rttr::variant>>& entries,
+                                              rttr::type valueType)
+    {
+        const QModelIndex nodeIdx = _indexFromNode(node);
+
+        if (!node->children().isEmpty())
+        {
+            beginRemoveRows(nodeIdx, 0, node->children().size() - 1);
+            for (auto* ch : node->children())
+            {
+                _nodeByPath.remove(ch->path());
+            }
+            qDeleteAll(node->children());
+            node->children().clear();
+            endRemoveRows();
+        }
+
+        const int newSz = entries.size();
+        if (newSz > 0)
+        {
+            beginInsertRows(nodeIdx, 0, newSz - 1);
+            const bool expand = TypeRenderer::isExpandable(valueType);
+            for (int i = 0; i < newSz; ++i)
+            {
+                const QString elemName = QLatin1Char('[') + entries[i].first + QLatin1Char(']');
+                const QString elemPath = node->path() + QLatin1Char('.') + elemName;
+                auto* elem = new PropertyNode(elemName, elemPath, valueType, invalidProperty(), node);
+                elem->setArrayElement(true);
+                elem->setExpandable(expand);
+                elem->setDisplayName(entries[i].first); // bare key in the name column
+                node->children().append(elem);
+                _nodeByPath.insert(elemPath, elem);
+                if (expand && !TypeRenderer::isSequential(valueType))
+                {
+                    _buildTree(elem, valueType, elemPath);
+                }
+            }
+            endInsertRows();
+        }
+        node->setArraySize(newSz);
+
+        // Populate values only after the insert window has closed (model protocol).
+        for (int i = 0; i < newSz; ++i)
+        {
+            _refreshNode(node->children()[i], entries[i].second);
         }
     }
 

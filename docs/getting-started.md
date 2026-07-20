@@ -78,6 +78,23 @@ A few type-specific behaviours:
   value column while their row is collapsed; expanding the row hides the
   summary and the fields edit individually. Wider structs show nothing when
   collapsed; arrays always show their element count `[N]`.
+- **All standard strings** edit inline: `std::string`, `std::wstring`,
+  `std::u16string`, `std::u32string`, `QString`.
+- **`std::optional<T>`** displays `(none)` when empty and edits/engages its
+  inner value — add `RPE_REGISTER_OPTIONAL(T);` next to your registrations
+  (see `rpe/core/OptionalSupport.h`).
+- **`std::map` / `std::unordered_map`** expand into one row per key (rows are
+  sorted by key so `unordered_map` doesn't reshuffle between refreshes); the
+  values edit like array elements, addressed as `scores.[alice]` in dot-paths.
+  Keys themselves are not editable from the grid, and string keys containing
+  `.` or `]` are not addressable.
+- **`std::shared_ptr<T>`** expands to the pointee's fields and edits mutate
+  the pointed-to object in place; a null pointer shows blank fields (safely).
+- **`std::chrono` durations** (the six standard aliases, `nanoseconds` through
+  `hours`) display and edit as their tick count with the unit as suffix
+  (`250 ms`).
+- **`QDateTime`** gets a calendar-popup date/time editor, displayed as
+  `yyyy-MM-dd HH:mm:ss`.
 
 For anything that types a **raw pointer** (the ECS browser, mirror mode,
 `VariantEditor::setLinked`), additionally register the bridge next to the RTTR
