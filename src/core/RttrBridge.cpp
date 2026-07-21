@@ -31,22 +31,11 @@ namespace rpe::bridge
         return true;
     }
 
-    static bool isIndexSegment(const QString& seg, int& outIndex)
-    {
-        QString inner;
-        if (!isBracketSegment(seg, inner))
-        {
-            return false;
-        }
-        bool ok = false;
-        outIndex = inner.toInt(&ok);
-        return ok;
-    }
-
     // Build an exact-typed key from its bracket-segment string form. String keys
     // pass through; everything else (arithmetic, enum) goes through RTTR's
-    // string conversion.
-    static rttr::variant assocKeyFromString(const QString& keyStr, rttr::type keyType)
+    // string conversion. `keyType` is const so variant::convert unambiguously
+    // resolves to convert(const type&) rather than the extract-into-T& template.
+    static rttr::variant assocKeyFromString(const QString& keyStr, const rttr::type& keyType)
     {
         if (keyType == rttr::type::get<QString>())
         {
