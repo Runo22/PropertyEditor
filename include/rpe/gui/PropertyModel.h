@@ -35,6 +35,7 @@ namespace rpe
         DecimalsRole,     // int     — invalid QVariant if unset
         IsArrayRole,      // bool    — true for a sequential/array parent node
         DeclaredTypeRole, // rttr::variant wrapping the node's declared rttr::type
+        FlagsRole,        // bool    — true if the enum property carries hint::Flags
     };
 
     // How committed edits are applied.

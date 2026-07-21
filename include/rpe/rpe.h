@@ -15,6 +15,7 @@
 // core
 #include "rpe/core/AccessGuard.h"
 #include "rpe/core/EditorHints.h"
+#include "rpe/core/FlagsSupport.h"
 #include "rpe/core/OptionalSupport.h"
 #include "rpe/core/PairSupport.h"
 #include "rpe/core/PropertyNode.h"

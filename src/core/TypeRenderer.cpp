@@ -5,7 +5,10 @@
 #include <QColor>
 #include <QDateTime>
 #include <QStringList>
+#include <QVector>
+#include <QtGlobal>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -273,6 +276,90 @@ namespace rpe
     bool TypeRenderer::isFilePath(rttr::type t)
     {
         return rawType(t) == rttr::type::get<std::filesystem::path>();
+    }
+
+    qint64 TypeRenderer::enumBits(const rttr::variant& enumValue)
+    {
+        rttr::variant v = unwrap(enumValue);
+        if (!v.get_type().is_enumeration())
+        {
+            return 0;
+        }
+        return v.convert(rttr::type::get<int64_t>()) ? v.get_value<int64_t>() : 0;
+    }
+
+    QString TypeRenderer::flagsToDisplayString(const rttr::variant& vIn)
+    {
+        const rttr::variant v = unwrap(vIn);
+        const rttr::type t = v.get_type();
+        if (!t.is_enumeration())
+        {
+            return toDisplayString(vIn);
+        }
+        const rttr::enumeration en = t.get_enumeration();
+
+        // A value with its own name (single flag, or a named combination) shows as-is.
+        const rttr::string_view exact = en.value_to_name(v);
+        if (!exact.empty())
+        {
+            return QString::fromUtf8(exact.data(), static_cast<int>(exact.size()));
+        }
+
+        const qint64 bits = enumBits(v);
+
+        // Collect (name, bits) for the named values, then greedily match, largest
+        // masks first, so an "All = 7" umbrella wins over its individual bits and a
+        // value only contributes when it adds bits not already covered.
+        struct Flag
+        {
+            QString name;
+            qint64 bits;
+        };
+        QVector<Flag> flags;
+        for (const auto& nm : en.get_names())
+        {
+            const rttr::variant nv = en.name_to_value(nm);
+            const qint64 nb = enumBits(nv);
+            flags.append({ QString::fromUtf8(nm.data(), static_cast<int>(nm.size())), nb });
+        }
+
+        if (bits == 0)
+        {
+            // Prefer a name explicitly bound to 0 (e.g. "None"), else literal "0".
+            for (const auto& f : flags)
+            {
+                if (f.bits == 0)
+                {
+                    return f.name;
+                }
+            }
+            return QStringLiteral("0");
+        }
+
+        // Largest masks first (an umbrella like "All" wins over its bits), then by
+        // bit value ascending so equal-width flags list in a stable, readable order.
+        std::sort(flags.begin(), flags.end(), [](const Flag& a, const Flag& b) {
+            const int pa = qPopulationCount(static_cast<quint64>(a.bits));
+            const int pb = qPopulationCount(static_cast<quint64>(b.bits));
+            return pa != pb ? pa > pb : a.bits < b.bits;
+        });
+
+        QStringList parts;
+        qint64 covered = 0;
+        for (const auto& f : flags)
+        {
+            if (f.bits != 0 && (bits & f.bits) == f.bits && (f.bits & ~covered) != 0)
+            {
+                parts << f.name;
+                covered |= f.bits;
+            }
+        }
+        const qint64 leftover = bits & ~covered;
+        if (leftover != 0)
+        {
+            parts << (QStringLiteral("0x") + QString::number(static_cast<quint64>(leftover), 16));
+        }
+        return parts.isEmpty() ? QStringLiteral("0") : parts.join(QStringLiteral(" | "));
     }
 
     QString TypeRenderer::toDisplayString(const rttr::variant& vIn)

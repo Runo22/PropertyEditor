@@ -17,6 +17,16 @@ namespace rpe
         // Human-readable one-line representation of a value.
         static QString toDisplayString(const rttr::variant& v);
 
+        // Bitmask display of an enumeration value: named bits joined with " | ",
+        // plus "0xNN" for any leftover un-named bits ("Fire | Poison"). An exact
+        // single-name match is shown as-is; zero shows its named value if the enum
+        // defines one, else "0". Falls back to toDisplayString for non-enums.
+        // (Used for properties carrying the hint::Flags metadata.)
+        static QString flagsToDisplayString(const rttr::variant& enumValue);
+
+        // The integer bits of an enumeration value (0 if it isn't one / can't convert).
+        static qint64 enumBits(const rttr::variant& enumValue);
+
         // How many digits floats/doubles show after the decimal point (default 3).
         // Values are formatted fixed-point — never scientific notation — with
         // trailing zeros trimmed; anything that rounds to zero displays as "0"

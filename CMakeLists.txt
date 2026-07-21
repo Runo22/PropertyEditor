@@ -96,7 +96,8 @@ set(RPE_CORE_SOURCES
     src/core/RttrBridge.cpp
     src/core/RttrVariantWrapper.cpp
     src/core/TypeBridge.cpp
-    src/core/OptionalSupport.cpp)
+    src/core/OptionalSupport.cpp
+    src/core/FlagsSupport.cpp)
 
 add_library(rpe_core SHARED ${RPE_CORE_SOURCES})
 add_library(rpe::core ALIAS rpe_core)
@@ -210,6 +211,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_type_support_test test/type_support_test.cpp)
     target_link_libraries(rpe_type_support_test PRIVATE rpe_gui)
+
+    add_executable(rpe_flags_test test/flags_test.cpp)
+    target_link_libraries(rpe_flags_test PRIVATE rpe_gui)
 
     add_executable(rpe_mirror_test test/mirror_test.cpp)
     target_link_libraries(rpe_mirror_test PRIVATE rpe_gui)
