@@ -1,6 +1,7 @@
 #include "rpe/gui/PropertyDelegate.h"
 
 #include "rpe/core/EditorHints.h"
+#include "rpe/core/FlagsSupport.h"
 #include "rpe/core/OptionalSupport.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/EditorWidgets.h"
@@ -210,6 +211,21 @@ namespace rpe
         // enum
         if (t.is_enumeration())
         {
+            // Bitmask enum (hint::Flags): multi-check editor instead of a combo.
+            if (index.data(FlagsRole).toBool())
+            {
+                auto* flagsEd = new FlagsEditor(parent);
+                const rttr::enumeration en = t.get_enumeration();
+                QList<QPair<QString, qint64>> flags;
+                for (const auto& n : en.get_names())
+                {
+                    const rttr::variant nv = en.name_to_value(n);
+                    flags.append({ QString::fromUtf8(n.data(), static_cast<int>(n.size())),
+                                   TypeRenderer::enumBits(nv) });
+                }
+                flagsEd->setFlags(flags);
+                return flagsEd;
+            }
             auto* cb = new QComboBox(parent);
             for (const auto& n : t.get_enumeration().get_names())
             {
@@ -340,6 +356,12 @@ namespace rpe
             fe->setPath(text);
             return;
         }
+        // FlagsEditor derives from QComboBox — check it first.
+        if (auto* flagsEd = qobject_cast<FlagsEditor*>(editor))
+        {
+            flagsEd->setBits(TypeRenderer::enumBits(v));
+            return;
+        }
         if (auto* cb = qobject_cast<QComboBox*>(editor))
         {
             if (t.is_enumeration())
@@ -459,6 +481,32 @@ namespace rpe
                     if (ok)
                     {
                         newVal = static_cast<int64_t>(v);
+                    }
+                }
+            }
+        }
+        // FlagsEditor derives from QComboBox — check it first.
+        else if (auto* flagsEd = qobject_cast<FlagsEditor*>(editor))
+        {
+            if (t.is_enumeration())
+            {
+                const qint64 bits = flagsEd->bits();
+                // A combined mask has no name; only FlagsBridge (RPE_REGISTER_FLAGS)
+                // can turn arbitrary bits back into the exact enum type.
+                newVal = FlagsBridge::build(t, bits);
+                if (!newVal.is_valid())
+                {
+                    // No builder registered: still commit if the result happens to be
+                    // a single named value (name_to_value yields the exact enum type).
+                    const rttr::enumeration en = t.get_enumeration();
+                    for (const auto& n : en.get_names())
+                    {
+                        const rttr::variant nv = en.name_to_value(n);
+                        if (TypeRenderer::enumBits(nv) == bits)
+                        {
+                            newVal = nv;
+                            break;
+                        }
                     }
                 }
             }

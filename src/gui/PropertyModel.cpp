@@ -826,7 +826,10 @@ namespace rpe
                 }
                 if (node->cachedDisplay().isEmpty())
                 {
-                    node->setCachedDisplay(TypeRenderer::toDisplayString(v));
+                    const bool asFlags = v.get_type().is_enumeration()
+                        && metaBool(node->prop(), hint::Flags, false);
+                    node->setCachedDisplay(asFlags ? TypeRenderer::flagsToDisplayString(v)
+                                                   : TypeRenderer::toDisplayString(v));
                 }
                 return node->cachedDisplay();
             }
@@ -898,6 +901,8 @@ namespace rpe
         }
         case IsArrayRole:
             return node->arraySize() >= 0;
+        case FlagsRole:
+            return metaBool(node->prop(), hint::Flags, false);
         case DeclaredTypeRole:
             // The node's schema type, always valid — unlike the live value, which may
             // be absent (not yet mirrored) or a transient editor type mid-edit. The
@@ -931,7 +936,10 @@ namespace rpe
             return false;
         }
 
-        node->setCachedDisplay(TypeRenderer::toDisplayString(node->effectiveValue()));
+        // Invalidate the display cache; the DisplayRole read triggered by the
+        // dataChanged below recomputes it with the correct formatter (e.g. the
+        // flags decomposition, which plain toDisplayString would not apply).
+        node->setCachedDisplay(QString());
         node->clearDirty();
         emit dataChanged(index.siblingAtColumn(0), index.siblingAtColumn(columnCount() - 1));
         return true;

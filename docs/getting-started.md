@@ -95,6 +95,15 @@ A few type-specific behaviours:
   (`250 ms`).
 - **`QDateTime`** gets a calendar-popup date/time editor, displayed as
   `yyyy-MM-dd HH:mm:ss`.
+- **Bitmask / flags enums** — mark the property with
+  `rttr::metadata(rpe::hint::Flags, true)` to show the value decomposed
+  (`Fire | Poison`, with `0xNN` for any un-named leftover bits) and edit it
+  through a multi-check dropdown. Enums are never auto-detected as flags (a
+  plain enum whose values happen to be powers of two would be misread) — the
+  hint is the opt-in. **Editing** a combined value additionally needs the enum
+  registered once with `RPE_REGISTER_FLAGS(Damage);` (see
+  `rpe/core/FlagsSupport.h`): RTTR 0.9.6 cannot build an enum from an integer
+  without the compile-time type. Display works with the hint alone.
 
 For anything that types a **raw pointer** (the ECS browser, mirror mode,
 `VariantEditor::setLinked`), additionally register the bridge next to the RTTR
