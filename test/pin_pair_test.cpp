@@ -114,6 +114,19 @@ int main(int argc, char** argv)
         check("the pair survived the unrelated removal", e.has<Damage>(fire));
     }
 
+    // ── 3. Remove by NAME (rawId 0) → producer collect-then-remove path ──────────
+    // The widget now routes by id, but the by-name producer path stays as a fallback
+    // (legacy rows / the by-name API). It must still remove exactly the named one,
+    // and safely — it collects matches before removing, never mutating mid-each().
+    {
+        ch->queueStructural(rpe::MirrorChannel::StructuralKind::RemoveComponent,
+                            static_cast<qulonglong>(e.id()), QStringLiteral("Armor"));
+        world.progress(0.016f);
+        mirror.pump();
+        check("by-name removal took the named component", !e.has<Armor>());
+        check("the pair still survives the by-name removal", e.has<Damage>(fire));
+    }
+
     mirror.detach();
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;

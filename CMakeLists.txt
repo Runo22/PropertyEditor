@@ -200,6 +200,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_pin_pair_test test/pin_pair_test.cpp)
     target_link_libraries(rpe_pin_pair_test PRIVATE rpe_gui)
 
+    add_executable(rpe_remove_flow_test test/remove_flow_test.cpp)
+    target_link_libraries(rpe_remove_flow_test PRIVATE rpe_gui)
+
     add_executable(rpe_dark_style_shot test/dark_style_shot.cpp)
     target_link_libraries(rpe_dark_style_shot PRIVATE rpe_gui)
 
