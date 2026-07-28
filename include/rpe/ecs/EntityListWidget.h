@@ -1,15 +1,19 @@
 #pragma once
 
+#include <QHash>
+#include <QIcon>
 #include <QPair>
 #include <QVector>
 #include <QWidget>
 
 #include "rpe/core/AccessGuard.h"
+#include "rpe/ecs/MirrorChannel.h"
 #include "rpe/ecs/flecs_prelude.h"
 
 class QListWidget;
 class QLineEdit;
 class QTimer;
+class QToolButton;
 
 namespace rpe
 {
@@ -57,14 +61,26 @@ namespace rpe
         // Display label of the currently selected entity (empty if none).
         QString currentLabel() const;
 
+        // ── Add-entity (prefab spawning) ─────────────────────────────────────────
+        // Show the "Add" button (a spawn picker of prefabs). Off by default.
+        void setEntityAddingEnabled(bool on);
+        // Spawnable prefabs offered by the picker, grouped by their `group` tag.
+        void setAddablePrefabs(const QVector<MirrorChannel::PrefabEntry>& prefabs);
+        // Optional icon shown next to a group header, keyed by the group tag name.
+        void setPrefabGroupIcons(const QHash<QString, QIcon>& icons);
+
     signals:
         void entitySelected(flecs::entity e); // direct mode (world available)
         void entityIdSelected(qulonglong id); // always; mirror mode uses this
         void entityDeselected();
+        // The user picked a prefab to spawn; the host instantiates it (mirror queues
+        // a SpawnPrefab structural, direct mode spawns under the world guard).
+        void spawnPrefabRequested(qulonglong prefabId);
 
     private slots:
         void _refresh();
         void _onSelectionChanged();
+        void _onAddEntityClicked();
 
     private:
         void _setupUi();
@@ -76,7 +92,10 @@ namespace rpe
         flecs::world* _world = nullptr;
         QListWidget* _list = nullptr;
         QLineEdit* _filterEdit = nullptr;
+        QToolButton* _addBtn = nullptr;
         QTimer* _timer = nullptr;
+        QVector<MirrorChannel::PrefabEntry> _prefabs;
+        QHash<QString, QIcon> _groupIcons;
         QString _requiredComponent;
         bool _requiredEnabled = false;
         AccessGuard _guard;

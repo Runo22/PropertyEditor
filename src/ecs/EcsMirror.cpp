@@ -114,6 +114,7 @@ namespace rpe
         _selCompIds.clear();
         _selRows.clear();
         _lastCompRows.clear();
+        _lastPrefabs.clear(); // prefab ids belong to the old world
         _pinRt.clear(); // component ids/types belong to the old world
         _lastPinStr.clear();
         _lastPins.clear();
@@ -290,6 +291,12 @@ namespace rpe
         _ch->queueStructural(MirrorChannel::StructuralKind::RemoveComponent, entity, component);
     }
 
+    void EcsMirror::setSpawnConfigurator(std::function<void(flecs::entity)> fn)
+    {
+        std::lock_guard<std::mutex> lk(_spawnMutex);
+        _spawnConfig = std::move(fn);
+    }
+
     void EcsMirror::setPins(const QVector<PinKey>& pins)
     {
         _ch->setPins(pins);
@@ -408,6 +415,31 @@ namespace rpe
         bool structuralApplied = false;
         for (const MirrorChannel::StructuralEdit& s : in.structurals)
         {
+            // Spawn: no target entity — instantiate a fresh one from the prefab, then
+            // hand it to the host's configurator so it can set/override components
+            // (setting AFTER is_a overrides the prefab's shared values). rawId is the
+            // prefab id.
+            if (s.kind == MirrorChannel::StructuralKind::SpawnPrefab)
+            {
+                const flecs::entity prefab = world.entity(static_cast<flecs::entity_t>(s.rawId));
+                if (!prefab.is_alive())
+                {
+                    continue;
+                }
+                flecs::entity ne = world.entity().is_a(static_cast<flecs::entity_t>(s.rawId));
+                std::function<void(flecs::entity)> cfg;
+                {
+                    std::lock_guard<std::mutex> lk(_spawnMutex);
+                    cfg = _spawnConfig;
+                }
+                if (cfg)
+                {
+                    cfg(ne);
+                }
+                structuralApplied = true;
+                continue;
+            }
+
             flecs::entity e = world.entity(s.entity);
             if (!e.is_alive())
             {
@@ -467,6 +499,7 @@ namespace rpe
             _lastCompRows.clear();
             _lastEntities.clear();
             _lastCatalog.clear();
+            _lastPrefabs.clear();
         }
 
         // The GUI reset its view (re-selected the same entity/component, or its
@@ -482,6 +515,7 @@ namespace rpe
             _ch->publishEntities(_lastEntities);
             _ch->publishComponentRows(_lastCompRows);
             _ch->publishCatalogEntries(_lastCatalog);
+            _ch->publishPrefabs(_lastPrefabs);
         }
 
         // Interest changed → reset per-leaf dedup so the new selection refreshes fully.
@@ -720,6 +754,56 @@ namespace rpe
                 _ch->publishCatalogEntries(catalog);
             }
             _stats.lastCatalogMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - catT0).count();
+
+            // ── Spawnable prefabs (add-entity picker) ─────────────────────────────
+            // On the same cadence: prefab entities, filtered by the required component
+            // (reusing the entity-list filter), each filed under the first host group
+            // tag it carries. Only prefabs with a name are offered (spawn needs a
+            // handle; the id is the spawn key).
+            std::vector<std::pair<QString, uint64_t>> groupTags; // (name, tag id)
+            groupTags.reserve(static_cast<size_t>(in.prefabGroups.size()));
+            for (const QString& g : in.prefabGroups)
+            {
+                // Group tags are arbitrary named entities (plain tags), not necessarily
+                // components — look them up by name/path, not via the component query.
+                const flecs::entity te = world.lookup(g.toUtf8().constData());
+                if (te.is_valid())
+                {
+                    groupTags.emplace_back(g, te.raw_id());
+                }
+            }
+            QVector<MirrorChannel::PrefabEntry> prefabs;
+            flecs::query<> pq = world.query_builder().with(flecs::Prefab).build();
+            pq.each([&](flecs::entity p) {
+                if (_reqId != 0 && !p.has(_reqId))
+                {
+                    return;
+                }
+                const char* pn = p.name();
+                if (!pn || pn[0] == '\0')
+                {
+                    return;
+                }
+                QString group;
+                for (const auto& [gname, gid] : groupTags)
+                {
+                    if (p.has(gid))
+                    {
+                        group = gname;
+                        break;
+                    }
+                }
+                prefabs.append({ static_cast<qulonglong>(p.id()), QString::fromUtf8(pn), group });
+            });
+            std::sort(prefabs.begin(), prefabs.end(),
+                      [](const MirrorChannel::PrefabEntry& a, const MirrorChannel::PrefabEntry& b) {
+                          return a.group != b.group ? a.group < b.group : a.name < b.name;
+                      });
+            if (prefabs != _lastPrefabs)
+            {
+                _lastPrefabs = prefabs;
+                _ch->publishPrefabs(prefabs);
+            }
         }
 
         // ── Pinned watches (independent of the selection) ──────────────────────────

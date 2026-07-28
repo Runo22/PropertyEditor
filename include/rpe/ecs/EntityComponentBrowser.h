@@ -7,8 +7,10 @@
 #include "rpe/ecs/MirrorChannel.h"
 #include "rpe/gui/PropertyModel.h"
 
+#include <QIcon>
 #include <QMetaType>
 #include <QSet>
+#include <QVector>
 #include <QWidget>
 
 #include <memory>
@@ -125,6 +127,27 @@ namespace rpe
             return _settings.allowComponentEditing;
         }
 
+        // ── Add-entity (prefab spawning) ─────────────────────────────────────────
+        // A group tag the "Add entity" picker separates prefabs by, with an optional
+        // icon shown next to the group header.
+        struct PrefabGroup
+        {
+            QString tag;
+            QIcon icon;
+        };
+        // Show the entity-list "Add" button and offer prefabs to spawn. In mirror
+        // mode a pick queues a SpawnPrefab to the sim thread; set the per-instance
+        // component overrides via EcsMirror::setSpawnConfigurator (sim thread).
+        void setEntityAddingEnabled(bool on);
+        bool isEntityAddingEnabled() const
+        {
+            return _entityAddingEnabled;
+        }
+        // The tags the prefab picker groups by (+ optional icons). The tag names are
+        // forwarded to the producer (which computes each prefab's group and filters
+        // the list by the required component); the icons stay GUI-side.
+        void setPrefabGroups(const QVector<PrefabGroup>& groups);
+
         // Bundled get/set of all the above options. setSettings applies every field
         // (filter, snapshot policy, edit policy, component-editing, layout, timers);
         // settings() returns the current configuration.
@@ -199,6 +222,7 @@ namespace rpe
         void _onMirrorPoll();
         void _onEntityIdSelected(qulonglong id);
         void _onComponentNameSelected(const QString& name);
+        void _onSpawnPrefab(qulonglong prefabId);
 
         // component add/remove
         void _onAddComponent(const QString& name);
@@ -250,6 +274,7 @@ namespace rpe
         // resolver addresses components by name, not pair ids).
         QHash<QString, QString> _pairTypeName;
         QHash<QString, qulonglong> _pairRawId; // pair key → flecs pair id (for pinning)
+        bool _entityAddingEnabled = false;
         Settings _settings;
 
         PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)

@@ -105,6 +105,24 @@ namespace rpe
             }
         };
 
+        // A spawnable prefab for the "add entity" picker: its id (the spawn handle),
+        // display name, and the group tag it matched (empty = ungrouped). The group is
+        // computed producer-side from the host-provided group tags (setPrefabGroupTags).
+        struct PrefabEntry
+        {
+            qulonglong id = 0;
+            QString name;
+            QString group;
+            bool operator==(const PrefabEntry& o) const
+            {
+                return id == o.id && name == o.name && group == o.group;
+            }
+            bool operator!=(const PrefabEntry& o) const
+            {
+                return !(*this == o);
+            }
+        };
+
         // A pinned (watched) property, independent of the current selection: any
         // entity + component + leaf path. Pins are mirrored every pump alongside the
         // selected component, so a watch widget can show values from several
@@ -148,7 +166,8 @@ namespace rpe
         enum class StructuralKind
         {
             AddComponent,
-            RemoveComponent
+            RemoveComponent,
+            SpawnPrefab // instantiate a new entity from a prefab (rawId = prefab id)
         };
         struct StructuralEdit
         {
@@ -160,6 +179,13 @@ namespace rpe
         void queueStructural(StructuralKind kind, qulonglong entity, const QString& component);
         // By flecs id — the only way to address a PAIR, and unambiguous for tags.
         void queueStructuralById(StructuralKind kind, qulonglong entity, qulonglong rawId);
+        // Spawn a new entity from prefab `prefabId` (producer runs is_a + configurator).
+        void queueSpawnPrefab(qulonglong prefabId);
+
+        // Tag names the producer groups spawnable prefabs by (a prefab is filed under
+        // the first of these it carries). Also drives which prefabs the "add entity"
+        // picker offers, alongside the existing required-component filter.
+        void setPrefabGroupTags(const QStringList& tags);
 
         // ── GUI thread: pinned watches ───────────────────────────────────────────
         // Replace the full pin set (atomic swap; the producer reads it next pump).
@@ -180,6 +206,8 @@ namespace rpe
         // the "add component" picker. True if changed since the last poll.
         bool pollCatalog(QStringList& out); // legacy: paths only
         bool pollCatalogEntries(QVector<CatalogEntry>& out);
+        // Spawnable prefabs for the "add entity" picker. True if changed since last poll.
+        bool pollPrefabs(QVector<PrefabEntry>& out);
 
         // True until the producing EcsMirror is destroyed.
         bool producerAlive() const
@@ -194,6 +222,7 @@ namespace rpe
             QString component;
             QString required;
             QStringList paths;
+            QStringList prefabGroups;                             // prefab grouping tags
             std::vector<std::pair<QString, rttr::variant>> edits; // drained
             std::vector<StructuralEdit> structurals;              // drained
             QVector<PinKey> pins;                                 // current pin set
@@ -208,6 +237,7 @@ namespace rpe
         void publishPinValues(std::vector<PinValue>&& values);
         void publishCatalog(const QStringList& catalog); // legacy → non-tag entries
         void publishCatalogEntries(const QVector<CatalogEntry>& entries);
+        void publishPrefabs(const QVector<PrefabEntry>& prefabs);
         void markProducerGone()
         {
             _producerAlive.store(false, std::memory_order_release);
@@ -221,6 +251,7 @@ namespace rpe
         QString _inComponent;
         QStringList _inPaths;
         QString _required;
+        QStringList _prefabGroups;
         std::vector<std::pair<QString, rttr::variant>> _edits;
         std::vector<StructuralEdit> _structurals;
         QVector<PinKey> _pins;
@@ -234,6 +265,8 @@ namespace rpe
         bool _outComponentsDirty = false;
         QVector<CatalogEntry> _outCatalog;
         bool _outCatalogDirty = false;
+        QVector<PrefabEntry> _outPrefabs;
+        bool _outPrefabsDirty = false;
         // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
         // consumer can't make this grow unbounded.
         QHash<QString, rttr::variant> _outValues;

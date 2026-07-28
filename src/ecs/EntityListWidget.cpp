@@ -2,11 +2,15 @@
 
 #include "rpe/core/TypeBridge.h"
 
+#include <QFrame>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QTimer>
+#include <QToolButton>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -60,9 +64,24 @@ namespace rpe
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(2);
 
+        // Header row: "Entities" + a labelled "Add" spawn button (shown on demand).
+        auto* headerRow = new QHBoxLayout();
+        headerRow->setContentsMargins(0, 0, 0, 0);
         auto* header = new QLabel(tr("Entities"), this);
         header->setStyleSheet(QStringLiteral("font-weight: bold; padding: 2px 4px;"));
-        layout->addWidget(header);
+        headerRow->addWidget(header, 1);
+
+        _addBtn = new QToolButton(this);
+        _addBtn->setText(tr("Add"));
+        _addBtn->setIcon(QIcon(QStringLiteral(":/rpe/icons/add.png")));
+        _addBtn->setIconSize(QSize(14, 14));
+        _addBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        _addBtn->setStyleSheet(QStringLiteral("QToolButton { padding: 2px 6px; }"));
+        _addBtn->setToolTip(tr("Spawn a new entity from a prefab"));
+        _addBtn->setAutoRaise(true);
+        _addBtn->setVisible(false); // shown only when entity-adding is enabled
+        headerRow->addWidget(_addBtn, 0);
+        layout->addLayout(headerRow);
 
         _filterEdit = new QLineEdit(this);
         _filterEdit->setPlaceholderText(tr("Filter entities…"));
@@ -74,6 +93,109 @@ namespace rpe
 
         connect(_list, &QListWidget::currentItemChanged, this, &EntityListWidget::_onSelectionChanged);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
+        connect(_addBtn, &QToolButton::clicked, this, &EntityListWidget::_onAddEntityClicked);
+    }
+
+    void EntityListWidget::setEntityAddingEnabled(bool on)
+    {
+        _addBtn->setVisible(on);
+    }
+
+    void EntityListWidget::setAddablePrefabs(const QVector<MirrorChannel::PrefabEntry>& prefabs)
+    {
+        _prefabs = prefabs;
+    }
+
+    void EntityListWidget::setPrefabGroupIcons(const QHash<QString, QIcon>& icons)
+    {
+        _groupIcons = icons;
+    }
+
+    void EntityListWidget::_onAddEntityClicked()
+    {
+        // A small popup: a filter box over a tree of spawnable prefabs, grouped by
+        // their group tag (with the host's optional icon on each group header).
+        // Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.
+        auto* popup = new QFrame(this, Qt::Popup);
+        popup->setObjectName(QStringLiteral("rpeAddPopup"));
+        popup->setAttribute(Qt::WA_DeleteOnClose);
+        popup->setFrameShape(QFrame::StyledPanel);
+        auto* lay = new QVBoxLayout(popup);
+        lay->setContentsMargins(4, 4, 4, 4);
+        lay->setSpacing(4);
+
+        auto* search = new QLineEdit(popup);
+        search->setPlaceholderText(tr("Filter prefabs…"));
+        search->setClearButtonEnabled(true);
+        lay->addWidget(search);
+
+        auto* tree = new QTreeWidget(popup);
+        tree->setHeaderHidden(true);
+        tree->setRootIsDecorated(true);
+        lay->addWidget(tree);
+
+        if (_prefabs.isEmpty())
+        {
+            auto* none = new QTreeWidgetItem(tree, { tr("(no prefabs available)") });
+            none->setFlags(Qt::NoItemFlags);
+        }
+        else
+        {
+            QHash<QString, QTreeWidgetItem*> groups;
+            for (const MirrorChannel::PrefabEntry& p : _prefabs)
+            {
+                const QString g = p.group.isEmpty() ? tr("(ungrouped)") : p.group;
+                QTreeWidgetItem*& node = groups[g];
+                if (!node)
+                {
+                    node = new QTreeWidgetItem(tree, { g });
+                    node->setFlags(Qt::ItemIsEnabled);
+                    node->setExpanded(true);
+                    if (const auto it = _groupIcons.constFind(p.group); it != _groupIcons.constEnd())
+                    {
+                        node->setIcon(0, it.value());
+                    }
+                }
+                auto* item = new QTreeWidgetItem(node, { p.name });
+                item->setData(0, Qt::UserRole, p.id); // the spawn handle
+            }
+        }
+
+        auto activate = [this, popup](QTreeWidgetItem* item) {
+            if (!item)
+                return;
+            const qulonglong id = item->data(0, Qt::UserRole).toULongLong();
+            if (id != 0)
+            {
+                emit spawnPrefabRequested(id);
+                popup->close();
+            }
+        };
+        connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
+        connect(tree, &QTreeWidget::itemActivated, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
+
+        connect(search, &QLineEdit::textChanged, tree, [tree](const QString& q) {
+            const QString s = q.trimmed();
+            for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            {
+                QTreeWidgetItem* g = tree->topLevelItem(i);
+                int shown = 0;
+                for (int j = 0; j < g->childCount(); ++j)
+                {
+                    QTreeWidgetItem* c = g->child(j);
+                    const bool match = s.isEmpty() || c->text(0).contains(s, Qt::CaseInsensitive);
+                    c->setHidden(!match);
+                    shown += match ? 1 : 0;
+                }
+                g->setHidden(g->childCount() > 0 && shown == 0);
+            }
+        });
+
+        popup->resize(240, 300);
+        const QPoint below = _addBtn->mapToGlobal(QPoint(0, _addBtn->height()));
+        popup->move(below);
+        popup->show();
+        search->setFocus();
     }
 
     void EntityListWidget::setWorld(flecs::world* world)

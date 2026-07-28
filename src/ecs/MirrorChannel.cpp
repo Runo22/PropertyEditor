@@ -51,6 +51,18 @@ namespace rpe
         _structurals.push_back(StructuralEdit { kind, entity, QString(), rawId });
     }
 
+    void MirrorChannel::queueSpawnPrefab(qulonglong prefabId)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _structurals.push_back(StructuralEdit { StructuralKind::SpawnPrefab, 0, QString(), prefabId });
+    }
+
+    void MirrorChannel::setPrefabGroupTags(const QStringList& tags)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _prefabGroups = tags;
+    }
+
     // ── GUI thread: pinned watches ──────────────────────────────────────────────
 
     void MirrorChannel::setPins(const QVector<PinKey>& pins)
@@ -151,6 +163,18 @@ namespace rpe
         return true;
     }
 
+    bool MirrorChannel::pollPrefabs(QVector<PrefabEntry>& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outPrefabsDirty)
+        {
+            return false;
+        }
+        out = _outPrefabs;
+        _outPrefabsDirty = false;
+        return true;
+    }
+
     std::vector<MirrorChannel::ValueUpdate> MirrorChannel::pollValues()
     {
         std::lock_guard<std::mutex> lk(_m);
@@ -174,6 +198,7 @@ namespace rpe
         in.component = _inComponent;
         in.required = _required;
         in.paths = _inPaths;
+        in.prefabGroups = _prefabGroups;
         in.edits.swap(_edits);
         in.structurals.swap(_structurals);
         in.pins = _pins;
@@ -224,6 +249,13 @@ namespace rpe
         std::lock_guard<std::mutex> lk(_m);
         _outCatalog = entries;
         _outCatalogDirty = true;
+    }
+
+    void MirrorChannel::publishPrefabs(const QVector<PrefabEntry>& prefabs)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _outPrefabs = prefabs;
+        _outPrefabsDirty = true;
     }
 
     void MirrorChannel::publishValues(std::vector<ValueUpdate>&& values)

@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -179,6 +180,13 @@ namespace rpe
         void addComponent(qulonglong entity, const QString& component);
         void removeComponent(qulonglong entity, const QString& component);
 
+        // ── Prefab spawning (add entity) ─────────────────────────────────────────
+        // Called on the SIMULATION thread right after a spawned entity gets is_a(prefab),
+        // so the host can set/override components on the new instance (setting after
+        // is_a overrides the prefab's shared value — the flecs idiom). Runs where the
+        // world is owned; safe to touch the entity directly. Thread-safe to set.
+        void setSpawnConfigurator(std::function<void(flecs::entity)> fn);
+
         // ── GUI thread: pinned watches ───────────────────────────────────────────
         // Pins are mirrored EVERY pump, independent of the selected entity — the
         // backing of a watch widget that shows properties from several entities at
@@ -216,6 +224,10 @@ namespace rpe
         bool _rateAllows();
 
         std::shared_ptr<MirrorChannel> _ch; // shared with the GUI consumer
+
+        std::mutex _spawnMutex;                       // guards _spawnConfig (GUI set / sim read)
+        std::function<void(flecs::entity)> _spawnConfig;
+        QVector<MirrorChannel::PrefabEntry> _lastPrefabs; // publish dedup (sim thread)
 
         // Liveness/synchronisation token shared with the system callback and any
         // deferred install, so they no-op safely if this EcsMirror is destroyed

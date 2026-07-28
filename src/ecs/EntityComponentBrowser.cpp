@@ -70,6 +70,7 @@ namespace rpe
         connect(_entityList, &EntityListWidget::entitySelected, this, &EntityComponentBrowser::_onEntitySelected);
         connect(_entityList, &EntityListWidget::entityDeselected, this, &EntityComponentBrowser::_onEntityDeselected);
         connect(_entityList, &EntityListWidget::entityIdSelected, this, &EntityComponentBrowser::_onEntityIdSelected);
+        connect(_entityList, &EntityListWidget::spawnPrefabRequested, this, &EntityComponentBrowser::_onSpawnPrefab);
         connect(_componentList, &ComponentListWidget::componentSelected, this, &EntityComponentBrowser::_onComponentSelected);
         connect(_componentList, &ComponentListWidget::componentNameSelected, this, &EntityComponentBrowser::_onComponentNameSelected);
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
@@ -194,6 +195,55 @@ namespace rpe
     {
         _settings.allowComponentEditing = on;
         _componentList->setComponentEditingEnabled(on);
+    }
+
+    void EntityComponentBrowser::setEntityAddingEnabled(bool on)
+    {
+        _entityAddingEnabled = on;
+        _entityList->setEntityAddingEnabled(on);
+    }
+
+    void EntityComponentBrowser::setPrefabGroups(const QVector<PrefabGroup>& groups)
+    {
+        QStringList tags;
+        QHash<QString, QIcon> icons;
+        tags.reserve(groups.size());
+        for (const PrefabGroup& g : groups)
+        {
+            tags.append(g.tag);
+            if (!g.icon.isNull())
+            {
+                icons.insert(g.tag, g.icon);
+            }
+        }
+        _entityList->setPrefabGroupIcons(icons); // GUI-side rendering
+        if (_channel)
+        {
+            _channel->setPrefabGroupTags(tags); // producer grouping + filtering
+            _channel->requestResync();
+        }
+    }
+
+    void EntityComponentBrowser::_onSpawnPrefab(qulonglong prefabId)
+    {
+        if (prefabId == 0)
+        {
+            return;
+        }
+        if (_channel)
+        {
+            // Mirror mode: the sim thread instantiates via is_a and runs the host's
+            // configurator (EcsMirror::setSpawnConfigurator).
+            _channel->queueSpawnPrefab(prefabId);
+            _channel->requestResync();
+        }
+        else if (_world)
+        {
+            // Direct mode: the GUI owns the world — spawn under the guard.
+            withGuard(_guard, [&] {
+                _world->entity().is_a(static_cast<flecs::entity_t>(prefabId));
+            });
+        }
     }
 
     void EntityComponentBrowser::setSettings(const Settings& s)
@@ -474,6 +524,12 @@ namespace rpe
         {
             _catalog = catalog;
             _updateAddable();
+        }
+
+        QVector<MirrorChannel::PrefabEntry> prefabs;
+        if (_channel->pollPrefabs(prefabs))
+        {
+            _entityList->setAddablePrefabs(prefabs);
         }
 
         for (auto& u : _channel->pollValues())

@@ -91,6 +91,37 @@ button (popup grouped by namespace, filter box with arrow/Enter navigation)
 and a per-row trash glyph with a two-step confirm. Structural changes are
 applied on the simulation thread in mirror mode.
 
+## Add entities (spawn from prefabs)
+
+`browser.setEntityAddingEnabled(true)` shows an **"Add"** button over the entity
+list. It opens a picker of spawnable **prefabs**, grouped by tag. The list is
+narrowed by the same required-component filter as the entity list — only prefabs
+that carry the required component are offered.
+
+```cpp
+browser.setEntityAddingEnabled(true);
+// group prefabs by these tags (optional icon per group header):
+browser.setPrefabGroups({ { "Enemy", enemyIcon }, { "Prop", QIcon() } });
+```
+
+The producer scans prefab entities, files each under the first of your group
+tags it carries, and publishes the list. Picking one queues a spawn to the
+simulation thread, which instantiates it with `is_a(prefab)` and then calls a
+**configurator you set on the mirror** so you can set/override components on the
+new instance (setting *after* `is_a` overrides the prefab's shared value — the
+flecs idiom):
+
+```cpp
+mirror.setSpawnConfigurator([](flecs::entity e) {
+    e.set<Transform>({ spawnPos });   // per-instance override
+    e.set<Health>({ 100 });
+});
+```
+
+The configurator runs on the simulation thread where the world is owned, so it
+touches the entity directly and safely. In direct mode the pick spawns under the
+world guard instead.
+
 ## Related
 
 - Pin properties to a cross-entity watch list: [pinned-properties.md](pinned-properties.md)
