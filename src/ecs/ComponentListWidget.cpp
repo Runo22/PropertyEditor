@@ -318,10 +318,13 @@ namespace rpe
         _list->setMouseTracking(true); // so the row icon can highlight on hover
         auto* del = new RemoveButtonDelegate(_list);
         del->list = _list;
-        del->onRemove = [this](const QString& name, int kind, qulonglong rawId) {
-            // Data rows keep the historical by-name request; tag/pair rows carry a
-            // flecs id and MUST use it (pairs are unaddressable by name).
-            if (kind != 0 && rawId != 0)
+        del->onRemove = [this](const QString& name, int /*kind*/, qulonglong rawId) {
+            // Prefer the flecs id for EVERY row that carries one (data, tag and pair
+            // rows all do): it removes exactly the clicked component. By-name removal
+            // matches on the short leaf name, so a leaf collision (game.Transform vs
+            // physics.Transform) could take the wrong one — only used as a fallback
+            // for rows with no id.
+            if (rawId != 0)
                 emit removeComponentIdRequested(rawId);
             else if (!name.isEmpty())
                 emit removeComponentRequested(name);

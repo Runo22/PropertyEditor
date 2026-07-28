@@ -440,7 +440,10 @@ namespace rpe
             }
             else // RemoveComponent (by name)
             {
-                // Remove by the component currently on the entity (unambiguous).
+                // Collect matches FIRST, then remove: e.remove() moves the entity to a
+                // new table, so removing inside e.each() (which iterates the current
+                // table's type) would corrupt the walk and could drop the wrong id.
+                std::vector<flecs::id_t> toRemove;
                 e.each([&](flecs::id id) {
                     if (!id.is_entity())
                     {
@@ -449,10 +452,14 @@ namespace rpe
                     const char* cn = id.entity().name();
                     if (cn && s.component == QString::fromUtf8(cn))
                     {
-                        e.remove(id);
-                        structuralApplied = true;
+                        toRemove.push_back(id.raw_id());
                     }
                 });
+                for (const flecs::id_t rid : toRemove)
+                {
+                    e.remove(rid);
+                    structuralApplied = true;
+                }
             }
         }
         if (structuralApplied)
@@ -732,6 +739,39 @@ namespace rpe
                 if (!pe.is_alive())
                 {
                     return false;
+                }
+                // Id-addressed (data-carrying pair): resolve directly by the pair id +
+                // ecs_get_typeid, exactly as the selected-component listing does. Pairs
+                // have no flecs name, so findComponentEntity/resolveByName can't reach
+                // them. NOTE: rttr::type::get<void>() reports is_valid()==true, so a
+                // freshly-defaulted PinResolve.rtype (void) must NOT be treated as
+                // resolved — gate on compId (0 = never resolved) and reject void.
+                if (k.rawId != 0)
+                {
+                    PinResolve pr = _pinRt.value(k.component);
+                    if (pr.compId == 0)
+                    {
+                        const ecs_entity_t tid = ecs_get_typeid(world.c_ptr(), k.rawId);
+                        if (tid == 0)
+                        {
+                            return false;
+                        }
+                        const flecs::string tp = world.entity(tid).path(".", "");
+                        pr.rtype = TypeBridge::resolveByName(tp.c_str() ? tp.c_str() : "");
+                        pr.compId = k.rawId;
+                        if (pr.rtype.is_valid() && pr.rtype != rttr::type::get<void>())
+                        {
+                            _pinRt.insert(k.component, pr);
+                        }
+                    }
+                    tOut = pr.rtype;
+                    cidOut = k.rawId;
+                    if (!tOut.is_valid() || tOut == rttr::type::get<void>())
+                    {
+                        return false;
+                    }
+                    ptrOut = pe.get_mut(k.rawId);
+                    return ptrOut != nullptr;
                 }
                 PinResolve pr = _pinRt.value(k.component);
                 if (pr.compId == 0 || !world.entity(pr.compId).is_alive())

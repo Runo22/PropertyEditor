@@ -197,6 +197,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_pinned_test test/pinned_test.cpp)
     target_link_libraries(rpe_pinned_test PRIVATE rpe_gui)
 
+    add_executable(rpe_pin_pair_test test/pin_pair_test.cpp)
+    target_link_libraries(rpe_pin_pair_test PRIVATE rpe_gui)
+
     add_executable(rpe_dark_style_shot test/dark_style_shot.cpp)
     target_link_libraries(rpe_dark_style_shot PRIVATE rpe_gui)
 
@@ -270,3 +273,22 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_namespaced_components_gui_test test/namespaced_components_gui_test.cpp)
     target_link_libraries(rpe_namespaced_components_gui_test PRIVATE rpe_gui)
 endif()
+
+# ── IDE target organisation ──────────────────────────────────────────────────
+# Group every target this project defines under an "rpe" folder in IDEs that
+# show a target tree (Visual Studio, Xcode, some Qt Creator/CLion views), so the
+# ~30 tests/tools/libs don't clutter the top level. Only targets declared in
+# THIS directory are swept — FetchContent's rttr/flecs live in their own
+# subdirectories and are left as-is.
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+get_property(_rpe_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_t IN LISTS _rpe_targets)
+    get_target_property(_ttype ${_t} TYPE)
+    if(_ttype STREQUAL "EXECUTABLE" AND NOT _t STREQUAL "rpe_demo")
+        # tests, shots, benches and dev tools
+        set_target_properties(${_t} PROPERTIES FOLDER "rpe/tests")
+    else()
+        # rpe_core, rpe_gui, rpe_demo
+        set_target_properties(${_t} PROPERTIES FOLDER "rpe")
+    endif()
+endforeach()

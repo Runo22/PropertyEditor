@@ -196,7 +196,7 @@ namespace rpe
         rows.reserve(components.size());
         for (const QString& c : components)
         {
-            rows.append(ComponentRow { c, QString(), RowKind::Data, 0 });
+            rows.append(ComponentRow { c, QString(), RowKind::Data, 0, QString() });
         }
         publishComponentRows(rows);
     }

@@ -112,10 +112,16 @@ namespace rpe
         struct PinKey
         {
             qulonglong entity = 0;
-            QString component; // full scoped flecs name ("game.Transform")
+            QString component; // full scoped flecs name, or a pair's "Rel (Target)" key
             QString path;      // property dot-path inside the component
+            // Data-carrying pairs have no resolvable flecs name; when set, the producer
+            // resolves the component by this exact id (pair-encoded) + ecs_get_typeid,
+            // instead of by name. 0 for ordinary components (resolved by `component`).
+            qulonglong rawId = 0;
             bool operator==(const PinKey& o) const
             {
+                // Identity is (entity, component, path) — `component` is already unique
+                // per pair ("Rel (Target)"), so rawId is a resolution aid, not identity.
                 return entity == o.entity && component == o.component && path == o.path;
             }
         };

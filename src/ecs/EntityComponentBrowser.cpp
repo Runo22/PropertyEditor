@@ -383,12 +383,13 @@ namespace rpe
             });
             w->setChannel(_channel);
             connect(_propertyEditor, &PropertyEditor::pinRequested, this, [this](const QString& path) {
-                // Pair rows can't be pinned: the pin resolver addresses components
-                // by NAME; a pair needs its id. (Menu action simply no-ops here.)
-                if (_pinWidget && _mirrorEntity != 0 && !_mirrorComponent.isEmpty()
-                    && !_pairTypeName.contains(_mirrorComponent))
+                // Data-carrying pairs pin too: they have no resolvable flecs name, so
+                // the pin carries the pair id (from the row) and the producer resolves
+                // it by id + ecs_get_typeid. Plain components pass rawId 0 (by-name).
+                if (_pinWidget && _mirrorEntity != 0 && !_mirrorComponent.isEmpty())
                 {
-                    _pinWidget->pin(_mirrorEntity, _entityList->currentLabel(), _mirrorComponent, path);
+                    _pinWidget->pin(_mirrorEntity, _entityList->currentLabel(), _mirrorComponent,
+                                    path, _pairRawId.value(_mirrorComponent, 0));
                 }
             });
             connect(_propertyEditor, &PropertyEditor::unpinRequested, this, [this](const QString& path) {
@@ -448,6 +449,7 @@ namespace rpe
             _currentComps.clear();
             _currentTags.clear();
             _pairTypeName.clear();
+            _pairRawId.clear();
             for (const auto& r : compRows)
             {
                 if (r.kind == MirrorChannel::RowKind::Data)
@@ -461,6 +463,7 @@ namespace rpe
                 else if (r.kind == MirrorChannel::RowKind::PairData)
                 {
                     _pairTypeName.insert(r.key(), r.typeName);
+                    _pairRawId.insert(r.key(), r.rawId);
                 }
             }
             _updateAddable();

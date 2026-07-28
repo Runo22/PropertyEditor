@@ -57,7 +57,7 @@ namespace rpe
         void setTitleVisible(bool visible);
 
     public slots:
-        void pin(qulonglong entity, const QString& entityLabel, const QString& component, const QString& path);
+        void pin(qulonglong entity, const QString& entityLabel, const QString& component, const QString& path, qulonglong rawId = 0);
         void unpin(qulonglong entity, const QString& component, const QString& path);
         void clearPins();
         // One poll cycle (also runs on the internal ~30 Hz timer). Public so tests

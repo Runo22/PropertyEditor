@@ -21,9 +21,10 @@ namespace rpe
         enum ItemRole
         {
             EntityRole = Qt::UserRole,      // qulonglong
-            ComponentRole,                  // QString (full scoped name)
+            ComponentRole,                  // QString (full scoped name / pair key)
             PathRole,                       // QString (dot-path)
             LastValueRole,                  // rttr::variant (last mirrored value)
+            RawIdRole,                      // qulonglong (pair id; 0 for plain components)
         };
 
         constexpr int kValueColumn = 2; // Entity | Property | Value
@@ -154,7 +155,7 @@ namespace rpe
 
     bool PinnedPropertiesWidget::isPinned(qulonglong entity, const QString& component, const QString& path) const
     {
-        return _findItem({ entity, component, path }) != nullptr;
+        return _findItem({ entity, component, path, 0 }) != nullptr;
     }
 
     QSet<QString> PinnedPropertiesWidget::pinnedPaths(qulonglong entity, const QString& component) const
@@ -176,7 +177,8 @@ namespace rpe
     {
         return { item->data(0, EntityRole).toULongLong(),
                  item->data(0, ComponentRole).toString(),
-                 item->data(0, PathRole).toString() };
+                 item->data(0, PathRole).toString(),
+                 item->data(0, RawIdRole).toULongLong() };
     }
 
     QTreeWidgetItem* PinnedPropertiesWidget::_findItem(const MirrorChannel::PinKey& key) const
@@ -192,13 +194,15 @@ namespace rpe
         return nullptr;
     }
 
-    void PinnedPropertiesWidget::pin(qulonglong entity, const QString& entityLabel, const QString& component, const QString& path)
+    void PinnedPropertiesWidget::pin(qulonglong entity, const QString& entityLabel,
+                                     const QString& component, const QString& path, qulonglong rawId)
     {
         if (entity == 0 || component.isEmpty() || path.isEmpty() || isPinned(entity, component, path))
         {
             return;
         }
         // Display the leaf component name; the full scoped name stays in the data.
+        // A pair key ("Rel (Target)") has no "." to trim — it shows as-is.
         const int cut = component.lastIndexOf(QLatin1Char('.'));
         const QString compLeaf = cut >= 0 ? component.mid(cut + 1) : component;
 
@@ -212,6 +216,7 @@ namespace rpe
         item->setData(0, EntityRole, entity);
         item->setData(0, ComponentRole, component);
         item->setData(0, PathRole, path);
+        item->setData(0, RawIdRole, rawId);
         item->setFlags(item->flags() | Qt::ItemIsEditable);
         item->setText(kValueColumn, placeholderText()); // until the first value lands
         _updating = false;
@@ -222,7 +227,7 @@ namespace rpe
 
     void PinnedPropertiesWidget::unpin(qulonglong entity, const QString& component, const QString& path)
     {
-        if (QTreeWidgetItem* it = _findItem({ entity, component, path }))
+        if (QTreeWidgetItem* it = _findItem({ entity, component, path, 0 }))
         {
             delete it;
             _pushPins();

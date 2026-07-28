@@ -249,6 +249,7 @@ namespace rpe
         // property tree binds THIS type; pins are disabled for such rows (the pin
         // resolver addresses components by name, not pair ids).
         QHash<QString, QString> _pairTypeName;
+        QHash<QString, qulonglong> _pairRawId; // pair key → flecs pair id (for pinning)
         Settings _settings;
 
         PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)
