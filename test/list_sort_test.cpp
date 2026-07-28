@@ -123,6 +123,41 @@ int main(int argc, char** argv)
               paths == QStringList({ QStringLiteral("physics::Collider"), QStringLiteral("render::Collider"), QStringLiteral("Health") }));
     }
 
+    // ── After deleting the SELECTED component, select its neighbour (not the top) ──
+    {
+        using Row = rpe::MirrorChannel::ComponentRow;
+        using Kind = rpe::MirrorChannel::RowKind;
+        const auto row = [](const char* n) { return Row { QString::fromUtf8(n), QString(), Kind::Data, 0 }; };
+
+        rpe::ComponentListWidget comp;
+        QString sel;
+        QObject::connect(&comp, &rpe::ComponentListWidget::componentNameSelected, &comp,
+                         [&](const QString& n) { sel = n; });
+
+        // Rows sort alphabetically: Aa, Bb, Cc, Dd.
+        comp.setComponentRows({ row("Aa"), row("Bb"), row("Cc"), row("Dd") });
+        auto* lw = comp.findChild<QListWidget*>();
+
+        // Select the 3rd (Cc), then "delete" it → the neighbour that shifts up (Dd)
+        // is selected, NOT the first row (Aa).
+        lw->setCurrentRow(2);
+        check("Cc selected", sel == QStringLiteral("Cc"));
+        comp.setComponentRows({ row("Aa"), row("Bb"), row("Dd") });
+        check("deleting the selected row selects the next neighbour (Dd), not the top",
+              comp.currentComponentName() == QStringLiteral("Dd") && sel == QStringLiteral("Dd"));
+
+        // Delete the now-last selected (Dd) → falls back to the previous one (Bb).
+        comp.setComponentRows({ row("Aa"), row("Bb") });
+        check("deleting the last selected row selects the previous (Bb)",
+              comp.currentComponentName() == QStringLiteral("Bb") && sel == QStringLiteral("Bb"));
+
+        // Deleting a NON-selected row keeps the current selection put.
+        comp.setComponentRows({ row("Aa"), row("Bb"), row("Ee") });
+        check("Bb still selected after adding a row", comp.currentComponentName() == QStringLiteral("Bb"));
+        comp.setComponentRows({ row("Bb"), row("Ee") }); // drop Aa (not selected)
+        check("deleting a non-selected row keeps the selection", comp.currentComponentName() == QStringLiteral("Bb"));
+    }
+
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;
 }

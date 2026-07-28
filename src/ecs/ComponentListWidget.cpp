@@ -770,13 +770,17 @@ namespace rpe
         _mirrorRows = rows;
         _components.clear(); // mirror mode has no world-backed infos
 
-        // Preserve selection across the rebuild by PATH (Qt::UserRole).
+        // Preserve selection across the rebuild by PATH (Qt::UserRole). Also remember
+        // its row, so if that component was DELETED we can select the neighbour that
+        // took its place rather than snapping back to the top of the list.
         const QString prevSelPath = _list->currentItem() ? _list->currentItem()->data(Qt::UserRole).toString() : QString();
+        const int prevSelRow = _list->currentRow();
 
         _list->blockSignals(true);
         _list->clear();
         QListWidgetItem* reselect = nullptr;
         QListWidgetItem* firstData = nullptr;
+        QVector<QListWidgetItem*> selectables; // in row order
         for (const auto& r : rows)
         {
             auto* item = new QListWidgetItem(rowDisplay(r), _list);
@@ -791,6 +795,7 @@ namespace rpe
                 {
                     firstData = item;
                 }
+                selectables.append(item);
                 if (r.key() == prevSelPath)
                 {
                     reselect = item;
@@ -815,10 +820,29 @@ namespace rpe
 
         if (reselect)
         {
+            // The selected component survived → keep it.
             _list->setCurrentItem(reselect);
+        }
+        else if (!prevSelPath.isEmpty() && !selectables.isEmpty())
+        {
+            // A component WAS selected but is gone (deleted) → select its neighbour:
+            // the first selectable at or after its old row (the one that shifted up
+            // into the slot), else the last selectable (it was the last). Snapping to
+            // the top instead would yank the inspector away from where the user was.
+            QListWidgetItem* pick = selectables.last();
+            for (QListWidgetItem* it : selectables)
+            {
+                if (_list->row(it) >= prevSelRow)
+                {
+                    pick = it;
+                    break;
+                }
+            }
+            _list->setCurrentItem(pick);
         }
         else if (firstData)
         {
+            // Nothing was selected before (initial load) → default to the first.
             _list->setCurrentItem(firstData);
         }
         else
