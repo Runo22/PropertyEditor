@@ -160,6 +160,15 @@ namespace rpe
         }
     }
 
+    void PropertyModel::_forgetNodes(PropertyNode* node)
+    {
+        for (auto* child : node->children())
+        {
+            _forgetNodes(child);
+        }
+        _nodeByPath.remove(node->path());
+    }
+
     // ── refresh (hot path) ───────────────────────────────────────────────────────────
 
     void PropertyModel::refresh(const rttr::instance& obj)
@@ -323,7 +332,7 @@ namespace rpe
             beginRemoveRows(nodeIdx, 0, node->children().size() - 1);
             for (auto* ch : node->children())
             {
-                _nodeByPath.remove(ch->path());
+                _forgetNodes(ch); // the element AND its struct sub-fields
             }
             qDeleteAll(node->children());
             node->children().clear();
@@ -348,6 +357,7 @@ namespace rpe
                 if (expand && !TypeRenderer::isSequential(valueType))
                 {
                     _buildTree(elem, valueType, elemPath);
+                    _collectNodes(elem, _nodeByPath); // register sub-fields by path (see arrays)
                 }
             }
             endInsertRows();
@@ -386,7 +396,7 @@ namespace rpe
             beginRemoveRows(nodeIdx, 0, oldSz - 1);
             for (auto* ch : node->children())
             {
-                _nodeByPath.remove(ch->path());
+                _forgetNodes(ch); // the element AND its struct sub-fields (see rebuild)
             }
             qDeleteAll(node->children());
             node->children().clear();
@@ -414,6 +424,11 @@ namespace rpe
                 if (expand && !TypeRenderer::isSequential(elemType))
                 {
                     _buildTree(elem, elemType, elemPath);
+                    // Register the struct's sub-fields by path too — otherwise a leaf
+                    // like "items.[0].v" is unreachable by _findNode, so a mirrored
+                    // per-leaf update (setPropertyValue) for it is silently dropped and
+                    // the row only refreshes on a full-vector resend (e.g. re-select).
+                    _collectNodes(elem, _nodeByPath);
                 }
             }
             endInsertRows();

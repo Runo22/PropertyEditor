@@ -221,6 +221,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_display_format_test test/display_format_test.cpp)
     target_link_libraries(rpe_display_format_test PRIVATE rpe_core)
 
+    add_executable(rpe_nested_array_update_test test/nested_array_update_test.cpp)
+    target_link_libraries(rpe_nested_array_update_test PRIVATE rpe_gui)
+
     add_executable(rpe_struct_summary_test test/struct_summary_test.cpp)
     target_link_libraries(rpe_struct_summary_test PRIVATE rpe_gui)
 

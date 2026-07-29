@@ -168,6 +168,7 @@ namespace rpe
         bool _emitDirtyRanges(PropertyNode* parent);
         QString _structSummary(PropertyNode* node) const;
         void _collectNodes(PropertyNode* node, QHash<QString, PropertyNode*>& out) const;
+        void _forgetNodes(PropertyNode* node); // remove node + its subtree from _nodeByPath
         PropertyNode* _findNode(const QString& path) const;
         bool _applyEdit(PropertyNode* node, const rttr::variant& newVal);
 
