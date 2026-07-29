@@ -259,6 +259,23 @@ namespace rpe
         _componentList->setContextActions(wrapped);
     }
 
+    void EntityComponentBrowser::setEntityMenuHook(std::function<void(qulonglong, QMenu&)> hook)
+    {
+        _entityList->setContextMenuHook(std::move(hook));
+    }
+
+    void EntityComponentBrowser::setComponentMenuHook(
+        std::function<void(qulonglong, const QString&, qulonglong, QMenu&)> hook)
+    {
+        _componentList->setContextMenuHook([this, hook](const QString& key, qulonglong rawId, QMenu& menu) {
+            const qulonglong id = _mirrorEntity != 0
+                ? _mirrorEntity
+                : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
+            if (hook)
+                hook(id, key, rawId, menu);
+        });
+    }
+
     void EntityComponentBrowser::_onRemoveEntity(qulonglong entityId)
     {
         if (entityId == 0)

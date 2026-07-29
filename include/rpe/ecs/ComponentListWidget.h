@@ -19,6 +19,7 @@ class QToolButton;
 class QStyledItemDelegate;
 class QEvent;
 class QPoint;
+class QMenu;
 
 namespace rpe
 {
@@ -89,6 +90,9 @@ namespace rpe
             std::function<void(const QString& key, qulonglong rawId)> callback;
         };
         void setContextActions(const QVector<MenuAction>& actions);
+        // Dynamic hook: called when the component right-click menu is built, with the
+        // clicked row's key + flecs id and the live QMenu (host adds its own entries).
+        void setContextMenuHook(std::function<void(const QString& key, qulonglong rawId, QMenu& menu)> hook);
 
     signals:
         void componentSelected(ComponentInfo info);      // direct mode (world available)
@@ -120,6 +124,7 @@ namespace rpe
         QVector<MirrorChannel::ComponentRow> _mirrorRows; // last externally-fed set (dedup)
         QVector<MirrorChannel::CatalogEntry> _addable;    // "+" picker entries
         QVector<MenuAction> _contextActions;
+        std::function<void(const QString&, qulonglong, QMenu&)> _menuHook;
         bool _editingEnabled = false;
         AccessGuard _guard;
     };

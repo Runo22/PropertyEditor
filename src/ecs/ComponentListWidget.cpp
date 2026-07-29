@@ -349,6 +349,11 @@ namespace rpe
         _contextActions = actions;
     }
 
+    void ComponentListWidget::setContextMenuHook(std::function<void(const QString&, qulonglong, QMenu&)> hook)
+    {
+        _menuHook = std::move(hook);
+    }
+
     void ComponentListWidget::_onContextMenu(const QPoint& pos)
     {
         QListWidgetItem* item = _list->itemAt(pos);
@@ -386,6 +391,10 @@ namespace rpe
                 const auto cb = a.callback;
                 connect(act, &QAction::triggered, this, [cb, key, rawId] { cb(key, rawId); });
             }
+        }
+        if (_menuHook)
+        {
+            _menuHook(key, rawId, menu);
         }
         if (!menu.isEmpty())
         {

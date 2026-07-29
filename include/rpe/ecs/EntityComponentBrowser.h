@@ -21,6 +21,7 @@
 class QSplitter;
 class QCheckBox;
 class QTimer;
+class QMenu;
 class QVBoxLayout;
 
 namespace rpe
@@ -160,6 +161,14 @@ namespace rpe
         // Add an app-specific entry to the COMPONENT right-click menu (runs with the
         // selected entity's id, the component key and its flecs id).
         void addComponentAction(const ComponentAction& action);
+
+        // Dynamic menu hooks — called each time a right-click menu is built, handed
+        // the live QMenu so the host can add entity-/component-specific entries at
+        // open time (conditional labels, submenus, …). More flexible than the static
+        // addEntityAction / addComponentAction; both can be used together.
+        void setEntityMenuHook(std::function<void(qulonglong entityId, QMenu& menu)> hook);
+        void setComponentMenuHook(
+            std::function<void(qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu)> hook);
 
         // Bundled get/set of all the above options. setSettings applies every field
         // (filter, snapshot policy, edit policy, component-editing, layout, timers);

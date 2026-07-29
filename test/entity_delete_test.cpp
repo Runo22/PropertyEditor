@@ -9,8 +9,10 @@
 
 #include <QApplication>
 #include <QListWidget>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QStyleOptionViewItem>
+#include <QTimer>
 
 #include <cstdio>
 
@@ -91,12 +93,36 @@ int main(int argc, char** argv)
         check("no delete when removing is disabled", removed == 0ull);
     }
 
-    // ── 2. Custom context actions are accepted (stored without crashing) ───────
+    // ── 2. The dynamic context-menu hook is invoked with the clicked entity id ─
     {
         rpe::EntityListWidget w;
-        qulonglong acted = 0;
-        w.setContextActions({ { QStringLiteral("Focus"), QIcon(), [&](qulonglong id) { acted = id; } } });
-        check("setContextActions accepts a custom entry", acted == 0); // not invoked yet
+        w.setEntries({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") } });
+        w.resize(220, 200);
+        w.show();
+        QApplication::processEvents();
+        auto* lw = w.findChild<QListWidget*>();
+
+        qulonglong hookedId = 0;
+        int menuItemsSeen = -1;
+        w.setContextActions({ { QStringLiteral("Focus"), QIcon(), [](qulonglong) {} } });
+        w.setContextMenuHook([&](qulonglong id, QMenu& menu) {
+            hookedId = id;                              // host sees the clicked entity
+            menu.addAction(QStringLiteral("Custom op")); // and can add its own buttons
+            menuItemsSeen = menu.actions().size();       // static "Focus" + this one
+        });
+
+        // Menu is exec()-modal; a 0-delay timer (fires inside exec's nested loop)
+        // dismisses it so the test doesn't block.
+        QTimer::singleShot(0, [] {
+            if (auto* pop = QApplication::activePopupWidget())
+                pop->close();
+        });
+        const QModelIndex idx = lw->model()->index(0, 0); // Alpha, id 10
+        const QPoint pos = lw->visualRect(idx).center();
+        QMetaObject::invokeMethod(&w, "_onContextMenu", Qt::DirectConnection, Q_ARG(QPoint, pos));
+
+        check("menu hook runs with the clicked entity id", hookedId == 10ull);
+        check("host could add a button (menu had the custom entry)", menuItemsSeen >= 2);
     }
 
     // ── 3. Mirror: DestroyEntity actually destroys the entity ──────────────────

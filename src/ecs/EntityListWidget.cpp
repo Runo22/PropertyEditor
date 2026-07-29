@@ -247,6 +247,11 @@ namespace rpe
         _contextActions = actions;
     }
 
+    void EntityListWidget::setContextMenuHook(std::function<void(qulonglong, QMenu&)> hook)
+    {
+        _menuHook = std::move(hook);
+    }
+
     void EntityListWidget::_onContextMenu(const QPoint& pos)
     {
         QListWidgetItem* item = _list->itemAt(pos);
@@ -280,6 +285,11 @@ namespace rpe
                 const auto cb = a.callback;
                 connect(act, &QAction::triggered, this, [cb, id] { cb(id); });
             }
+        }
+        // Dynamic host hook: build entity-specific entries at open time.
+        if (_menuHook)
+        {
+            _menuHook(id, menu);
         }
         if (!menu.isEmpty())
         {

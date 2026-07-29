@@ -16,6 +16,7 @@ class QLineEdit;
 class QTimer;
 class QToolButton;
 class QStyledItemDelegate;
+class QMenu;
 
 namespace rpe
 {
@@ -77,6 +78,11 @@ namespace rpe
         void setEntityRemovingEnabled(bool on);
         // Extra right-click entries (run app-specific work on the clicked entity).
         void setContextActions(const QVector<EntityAction>& actions);
+        // Dynamic hook: called each time the entity right-click menu is built, with
+        // the clicked entity id and the live QMenu, so the host can add whatever
+        // buttons/submenus it wants — conditional on that entity. Runs after the
+        // built-in Delete and any static setContextActions entries.
+        void setContextMenuHook(std::function<void(qulonglong entityId, QMenu& menu)> hook);
 
     signals:
         void entitySelected(flecs::entity e); // direct mode (world available)
@@ -110,6 +116,7 @@ namespace rpe
         QVector<MirrorChannel::PrefabEntry> _prefabs;
         QHash<QString, QIcon> _groupIcons;
         QVector<EntityAction> _contextActions;
+        std::function<void(qulonglong, QMenu&)> _menuHook;
         QString _requiredComponent;
         bool _requiredEnabled = false;
         AccessGuard _guard;
