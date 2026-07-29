@@ -57,6 +57,12 @@ namespace rpe
         _structurals.push_back(StructuralEdit { StructuralKind::SpawnPrefab, 0, QString(), prefabId });
     }
 
+    void MirrorChannel::queueDestroyEntity(qulonglong entity)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _structurals.push_back(StructuralEdit { StructuralKind::DestroyEntity, entity, QString(), 0 });
+    }
+
     void MirrorChannel::setPrefabGroupTags(const QStringList& tags)
     {
         std::lock_guard<std::mutex> lk(_m);

@@ -2,6 +2,7 @@
 
 #include "rpe/core/TypeBridge.h"
 
+#include <QAction>
 #include <QEvent>
 #include <QFrame>
 #include <QGuiApplication>
@@ -12,6 +13,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
@@ -334,10 +336,61 @@ namespace rpe
         // Revert a pending delete-confirm when the list loses focus (clicked away).
         _list->installEventFilter(this);
         _list->viewport()->installEventFilter(this);
+        _list->setContextMenuPolicy(Qt::CustomContextMenu);
         layout->addWidget(_list, 1);
 
         connect(_list, &QListWidget::currentItemChanged, this, &ComponentListWidget::_onSelectionChanged);
+        connect(_list, &QListWidget::customContextMenuRequested, this, &ComponentListWidget::_onContextMenu);
         connect(_addBtn, &QToolButton::clicked, this, &ComponentListWidget::_onAddClicked);
+    }
+
+    void ComponentListWidget::setContextActions(const QVector<MenuAction>& actions)
+    {
+        _contextActions = actions;
+    }
+
+    void ComponentListWidget::_onContextMenu(const QPoint& pos)
+    {
+        QListWidgetItem* item = _list->itemAt(pos);
+        if (!item)
+        {
+            return;
+        }
+        const QString key = item->data(Qt::UserRole).toString();
+        const qulonglong rawId = item->data(CompRawIdRole).toULongLong();
+        static_cast<RemoveButtonDelegate*>(_rowDelegate)->clearConfirm();
+
+        QMenu menu(this);
+        if (_editingEnabled)
+        {
+            // Same removal identity as the trash glyph: by id when the row has one,
+            // else by name (see the delegate's onRemove routing).
+            QAction* rm = menu.addAction(QIcon(QStringLiteral(":/rpe/icons/remove.png")), tr("Remove component"));
+            const QString name = item->data(Qt::DisplayRole).toString();
+            connect(rm, &QAction::triggered, this, [this, key, rawId, name] {
+                if (rawId != 0)
+                    emit removeComponentIdRequested(rawId);
+                else if (!name.isEmpty())
+                    emit removeComponentRequested(name);
+            });
+        }
+        if (!_contextActions.isEmpty())
+        {
+            if (_editingEnabled)
+                menu.addSeparator();
+            for (const MenuAction& a : _contextActions)
+            {
+                if (a.label.isEmpty() || !a.callback)
+                    continue;
+                QAction* act = a.icon.isNull() ? menu.addAction(a.label) : menu.addAction(a.icon, a.label);
+                const auto cb = a.callback;
+                connect(act, &QAction::triggered, this, [cb, key, rawId] { cb(key, rawId); });
+            }
+        }
+        if (!menu.isEmpty())
+        {
+            menu.exec(_list->viewport()->mapToGlobal(pos));
+        }
     }
 
     bool ComponentListWidget::eventFilter(QObject* obj, QEvent* ev)

@@ -479,6 +479,12 @@ namespace rpe
             {
                 continue;
             }
+            if (s.kind == MirrorChannel::StructuralKind::DestroyEntity)
+            {
+                e.destruct();
+                structuralApplied = true;
+                continue;
+            }
             // By-id form: exact, and the ONLY way to address a pair. Also used for
             // tag rows so a leaf-name collision can never remove the wrong thing.
             if (s.rawId != 0)

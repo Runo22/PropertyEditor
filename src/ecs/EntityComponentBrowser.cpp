@@ -73,6 +73,7 @@ namespace rpe
         connect(_entityList, &EntityListWidget::entityDeselected, this, &EntityComponentBrowser::_onEntityDeselected);
         connect(_entityList, &EntityListWidget::entityIdSelected, this, &EntityComponentBrowser::_onEntityIdSelected);
         connect(_entityList, &EntityListWidget::spawnPrefabRequested, this, &EntityComponentBrowser::_onSpawnPrefab);
+        connect(_entityList, &EntityListWidget::removeEntityRequested, this, &EntityComponentBrowser::_onRemoveEntity);
         connect(_componentList, &ComponentListWidget::componentSelected, this, &EntityComponentBrowser::_onComponentSelected);
         connect(_componentList, &ComponentListWidget::componentNameSelected, this, &EntityComponentBrowser::_onComponentNameSelected);
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
@@ -223,6 +224,61 @@ namespace rpe
         {
             _channel->setPrefabGroupTags(tags); // producer grouping + filtering
             _channel->requestResync();
+        }
+    }
+
+    void EntityComponentBrowser::setEntityRemovingEnabled(bool on)
+    {
+        _entityList->setEntityRemovingEnabled(on);
+    }
+
+    void EntityComponentBrowser::addEntityAction(const EntityAction& action)
+    {
+        _entityActions.append(action);
+        _entityList->setContextActions(_entityActions);
+    }
+
+    void EntityComponentBrowser::addComponentAction(const ComponentAction& action)
+    {
+        _componentActions.append(action);
+        // Wrap each host action so the widget-level callback (key, rawId) forwards the
+        // CURRENTLY selected entity id, read at click time.
+        QVector<ComponentListWidget::MenuAction> wrapped;
+        wrapped.reserve(_componentActions.size());
+        for (const ComponentAction& a : _componentActions)
+        {
+            const auto cb = a.callback;
+            wrapped.append({ a.label, a.icon, [this, cb](const QString& key, qulonglong rawId) {
+                                const qulonglong id = _mirrorEntity != 0
+                                    ? _mirrorEntity
+                                    : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
+                                if (cb)
+                                    cb(id, key, rawId);
+                            } });
+        }
+        _componentList->setContextActions(wrapped);
+    }
+
+    void EntityComponentBrowser::_onRemoveEntity(qulonglong entityId)
+    {
+        if (entityId == 0)
+        {
+            return;
+        }
+        if (_channel)
+        {
+            _channel->queueDestroyEntity(entityId);
+            _channel->requestResync();
+        }
+        else if (_world)
+        {
+            withGuard(_guard, [&] {
+                flecs::entity e = _world->entity(static_cast<flecs::entity_t>(entityId));
+                if (e.is_alive())
+                {
+                    e.destruct();
+                }
+            });
         }
     }
 

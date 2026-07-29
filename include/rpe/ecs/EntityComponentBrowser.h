@@ -5,6 +5,7 @@
 #include "rpe/core/RttrVariantWrapper.h"
 #include "rpe/ecs/ComponentListWidget.h"
 #include "rpe/ecs/MirrorChannel.h"
+#include "rpe/ecs/RowActions.h"
 #include "rpe/gui/PropertyModel.h"
 
 #include <QIcon>
@@ -148,6 +149,18 @@ namespace rpe
         // the list by the required component); the icons stay GUI-side.
         void setPrefabGroups(const QVector<PrefabGroup>& groups);
 
+        // ── Deletion + custom context-menu actions ───────────────────────────────
+        // Show a per-row trash glyph and a "Delete entity" right-click entry (mirror
+        // mode queues a destroy on the sim thread; direct mode destructs under the
+        // guard). Off by default.
+        void setEntityRemovingEnabled(bool on);
+        // Add an app-specific entry to the ENTITY right-click menu (runs on the GUI
+        // thread with the clicked entity's id). Sits beside the built-in Delete.
+        void addEntityAction(const EntityAction& action);
+        // Add an app-specific entry to the COMPONENT right-click menu (runs with the
+        // selected entity's id, the component key and its flecs id).
+        void addComponentAction(const ComponentAction& action);
+
         // Bundled get/set of all the above options. setSettings applies every field
         // (filter, snapshot policy, edit policy, component-editing, layout, timers);
         // settings() returns the current configuration.
@@ -223,6 +236,7 @@ namespace rpe
         void _onEntityIdSelected(qulonglong id);
         void _onComponentNameSelected(const QString& name);
         void _onSpawnPrefab(qulonglong prefabId);
+        void _onRemoveEntity(qulonglong entityId);
 
         // component add/remove
         void _onAddComponent(const QString& name);
@@ -275,6 +289,8 @@ namespace rpe
         QHash<QString, QString> _pairTypeName;
         QHash<QString, qulonglong> _pairRawId; // pair key → flecs pair id (for pinning)
         bool _entityAddingEnabled = false;
+        QVector<EntityAction> _entityActions;
+        QVector<ComponentAction> _componentActions;
         Settings _settings;
 
         PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)

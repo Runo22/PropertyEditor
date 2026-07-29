@@ -2,20 +2,27 @@
 
 #include "rpe/core/TypeBridge.h"
 
+#include <QAction>
+#include <QApplication>
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QScreen>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QScreen>
+#include <QStyledItemDelegate>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 
 namespace rpe
 {
@@ -64,6 +71,107 @@ namespace rpe
             }
             return QStringLiteral("#%1").arg(e.id());
         }
+
+        // Per-row trash affordance for the entity list, with the same two-step
+        // confirm as the component list: first click on the trailing glyph arms the
+        // row (warning-coloured check), a second click deletes; clicking elsewhere or
+        // losing focus reverts. Keyed on the row's entity id (Qt::UserRole).
+        class EntityTrashDelegate : public QStyledItemDelegate
+        {
+        public:
+            using QStyledItemDelegate::QStyledItemDelegate;
+
+            bool enabled = false;
+            qulonglong confirmId = 0; // entity currently armed for delete (0 = none)
+            QListWidget* list = nullptr;
+            std::function<void(qulonglong)> onRemove;
+
+            static QRect glyphRect(const QStyleOptionViewItem& opt)
+            {
+                const int s = opt.rect.height();
+                return QRect(opt.rect.right() - s, opt.rect.top(), s, s);
+            }
+            void repaint() const
+            {
+                if (list)
+                    list->viewport()->update();
+            }
+            void clearConfirm()
+            {
+                if (confirmId != 0)
+                {
+                    confirmId = 0;
+                    repaint();
+                }
+            }
+
+            void paint(QPainter* p, const QStyleOptionViewItem& opt, const QModelIndex& index) const override
+            {
+                QStyleOptionViewItem o(opt);
+                if (enabled)
+                    o.rect.adjust(0, 0, -o.rect.height(), 0); // reserve the glyph square
+                QStyledItemDelegate::paint(p, o, index);
+                if (!enabled)
+                    return;
+
+                const QRect cell = glyphRect(opt);
+                const int isz = cell.height() * 70 / 100;
+                const QRect btn(cell.x() + (cell.width() - isz) / 2, cell.y() + (cell.height() - isz) / 2, isz, isz);
+                const qulonglong id = index.data(Qt::UserRole).toULongLong();
+                p->save();
+                p->setRenderHint(QPainter::Antialiasing, true);
+                p->setRenderHint(QPainter::SmoothPixmapTransform, true);
+                static const QPixmap trashPm(QStringLiteral(":/rpe/icons/remove.png"));
+                static const QPixmap confirmPm(QStringLiteral(":/rpe/icons/confirm.png"));
+                if (id != 0 && id == confirmId)
+                {
+                    p->setPen(Qt::NoPen);
+                    p->setBrush(QColor(0xD9, 0x53, 0x4F));
+                    p->drawRoundedRect(btn, 3, 3);
+                    p->drawPixmap(btn, confirmPm);
+                }
+                else
+                {
+                    const bool hover = opt.state & QStyle::State_MouseOver;
+                    if (hover)
+                    {
+                        QColor bg = opt.palette.color(QPalette::Text);
+                        bg.setAlpha(32);
+                        p->setPen(Qt::NoPen);
+                        p->setBrush(bg);
+                        p->drawRoundedRect(btn, 3, 3);
+                    }
+                    p->setOpacity(hover ? 1.0 : 0.7);
+                    p->drawPixmap(btn, trashPm);
+                }
+                p->restore();
+            }
+
+            bool editorEvent(QEvent* ev, QAbstractItemModel*, const QStyleOptionViewItem& opt, const QModelIndex& index) override
+            {
+                if (!enabled || ev->type() != QEvent::MouseButtonRelease)
+                    return false;
+                auto* me = static_cast<QMouseEvent*>(ev);
+                const qulonglong id = index.data(Qt::UserRole).toULongLong();
+                if (me->button() == Qt::LeftButton && id != 0 && glyphRect(opt).contains(me->pos()))
+                {
+                    if (id == confirmId)
+                    {
+                        confirmId = 0;
+                        if (onRemove)
+                            onRemove(id); // second click → delete
+                    }
+                    else
+                    {
+                        confirmId = id; // first click → arm
+                    }
+                    repaint();
+                    return true; // consume: no selection change
+                }
+                clearConfirm();
+                return false;
+            }
+        };
     } // namespace
 
     EntityListWidget::EntityListWidget(QWidget* parent)
@@ -106,11 +214,77 @@ namespace rpe
         layout->addWidget(_filterEdit);
 
         _list = new QListWidget(this);
+        _list->setMouseTracking(true); // so the trash glyph highlights on hover
+        auto* del = new EntityTrashDelegate(_list);
+        del->list = _list;
+        del->onRemove = [this](qulonglong id) {
+            if (id != 0)
+                emit removeEntityRequested(id);
+        };
+        _list->setItemDelegate(del);
+        _rowDelegate = del;
+        _list->setContextMenuPolicy(Qt::CustomContextMenu);
         layout->addWidget(_list, 1);
 
         connect(_list, &QListWidget::currentItemChanged, this, &EntityListWidget::_onSelectionChanged);
+        connect(_list, &QListWidget::customContextMenuRequested, this, &EntityListWidget::_onContextMenu);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
         connect(_addBtn, &QToolButton::clicked, this, &EntityListWidget::_onAddEntityClicked);
+    }
+
+    void EntityListWidget::setEntityRemovingEnabled(bool on)
+    {
+        if (auto* del = static_cast<EntityTrashDelegate*>(_rowDelegate))
+        {
+            del->enabled = on;
+            del->clearConfirm();
+            _list->viewport()->update();
+        }
+    }
+
+    void EntityListWidget::setContextActions(const QVector<EntityAction>& actions)
+    {
+        _contextActions = actions;
+    }
+
+    void EntityListWidget::_onContextMenu(const QPoint& pos)
+    {
+        QListWidgetItem* item = _list->itemAt(pos);
+        if (!item)
+        {
+            return;
+        }
+        const qulonglong id = item->data(Qt::UserRole).toULongLong();
+        if (id == 0)
+        {
+            return;
+        }
+        static_cast<EntityTrashDelegate*>(_rowDelegate)->clearConfirm();
+
+        QMenu menu(this);
+        const bool removable = static_cast<EntityTrashDelegate*>(_rowDelegate)->enabled;
+        if (removable)
+        {
+            QAction* del = menu.addAction(QIcon(QStringLiteral(":/rpe/icons/remove.png")), tr("Delete entity"));
+            connect(del, &QAction::triggered, this, [this, id] { emit removeEntityRequested(id); });
+        }
+        if (!_contextActions.isEmpty())
+        {
+            if (removable)
+                menu.addSeparator();
+            for (const EntityAction& a : _contextActions)
+            {
+                if (a.label.isEmpty() || !a.callback)
+                    continue;
+                QAction* act = a.icon.isNull() ? menu.addAction(a.label) : menu.addAction(a.icon, a.label);
+                const auto cb = a.callback;
+                connect(act, &QAction::triggered, this, [cb, id] { cb(id); });
+            }
+        }
+        if (!menu.isEmpty())
+        {
+            menu.exec(_list->viewport()->mapToGlobal(pos));
+        }
     }
 
     void EntityListWidget::setEntityAddingEnabled(bool on)

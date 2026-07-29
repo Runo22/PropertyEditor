@@ -10,10 +10,15 @@
 #include "rpe/ecs/MirrorChannel.h"
 #include "rpe/ecs/flecs_prelude.h"
 
+#include <QIcon>
+
+#include <functional>
+
 class QListWidget;
 class QToolButton;
 class QStyledItemDelegate;
 class QEvent;
+class QPoint;
 
 namespace rpe
 {
@@ -75,6 +80,16 @@ namespace rpe
         void setAddableComponents(const QStringList& names);
         void setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries);
 
+        // Extra right-click menu entries. The callback receives the clicked row's
+        // selection key and its flecs id; the browser wraps them to add the entity.
+        struct MenuAction
+        {
+            QString label;
+            QIcon icon;
+            std::function<void(const QString& key, qulonglong rawId)> callback;
+        };
+        void setContextActions(const QVector<MenuAction>& actions);
+
     signals:
         void componentSelected(ComponentInfo info);      // direct mode (world available)
         void componentNameSelected(const QString& name); // mirror mode
@@ -93,6 +108,7 @@ namespace rpe
     private slots:
         void _onSelectionChanged();
         void _onAddClicked();
+        void _onContextMenu(const QPoint& pos);
 
     private:
         void _setupUi();
@@ -103,6 +119,7 @@ namespace rpe
         QVector<ComponentInfo> _components;
         QVector<MirrorChannel::ComponentRow> _mirrorRows; // last externally-fed set (dedup)
         QVector<MirrorChannel::CatalogEntry> _addable;    // "+" picker entries
+        QVector<MenuAction> _contextActions;
         bool _editingEnabled = false;
         AccessGuard _guard;
     };

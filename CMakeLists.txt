@@ -203,6 +203,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_remove_flow_test test/remove_flow_test.cpp)
     target_link_libraries(rpe_remove_flow_test PRIVATE rpe_gui)
 
+    add_executable(rpe_entity_delete_test test/entity_delete_test.cpp)
+    target_link_libraries(rpe_entity_delete_test PRIVATE rpe_gui)
+
     add_executable(rpe_spawn_prefab_test test/spawn_prefab_test.cpp)
     target_link_libraries(rpe_spawn_prefab_test PRIVATE rpe_gui)
 
@@ -268,6 +271,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_feature_shot test/feature_shot.cpp)
     target_link_libraries(rpe_feature_shot PRIVATE rpe_gui)
+
+    add_executable(rpe_context_menu_shot test/context_menu_shot.cpp)
+    target_link_libraries(rpe_context_menu_shot PRIVATE rpe_gui)
 
     add_executable(rpe_add_button_shot test/add_button_shot.cpp)
     target_link_libraries(rpe_add_button_shot PRIVATE rpe_gui)

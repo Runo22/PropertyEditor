@@ -167,7 +167,8 @@ namespace rpe
         {
             AddComponent,
             RemoveComponent,
-            SpawnPrefab // instantiate a new entity from a prefab (rawId = prefab id)
+            SpawnPrefab,  // instantiate a new entity from a prefab (rawId = prefab id)
+            DestroyEntity // delete an entity outright (entity = the one to destroy)
         };
         struct StructuralEdit
         {
@@ -181,6 +182,8 @@ namespace rpe
         void queueStructuralById(StructuralKind kind, qulonglong entity, qulonglong rawId);
         // Spawn a new entity from prefab `prefabId` (producer runs is_a + configurator).
         void queueSpawnPrefab(qulonglong prefabId);
+        // Destroy `entity` on the simulation thread.
+        void queueDestroyEntity(qulonglong entity);
 
         // Tag names the producer groups spawnable prefabs by (a prefab is filed under
         // the first of these it carries). Also drives which prefabs the "add entity"

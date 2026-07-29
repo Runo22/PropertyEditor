@@ -8,12 +8,14 @@
 
 #include "rpe/core/AccessGuard.h"
 #include "rpe/ecs/MirrorChannel.h"
+#include "rpe/ecs/RowActions.h"
 #include "rpe/ecs/flecs_prelude.h"
 
 class QListWidget;
 class QLineEdit;
 class QTimer;
 class QToolButton;
+class QStyledItemDelegate;
 
 namespace rpe
 {
@@ -69,6 +71,13 @@ namespace rpe
         // Optional icon shown next to a group header, keyed by the group tag name.
         void setPrefabGroupIcons(const QHash<QString, QIcon>& icons);
 
+        // ── Deletion + context menu ──────────────────────────────────────────────
+        // Show a per-row trash glyph (two-step confirm, like the component list) and
+        // a "Delete" entry in the right-click menu; both emit removeEntityRequested.
+        void setEntityRemovingEnabled(bool on);
+        // Extra right-click entries (run app-specific work on the clicked entity).
+        void setContextActions(const QVector<EntityAction>& actions);
+
     signals:
         void entitySelected(flecs::entity e); // direct mode (world available)
         void entityIdSelected(qulonglong id); // always; mirror mode uses this
@@ -76,11 +85,14 @@ namespace rpe
         // The user picked a prefab to spawn; the host instantiates it (mirror queues
         // a SpawnPrefab structural, direct mode spawns under the world guard).
         void spawnPrefabRequested(qulonglong prefabId);
+        // The user asked to delete an entity (trash glyph or the menu's "Delete").
+        void removeEntityRequested(qulonglong entityId);
 
     private slots:
         void _refresh();
         void _onSelectionChanged();
         void _onAddEntityClicked();
+        void _onContextMenu(const QPoint& pos);
 
     private:
         void _setupUi();
@@ -94,8 +106,10 @@ namespace rpe
         QLineEdit* _filterEdit = nullptr;
         QToolButton* _addBtn = nullptr;
         QTimer* _timer = nullptr;
+        QStyledItemDelegate* _rowDelegate = nullptr; // trash-button delegate
         QVector<MirrorChannel::PrefabEntry> _prefabs;
         QHash<QString, QIcon> _groupIcons;
+        QVector<EntityAction> _contextActions;
         QString _requiredComponent;
         bool _requiredEnabled = false;
         AccessGuard _guard;
