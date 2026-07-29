@@ -13,6 +13,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <string>
+
 #include <rttr/instance.h>
 
 namespace rpe
@@ -239,9 +241,30 @@ namespace rpe
         }
         else if (_world)
         {
-            // Direct mode: the GUI owns the world — spawn under the guard.
+            // Direct mode: the GUI owns the world — spawn under the guard, and give
+            // the instance a real name from the prefab (minus " Prefab"), uniquified
+            // since flecs aborts on duplicate names. Mirror mode does the same on the
+            // sim thread (EcsMirror).
             withGuard(_guard, [&] {
-                _world->entity().is_a(static_cast<flecs::entity_t>(prefabId));
+                flecs::entity prefab = _world->entity(static_cast<flecs::entity_t>(prefabId));
+                flecs::entity ne = _world->entity().is_a(static_cast<flecs::entity_t>(prefabId));
+                const char* pn = prefab.name();
+                QString base = pn ? QString::fromUtf8(pn) : QString();
+                base = base.trimmed();
+                if (base.size() > 7 && base.right(7).compare(QStringLiteral(" prefab"), Qt::CaseInsensitive) == 0)
+                {
+                    base.chop(7);
+                    base = base.trimmed();
+                }
+                if (!base.isEmpty())
+                {
+                    std::string name = base.toStdString();
+                    for (int i = 1; _world->lookup(name.c_str()).is_valid(); ++i)
+                    {
+                        name = base.toStdString() + " (" + std::to_string(i) + ")";
+                    }
+                    ne.set_name(name.c_str());
+                }
             });
         }
     }

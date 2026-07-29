@@ -11,6 +11,7 @@
 #include <QApplication>
 
 #include <cstdio>
+#include <string>
 
 struct Health
 {
@@ -119,7 +120,37 @@ int main(int argc, char** argv)
         check("spawned entity is alive", ne.is_alive());
         check("spawned entity is_a the prefab", ne.has(flecs::IsA, goblin));
         check("configurator override took (hp == 5)", ne.is_alive() && ne.get<Health>().hp == 5);
+        // The prefab itself holds the name "Goblin", so the instance uniquifies to
+        // "Goblin (1)" — a real name, distinct from the prefab, never a duplicate.
+        check("spawned instance is NAMED (uniquified vs the prefab's own name)",
+              std::string(ne.name().c_str()) == "Goblin (1)");
     }
+
+    // ── 2b. A second spawn gets the next UNIQUE name (no flecs duplicate abort) ─
+    {
+        qulonglong id2 = 0;
+        mirror.setSpawnConfigurator([&](flecs::entity e) { id2 = static_cast<qulonglong>(e.id()); });
+        ch->queueSpawnPrefab(g->id);
+        world.progress(0.016f);
+        mirror.pump();
+        flecs::entity n2 = world.entity(static_cast<flecs::entity_t>(id2));
+        check("second instance takes the next free name",
+              n2.is_alive() && std::string(n2.name().c_str()) == "Goblin (2)");
+    }
+
+    // ── 2c. A " Prefab"-suffixed prefab frees the clean name for its instance ──
+    {
+        const Prefab* z = find(prefabs, QStringLiteral("Zombie"));
+        qulonglong zid = 0;
+        mirror.setSpawnConfigurator([&](flecs::entity e) { zid = static_cast<qulonglong>(e.id()); });
+        ch->queueSpawnPrefab(z->id);
+        world.progress(0.016f);
+        mirror.pump();
+        // The prefab is "Zombie Prefab"; the trimmed "Zombie" is free → clean name.
+        check("instance of 'Zombie Prefab' is named 'Zombie' (suffix trimmed, free)",
+              std::string(world.entity(static_cast<flecs::entity_t>(zid)).name().c_str()) == "Zombie");
+    }
+    mirror.setSpawnConfigurator({});
 
     // ── 3. A spawn with NO configurator still instantiates the prefab ──────────
     mirror.setSpawnConfigurator({});

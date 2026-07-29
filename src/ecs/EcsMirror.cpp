@@ -445,6 +445,22 @@ namespace rpe
                     continue;
                 }
                 flecs::entity ne = world.entity().is_a(static_cast<flecs::entity_t>(s.rawId));
+                // Give the instance a real NAME from the prefab (minus any " Prefab"
+                // suffix), so it reads as "Zombie" rather than an anonymous id. flecs
+                // aborts on a duplicate name in a scope, so uniquify with a numeric
+                // suffix ("Zombie", "Zombie (1)", …). Set BEFORE the configurator so
+                // the host can still override it.
+                const char* pn = prefab.name();
+                const QString base = pn ? trimPrefabSuffix(QString::fromUtf8(pn)) : QString();
+                if (!base.isEmpty())
+                {
+                    std::string name = base.toStdString();
+                    for (int i = 1; world.lookup(name.c_str()).is_valid(); ++i)
+                    {
+                        name = base.toStdString() + " (" + std::to_string(i) + ")";
+                    }
+                    ne.set_name(name.c_str());
+                }
                 std::function<void(flecs::entity)> cfg;
                 {
                     std::lock_guard<std::mutex> lk(_spawnMutex);
