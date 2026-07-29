@@ -3,8 +3,10 @@
 #include "rpe/core/TypeBridge.h"
 
 #include <QFrame>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QScreen>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
@@ -27,6 +29,21 @@ namespace rpe
             return pos >= 0 ? s.mid(pos + 2) : s;
         }
 
+        // Trim a trailing whitespace-delimited "prefab" (any case) — matches
+        // EcsMirror so direct and mirror instance labels read identically.
+        QString trimPrefabSuffix(QString s)
+        {
+            s = s.trimmed();
+            static const QString suffix = QStringLiteral(" prefab");
+            if (s.size() > suffix.size()
+                && s.right(suffix.size()).compare(suffix, Qt::CaseInsensitive) == 0)
+            {
+                s.chop(suffix.size());
+                s = s.trimmed();
+            }
+            return s;
+        }
+
         // Display label for an entity: its name, else its prefab's name + id, else
         // just the id. Matches EcsMirror so direct and mirror modes look identical.
         QString entityLabel(const flecs::entity& e)
@@ -42,7 +59,7 @@ namespace rpe
                 const char* pn = prefab.name();
                 if (pn && pn[0] != '\0')
                 {
-                    return QStringLiteral("%1  #%2").arg(QString::fromUtf8(pn)).arg(e.id());
+                    return QStringLiteral("%1  #%2").arg(trimPrefabSuffix(QString::fromUtf8(pn))).arg(e.id());
                 }
             }
             return QStringLiteral("#%1").arg(e.id());
@@ -191,9 +208,29 @@ namespace rpe
             }
         });
 
+        // Position it under the button, then clamp fully inside the screen so it
+        // never overflows the window edge (the button is right-aligned in the
+        // header). Same behaviour as the add-component picker: grow leftward from
+        // the button's right edge, flip above if there's no room below.
         popup->resize(240, 300);
-        const QPoint below = _addBtn->mapToGlobal(QPoint(0, _addBtn->height()));
-        popup->move(below);
+        const QPoint anchorBR = _addBtn->mapToGlobal(_addBtn->rect().bottomRight());
+        const QScreen* scr = QGuiApplication::screenAt(anchorBR);
+        const QRect avail = (scr ? scr : QGuiApplication::primaryScreen())->availableGeometry();
+        popup->setMaximumHeight(qMax(140, avail.height() - 40));
+        popup->adjustSize();
+        const QSize sz = popup->size();
+
+        int x = anchorBR.x() - sz.width();
+        int y = anchorBR.y();
+        if (y + sz.height() > avail.bottom())
+        {
+            const int aboveY = _addBtn->mapToGlobal(_addBtn->rect().topRight()).y() - sz.height();
+            if (aboveY >= avail.top())
+                y = aboveY;
+        }
+        x = qBound(avail.left(), x, avail.right() - sz.width() + 1);
+        y = qBound(avail.top(), y, avail.bottom() - sz.height() + 1);
+        popup->move(x, y);
         popup->show();
         search->setFocus();
     }

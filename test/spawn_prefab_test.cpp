@@ -59,6 +59,10 @@ int main(int argc, char** argv)
     chest.add(prop);
     auto decoration = world.prefab("Decoration"); // NO Health → filtered out
     (void) decoration;
+    // A prefab whose name carries a trailing " Prefab" suffix (an asset-pipeline
+    // convention) — the picker should trim it to just "Zombie".
+    auto zombie = world.prefab("Zombie Prefab").set<Health>({ 50 });
+    zombie.add(enemy);
 
     rpe::EcsMirror mirror;
     mirror.attach(&world, rpe::EcsMirror::PumpMode::Manual);
@@ -87,6 +91,8 @@ int main(int argc, char** argv)
     check("Chest listed under the Prop group",
           find(prefabs, QStringLiteral("Chest")) && find(prefabs, QStringLiteral("Chest"))->group == QStringLiteral("Prop"));
     check("Decoration filtered out (no Health)", find(prefabs, QStringLiteral("Decoration")) == nullptr);
+    check("trailing ' Prefab' suffix trimmed in the picker name",
+          find(prefabs, QStringLiteral("Zombie")) && find(prefabs, QStringLiteral("Zombie Prefab")) == nullptr);
 
     const Prefab* g = find(prefabs, QStringLiteral("Goblin"));
     check("prefab entry carries a spawn id", g && g->id != 0);

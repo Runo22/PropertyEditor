@@ -28,6 +28,24 @@ namespace rpe
             return pos >= 0 ? s.mid(pos + 2) : s;
         }
 
+        // Some asset pipelines suffix prefab entity names with " Prefab". Trim a
+        // trailing whitespace-delimited "prefab" (any case) for display, so the
+        // add-entity picker and instance labels read as "Goblin", not "Goblin
+        // Prefab". Conservative: only when preceded by whitespace (leaves
+        // "MyPrefab"/"Prefab" alone) and never blanks the whole name.
+        QString trimPrefabSuffix(QString s)
+        {
+            s = s.trimmed();
+            static const QString suffix = QStringLiteral(" prefab");
+            if (s.size() > suffix.size()
+                && s.right(suffix.size()).compare(suffix, Qt::CaseInsensitive) == 0)
+            {
+                s.chop(suffix.size());
+                s = s.trimmed();
+            }
+            return s;
+        }
+
         // Display label for an entity: its name, else its prefab's name + id,
         // else just the id. (No leading id for named entities.)
         QString entityLabel(const flecs::entity& e)
@@ -43,7 +61,7 @@ namespace rpe
                 const char* pn = prefab.name();
                 if (pn && pn[0] != '\0')
                 {
-                    return QStringLiteral("%1  #%2").arg(QString::fromUtf8(pn)).arg(e.id());
+                    return QStringLiteral("%1  #%2").arg(trimPrefabSuffix(QString::fromUtf8(pn))).arg(e.id());
                 }
             }
             return QStringLiteral("#%1").arg(e.id());
@@ -793,7 +811,7 @@ namespace rpe
                         break;
                     }
                 }
-                prefabs.append({ static_cast<qulonglong>(p.id()), QString::fromUtf8(pn), group });
+                prefabs.append({ static_cast<qulonglong>(p.id()), trimPrefabSuffix(QString::fromUtf8(pn)), group });
             });
             std::sort(prefabs.begin(), prefabs.end(),
                       [](const MirrorChannel::PrefabEntry& a, const MirrorChannel::PrefabEntry& b) {
