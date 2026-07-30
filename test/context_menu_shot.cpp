@@ -96,6 +96,12 @@ int main(int argc, char** argv)
     };
     pump(30);
 
+    // ── 0. Entity list with per-row trash (setEntityRemovingEnabled) ───────────
+    if (auto* el = browser.entityList())
+    {
+        save(el, dir + QStringLiteral("/entity_list_trash.png"));
+    }
+
     // ── 1. Add-entity prefab picker ────────────────────────────────────────────
     if (auto* btn = browser.entityList()->findChild<QToolButton*>())
     {
