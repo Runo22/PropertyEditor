@@ -91,6 +91,37 @@ int main(int argc, char** argv)
         check("picking a prefab emits spawnPrefabRequested with its id", spawned == 11ull);
     }
 
+    // ── No groups configured → a FLAT list, no group headers ───────────────────
+    {
+        rpe::EntityListWidget w2;
+        w2.setEntityAddingEnabled(true);
+        w2.setAddablePrefabs(QVector<Prefab> {
+            { 10, QStringLiteral("Apple"), QString() },
+            { 11, QStringLiteral("Cherry"), QString() },
+            { 12, QStringLiteral("Banana"), QString() },
+        });
+        qulonglong picked = 0;
+        QObject::connect(&w2, &rpe::EntityListWidget::spawnPrefabRequested, &w2, [&](qulonglong id) { picked = id; });
+        w2.findChild<QToolButton*>()->click();
+        auto* pop = w2.findChild<QFrame*>(QStringLiteral("rpeAddPopup"));
+        auto* t = pop ? pop->findChild<QTreeWidget*>() : nullptr;
+        check("flat picker: prefabs are top-level items (no group headers)",
+              t && t->topLevelItemCount() == 3
+                  && t->topLevelItem(0)->data(0, Qt::UserRole).toULongLong() != 0);
+        check("flat picker: no '(ungrouped)' header present",
+              t && groupNamed(t, QStringLiteral("(ungrouped)")) == nullptr);
+        if (t)
+        {
+            // Pick "Banana" (top-level) → its id.
+            QTreeWidgetItem* banana = nullptr;
+            for (int i = 0; i < t->topLevelItemCount(); ++i)
+                if (t->topLevelItem(i)->text(0) == QStringLiteral("Banana"))
+                    banana = t->topLevelItem(i);
+            QMetaObject::invokeMethod(t, "itemActivated", Q_ARG(QTreeWidgetItem*, banana), Q_ARG(int, 0));
+            check("flat picker: picking a top-level prefab spawns it", picked == 12ull);
+        }
+    }
+
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;
 }

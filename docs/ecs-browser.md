@@ -104,12 +104,17 @@ browser.setEntityAddingEnabled(true);
 browser.setPrefabGroups({ { "Enemy", enemyIcon }, { "Prop", QIcon() } });
 ```
 
-The producer scans prefab entities, files each under the first of your group
-tags it carries, and publishes the list. Picking one queues a spawn to the
-simulation thread, which instantiates it with `is_a(prefab)` and then calls a
-**configurator you set on the mirror** so you can set/override components on the
-new instance (setting *after* `is_a` overrides the prefab's shared value — the
-flecs idiom):
+Grouping is optional: with **no** `setPrefabGroups`, the picker is a flat,
+alphabetical list (no group headers). Add groups only when you want the prefabs
+split into sections. The producer scans prefab entities, files each under the
+first of your group tags it carries, and publishes the list. Instances are named
+after the prefab (minus a trailing `" Prefab"` suffix), uniquified to avoid
+flecs' duplicate-name abort — `"Zombie Prefab"` → `Zombie`, `Zombie (1)`, …
+
+Picking one queues a spawn to the simulation thread, which instantiates it with
+`is_a(prefab)` and then calls a **configurator you set on the mirror** so you can
+set/override components on the new instance (setting *after* `is_a` overrides the
+prefab's shared value — the flecs idiom):
 
 ```cpp
 mirror.setSpawnConfigurator([](flecs::entity e) {
@@ -121,6 +126,54 @@ mirror.setSpawnConfigurator([](flecs::entity e) {
 The configurator runs on the simulation thread where the world is owned, so it
 touches the entity directly and safely. In direct mode the pick spawns under the
 world guard instead.
+
+## Deleting + right-click menus
+
+`browser.setEntityRemovingEnabled(true)` adds a per-row **trash glyph** to the
+entity list (two-step confirm, like the component list) and a **"Delete entity"**
+entry to its right-click menu. Deleting destroys the entity — queued to the sim
+thread in mirror mode, `destruct()` under the world guard in direct mode. The
+component panel already offers the same for components (a `×` per row and a
+"Remove component" menu entry) when `allowComponentEditing` is on.
+
+Both lists have a right-click menu you can extend. Two ways:
+
+**Static actions** — a fixed label + callback, added once:
+
+```cpp
+browser.addEntityAction({ "Focus camera", cameraIcon,
+                          [](qulonglong entityId) { focusCameraOn(entityId); } });
+
+browser.addComponentAction({ "Copy to clipboard", {},
+    [](qulonglong entityId, const QString& component, qulonglong rawId) {
+        copyComponent(entityId, component);
+    } });
+```
+
+**Dynamic hook** — a function run each time the menu opens, handed the live
+`QMenu`, so you can build entity-specific entries (conditional items, submenus,
+checkable actions — anything `QMenu` supports):
+
+```cpp
+browser.setEntityMenuHook([this](qulonglong id, QMenu& menu) {
+    menu.addAction("Focus camera", [id]{ focusCameraOn(id); });
+    if (isSelected(id))
+        menu.addAction("Clear selection", [this, id]{ deselect(id); });
+    QMenu* tag = menu.addMenu("Tag as…");
+    tag->addAction("Enemy",  [id]{ tagAs(id, "Enemy"); });
+    tag->addAction("Friendly", [id]{ tagAs(id, "Friendly"); });
+});
+
+browser.setComponentMenuHook(
+    [](qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu) {
+        menu.addAction("Reset to defaults", [=]{ resetComponent(entityId, rawId); });
+    });
+```
+
+Static actions and the hook can be used together; both render in the same styled
+menu, after the built-in Delete/Remove. Callbacks run on the GUI thread; the
+component variants receive the currently-selected entity's id alongside the
+clicked component's key and flecs id.
 
 ## Related
 

@@ -107,6 +107,36 @@ int main(int argc, char** argv)
         }
     }
 
+    // ── 1b. Same picker but with NO groups configured → a flat list ────────────
+    {
+        flecs::world w2;
+        w2.prefab("Apple Prefab");
+        w2.prefab("Banana Prefab");
+        w2.prefab("Cherry Prefab");
+        w2.prefab("Date Prefab");
+        rpe::EcsMirror m2;
+        m2.attach(&w2);
+        rpe::EntityComponentBrowser b2;
+        b2.setMirror(&m2);
+        b2.setEntityAddingEnabled(true); // NO setPrefabGroups → flat
+        b2.resize(360, 520);
+        b2.show();
+        for (int i = 0; i < 30; ++i)
+        {
+            w2.progress(0.016f);
+            QCoreApplication::processEvents();
+            QThread::msleep(6);
+        }
+        if (auto* btn = b2.entityList()->findChild<QToolButton*>())
+        {
+            btn->click();
+            QCoreApplication::processEvents();
+            if (auto* popup = b2.entityList()->findChild<QFrame*>(QStringLiteral("rpeAddPopup")))
+                save(popup, dir + QStringLiteral("/add_entity_flat.png"));
+        }
+        m2.detach();
+    }
+
     // ── 2. Entity right-click menu (mirrors _onContextMenu's content) ──────────
     {
         QMenu menu;

@@ -340,6 +340,18 @@ namespace rpe
             auto* none = new QTreeWidgetItem(tree, { tr("(no prefabs available)") });
             none->setFlags(Qt::NoItemFlags);
         }
+        else if (std::none_of(_prefabs.cbegin(), _prefabs.cend(),
+                              [](const MirrorChannel::PrefabEntry& p) { return !p.group.isEmpty(); }))
+        {
+            // No grouping configured → a FLAT alphabetical list (the producer already
+            // sorts by name), no "(ungrouped)" header cluttering things.
+            tree->setRootIsDecorated(false);
+            for (const MirrorChannel::PrefabEntry& p : _prefabs)
+            {
+                auto* item = new QTreeWidgetItem(tree, { p.name });
+                item->setData(0, Qt::UserRole, p.id); // the spawn handle
+            }
+        }
         else
         {
             QHash<QString, QTreeWidgetItem*> groups;
@@ -379,16 +391,24 @@ namespace rpe
             const QString s = q.trimmed();
             for (int i = 0; i < tree->topLevelItemCount(); ++i)
             {
-                QTreeWidgetItem* g = tree->topLevelItem(i);
-                int shown = 0;
-                for (int j = 0; j < g->childCount(); ++j)
+                QTreeWidgetItem* top = tree->topLevelItem(i);
+                if (top->childCount() == 0)
                 {
-                    QTreeWidgetItem* c = g->child(j);
+                    // Flat prefab leaf (grouping off) — filter it directly. A leaf
+                    // carries a spawn id; the "(no prefabs)" placeholder does not.
+                    if (top->data(0, Qt::UserRole).toULongLong() != 0)
+                        top->setHidden(!(s.isEmpty() || top->text(0).contains(s, Qt::CaseInsensitive)));
+                    continue;
+                }
+                int shown = 0;
+                for (int j = 0; j < top->childCount(); ++j)
+                {
+                    QTreeWidgetItem* c = top->child(j);
                     const bool match = s.isEmpty() || c->text(0).contains(s, Qt::CaseInsensitive);
                     c->setHidden(!match);
                     shown += match ? 1 : 0;
                 }
-                g->setHidden(g->childCount() > 0 && shown == 0);
+                top->setHidden(shown == 0); // hide an empty group header
             }
         });
 
