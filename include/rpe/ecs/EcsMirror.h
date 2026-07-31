@@ -311,6 +311,7 @@ namespace rpe
             rttr::type rtype = rttr::type::get<void>();
         };
         QHash<QString, PinResolve> _pinRt;
+        uint64_t _pinGen = 0;                // TypeBridge generation the pin cache was resolved at
         QHash<QString, QString> _lastPinStr; // "e|comp|path" -> last display
         QVector<MirrorChannel::PinKey> _lastPins;
 

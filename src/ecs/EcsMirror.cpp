@@ -134,6 +134,7 @@ namespace rpe
         _lastCompRows.clear();
         _lastPrefabs.clear(); // prefab ids belong to the old world
         _pinRt.clear(); // component ids/types belong to the old world
+        _pinGen = 0;
         _lastPinStr.clear();
         _lastPins.clear();
         _selTypes.clear();
@@ -851,6 +852,21 @@ namespace rpe
         // for entities/components that are NOT selected, feeding the watch widget.
         if (!in.pinEdits.empty() || !in.pins.isEmpty())
         {
+            // A registry change (e.g. a plugin unregistering/registering its types on
+            // unload/reload) can invalidate the cached pin types — an unregistered
+            // rttr::type stays is_valid() (RTTR has no unregister), so it wouldn't be
+            // re-resolved otherwise. Drop the cache so every pin re-resolves against
+            // the current bridge. Registry changes are rare, so this costs nothing at
+            // steady state. (The selected-component listing is already generation-gated
+            // via _compsGen; and every value read is guarded by TypeBridge::wrap, which
+            // returns invalid for an unregistered type — so no unloaded code is ever
+            // called regardless.)
+            const uint64_t pinGen = TypeBridge::registryGeneration();
+            if (pinGen != _pinGen)
+            {
+                _pinRt.clear();
+                _pinGen = pinGen;
+            }
             const auto dedupKey = [](const MirrorChannel::PinKey& k) {
                 return QStringLiteral("%1|%2|%3").arg(k.entity).arg(k.component, k.path);
             };
