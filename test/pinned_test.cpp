@@ -163,8 +163,28 @@ int main(int argc, char** argv)
         check("unpin removes the row", w.pins().size() == 1 && changed == 3);
     }
 
-    // ── 3b. Widget edits via the type-specialized delegate: gated before the first
-    //        value, a real spin-box editor after ─────────────────────────────────
+    // ── 3b. A pin is editable IMMEDIATELY, from its declared type ───────────────
+    // Before this fix a fresh pin showed a dead "…" cell that couldn't be edited
+    // until the first mirror value arrived. The editor now comes from the leaf's
+    // DECLARED type (resolved from the component + path), so int → spin box opens
+    // straight away, seeded at the type default.
+    {
+        rpe::PinnedPropertiesWidget w;
+        w.setChannel(mirror.channel());
+        w.pin(aid, QStringLiteral("A"), QStringLiteral("Health"), QStringLiteral("hp"));
+        auto* tree = w.findChild<QTreeWidget*>();
+        QTreeWidgetItem* it = tree->topLevelItem(0);
+
+        check("a fresh pin shows the placeholder until a value lands", it->text(2) == QStringLiteral("…"));
+        // Double-click exactly as a user would: the view opens the editor via the
+        // delegate and seeds it (from the live value if any, else the type default).
+        tree->itemDoubleClicked(it, 2);
+        auto* spin = tree->viewport()->findChild<QSpinBox*>();
+        check("double-clicking a fresh pin opens a type editor (int → spin box)", spin != nullptr);
+        check("the fresh-pin editor seeds at the type default (0)", spin && spin->value() == 0);
+    }
+
+    // The land-a-value-then-edit flow (fresh widget so live polling isn't paused).
     {
         rpe::PinnedPropertiesWidget w;
         w.setChannel(mirror.channel());
@@ -175,14 +195,8 @@ int main(int argc, char** argv)
         const QModelIndex vIdx = tree->model()->index(0, 2);
         const QStyleOptionViewItem opt;
 
-        // BEFORE any mirrored value: the delegate has no type to anchor an editor to,
-        // so createEditor yields nothing (double-click is a no-op) and hp is untouched.
-        check("no editor opens before the first value", delegate->createEditor(tree->viewport(), opt, vIdx) == nullptr);
         world.progress(0.016f);
         mirror.pump();
-        check("no edit was queued (hp still 70)", a.get<Health>().hp == 70);
-
-        // First value arrives → an int leaf gets a QSpinBox seeded with the live value.
         w.pollNow();
         check("first mirrored value lands (70)", it->text(2) == QStringLiteral("70"));
         QWidget* editor = delegate->createEditor(tree->viewport(), opt, vIdx);
