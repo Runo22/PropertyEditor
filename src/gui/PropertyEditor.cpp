@@ -6,6 +6,8 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLineEdit>
+#include <QApplication>
+#include <QClipboard>
 #include <QMenu>
 #include <QSortFilterProxyModel>
 #include <QToolButton>
@@ -280,8 +282,19 @@ namespace rpe
 
         const QString path = srcIdx.data(PropertyPathRole).toString();
         const bool hasLocalEdit = srcIdx.data(HasLocalEditRole).toBool();
+        const QString name = srcIdx.siblingAtColumn(0).data(Qt::DisplayRole).toString();
+        const QString value = srcIdx.siblingAtColumn(1).data(Qt::DisplayRole).toString();
 
         QMenu menu(this);
+        // Copy the row's text to the clipboard — available regardless of read-only /
+        // pinning, since it never mutates anything.
+        connect(menu.addAction(tr("Copy value")), &QAction::triggered, this,
+                [value] { QApplication::clipboard()->setText(value); });
+        connect(menu.addAction(tr("Copy name")), &QAction::triggered, this,
+                [name] { QApplication::clipboard()->setText(name); });
+        connect(menu.addAction(tr("Copy \"name = value\"")), &QAction::triggered, this,
+                [name, value] { QApplication::clipboard()->setText(name + QStringLiteral(" = ") + value); });
+        menu.addSeparator();
         if (!isReadOnly())
         {
             if (!hasLocalEdit)

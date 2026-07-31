@@ -156,3 +156,7 @@ editor->setToolbarVisible(false);              // hide the filter/reset row
 editor->setReadOnly(true);
 qApp->setStyleSheet(rpe::darkStyleSheet());    // built-in dark theme (optional to apply)
 ```
+
+**Right-click a property row** for **Copy value**, **Copy name**, and
+**Copy "name = value"** (all work in read-only mode), plus Local edit / Reset
+and — when enabled — Pin to watch list.

@@ -233,6 +233,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_struct_summary_test test/struct_summary_test.cpp)
     target_link_libraries(rpe_struct_summary_test PRIVATE rpe_gui)
 
+    add_executable(rpe_property_copy_test test/property_copy_test.cpp)
+    target_link_libraries(rpe_property_copy_test PRIVATE rpe_gui)
+
     add_executable(rpe_type_support_test test/type_support_test.cpp)
     target_link_libraries(rpe_type_support_test PRIVATE rpe_gui)
 
