@@ -206,6 +206,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_entity_delete_test test/entity_delete_test.cpp)
     target_link_libraries(rpe_entity_delete_test PRIVATE rpe_gui)
 
+    add_executable(rpe_context_actions_test test/context_actions_test.cpp)
+    target_link_libraries(rpe_context_actions_test PRIVATE rpe_gui)
+
     add_executable(rpe_spawn_prefab_test test/spawn_prefab_test.cpp)
     target_link_libraries(rpe_spawn_prefab_test PRIVATE rpe_gui)
 

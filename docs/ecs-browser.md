@@ -4,6 +4,18 @@ The three-panel inspector: **entities → components → properties**. Entities 
 components are listed alphabetically; when nothing is selected, the top entity
 is selected automatically so the panels are never blank.
 
+## Contents
+
+- [Two modes](#two-modes) — direct vs. mirror
+- [Settings](#settings)
+- [Selection](#selection)
+- [Tags & pairs](#tags--pairs)
+- [Add / remove components](#add--remove-components)
+- [Add entities (spawn from prefabs)](#add-entities-spawn-from-prefabs)
+- [Deleting + right-click menus](#deleting--right-click-menus)
+  - [Custom menu actions & hooks](#custom-menu-actions--hooks)
+- [Related](#related)
+
 ## Two modes
 
 ### Direct mode — the GUI may touch the world
@@ -136,43 +148,61 @@ thread in mirror mode, `destruct()` under the world guard in direct mode. The
 component panel already offers the same for components (a `×` per row and a
 "Remove component" menu entry) when `allowComponentEditing` is on.
 
-Both lists have a right-click menu you can extend. Two ways:
+### Custom menu actions & hooks
 
-**Static actions** — a fixed label + callback, added once:
+Both lists' right-click menus are extensible, two ways — a **static** action
+(fixed label, registered once) or a **dynamic** hook (a function that builds the
+menu each time it opens). Four entry points, one per (entity/component) ×
+(static/dynamic):
+
+| | Entity | Component |
+| --- | --- | --- |
+| **Static** | `addEntityAction` | `addComponentAction` |
+| **Dynamic** | `setEntityMenuHook` | `setComponentMenuHook` |
+
+#### Static — a fixed label + callback
 
 ```cpp
+// Entity: the callback gets the clicked entity's id.
 browser.addEntityAction({ "Focus camera", cameraIcon,
                           [](qulonglong entityId) { focusCameraOn(entityId); } });
 
-browser.addComponentAction({ "Copy to clipboard", {},
+// Component: the callback gets the selected entity id + the clicked component's
+// key (a data component's path, or a pair's "Rel (Target)") and its flecs id.
+browser.addComponentAction({ "Copy to clipboard", QIcon(),
     [](qulonglong entityId, const QString& component, qulonglong rawId) {
         copyComponent(entityId, component);
     } });
 ```
 
-**Dynamic hook** — a function run each time the menu opens, handed the live
-`QMenu`, so you can build entity-specific entries (conditional items, submenus,
-checkable actions — anything `QMenu` supports):
+Add as many as you like; each becomes one menu entry (with the optional icon).
+
+#### Dynamic — a hook handed the live `QMenu`
+
+Run each time the menu opens, so you can build entity-/component-specific entries
+— conditional items, submenus, checkable actions, whatever `QMenu` supports:
 
 ```cpp
+// Entity menu, built per-entity at open time.
 browser.setEntityMenuHook([this](qulonglong id, QMenu& menu) {
     menu.addAction("Focus camera", [id]{ focusCameraOn(id); });
     if (isSelected(id))
         menu.addAction("Clear selection", [this, id]{ deselect(id); });
-    QMenu* tag = menu.addMenu("Tag as…");
-    tag->addAction("Enemy",  [id]{ tagAs(id, "Enemy"); });
+    QMenu* tag = menu.addMenu("Tag as…");             // a submenu
+    tag->addAction("Enemy",    [id]{ tagAs(id, "Enemy"); });
     tag->addAction("Friendly", [id]{ tagAs(id, "Friendly"); });
 });
 
+// Component menu — same idea; also gets the component key + flecs id.
 browser.setComponentMenuHook(
-    [](qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu) {
+    [this](qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu) {
         menu.addAction("Reset to defaults", [=]{ resetComponent(entityId, rawId); });
     });
 ```
 
 Static actions and the hook can be used together; both render in the same styled
-menu, after the built-in Delete/Remove. Callbacks run on the GUI thread; the
-component variants receive the currently-selected entity's id alongside the
+menu, **after** the built-in Delete / Remove. Callbacks run on the GUI thread;
+the component variants receive the currently-selected entity's id alongside the
 clicked component's key and flecs id.
 
 ## Related

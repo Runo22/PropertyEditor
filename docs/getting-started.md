@@ -1,5 +1,13 @@
 # Getting started
 
+## Contents
+
+- [Build & integrate](#build--integrate)
+- [Register your types](#register-your-types)
+- [The property editor in 10 lines](#the-property-editor-in-10-lines)
+- [Edit policies](#edit-policies)
+- [Trimmings](#trimmings)
+
 ## Build & integrate
 
 The project builds two targets (see the root `CMakeLists.txt` / `README.md`
