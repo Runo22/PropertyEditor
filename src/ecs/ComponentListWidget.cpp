@@ -316,6 +316,12 @@ namespace rpe
         headerRow->addWidget(_addBtn, 0);
         layout->addLayout(headerRow);
 
+        _filterEdit = new QLineEdit(this);
+        _filterEdit->setPlaceholderText(tr("Filter components…"));
+        _filterEdit->setClearButtonEnabled(true);
+        layout->addWidget(_filterEdit);
+        connect(_filterEdit, &QLineEdit::textChanged, this, [this] { _applyFilter(); });
+
         _list = new QListWidget(this);
         _list->setMouseTracking(true); // so the row icon can highlight on hover
         auto* del = new RemoveButtonDelegate(_list);
@@ -791,6 +797,7 @@ namespace rpe
         {
             emit componentDeselected();
         }
+        _applyFilter();
     }
 
     void ComponentListWidget::setWorldAccess(AccessGuard guard)
@@ -910,6 +917,17 @@ namespace rpe
         else
         {
             emit componentDeselected();
+        }
+        _applyFilter(); // re-apply over the rebuilt rows
+    }
+
+    void ComponentListWidget::_applyFilter()
+    {
+        const QString f = _filterEdit ? _filterEdit->text().trimmed() : QString();
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            QListWidgetItem* it = _list->item(i);
+            it->setHidden(!f.isEmpty() && !it->text().contains(f, Qt::CaseInsensitive));
         }
     }
 

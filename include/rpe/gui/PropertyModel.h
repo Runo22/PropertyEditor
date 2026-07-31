@@ -36,6 +36,9 @@ namespace rpe
         IsArrayRole,      // bool    — true for a sequential/array parent node
         DeclaredTypeRole, // rttr::variant wrapping the node's declared rttr::type
         FlagsRole,        // bool    — true if the enum property carries hint::Flags
+        FilterValueRole,  // QString — value text for filtering (expansion-independent:
+                          //           a collapsed struct's "[a, b]" summary or an
+                          //           array's "[N]" is matchable even while expanded)
     };
 
     // How committed edits are applied.

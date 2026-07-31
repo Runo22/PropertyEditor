@@ -15,6 +15,7 @@
 #include <functional>
 
 class QListWidget;
+class QLineEdit;
 class QToolButton;
 class QStyledItemDelegate;
 class QEvent;
@@ -116,8 +117,10 @@ namespace rpe
 
     private:
         void _setupUi();
+        void _applyFilter(); // hide list rows not matching the filter text
 
         QListWidget* _list = nullptr;
+        QLineEdit* _filterEdit = nullptr;
         QToolButton* _addBtn = nullptr;
         QStyledItemDelegate* _rowDelegate = nullptr; // actually a RemoveButtonDelegate
         QVector<ComponentInfo> _components;

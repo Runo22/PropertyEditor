@@ -86,6 +86,10 @@ request is remembered and applied when it appears.
 `entitySelected(flecs::entity)` additionally fires in **direct mode only**
 (mirror mode has no world handle on the GUI thread).
 
+All three panels have a **filter box**: the entity and component lists narrow by
+typed text, and the property grid's filter matches a row's value too (see
+[getting-started](getting-started.md#trimmings)).
+
 ## Tags & pairs
 
 The component list shows the entity's full composition. Zero-size **tags** and

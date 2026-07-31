@@ -16,6 +16,44 @@
 
 namespace rpe
 {
+    namespace
+    {
+        // Filters property rows by NAME (column 0 display) OR VALUE (the model's
+        // expansion-independent FilterValueRole), so typing "7.5" or a struct's
+        // "[1, 2]" summary narrows the tree too — not just names. Recursive: a row
+        // survives if it matches or any descendant does (ancestors of a match stay
+        // visible). Only runs on filter-text change, so the extra per-row value read
+        // (a cached string) costs nothing at steady state.
+        class PropertyFilterProxy : public QSortFilterProxyModel
+        {
+        public:
+            using QSortFilterProxyModel::QSortFilterProxyModel;
+            void setFilterText(const QString& t)
+            {
+                _text = t.trimmed();
+                invalidateFilter();
+            }
+
+        protected:
+            bool filterAcceptsRow(int row, const QModelIndex& parent) const override
+            {
+                if (_text.isEmpty())
+                {
+                    return true;
+                }
+                const QModelIndex idx = sourceModel()->index(row, 0, parent);
+                if (idx.data(Qt::DisplayRole).toString().contains(_text, Qt::CaseInsensitive))
+                {
+                    return true;
+                }
+                return idx.data(FilterValueRole).toString().contains(_text, Qt::CaseInsensitive);
+            }
+
+        private:
+            QString _text;
+        };
+    } // namespace
+
 
     PropertyEditor::PropertyEditor(QWidget* parent)
         : QWidget(parent)
@@ -50,11 +88,9 @@ namespace rpe
 
         root->addWidget(_toolbar);
 
-        // proxy for filtering
-        _proxy = new QSortFilterProxyModel(this);
+        // proxy for filtering (matches property name OR value — see PropertyFilterProxy)
+        _proxy = new PropertyFilterProxy(this);
         _proxy->setSourceModel(_model);
-        _proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-        _proxy->setFilterKeyColumn(0);
         _proxy->setRecursiveFilteringEnabled(true);
 
         _view = new QTreeView(this);
@@ -250,7 +286,7 @@ namespace rpe
 
     void PropertyEditor::_onFilterChanged(const QString& text)
     {
-        _proxy->setFilterFixedString(text);
+        static_cast<PropertyFilterProxy*>(_proxy)->setFilterText(text);
         if (text.isEmpty())
         {
             _view->expandToDepth(0);

@@ -918,6 +918,34 @@ namespace rpe
             return node->arraySize() >= 0;
         case FlagsRole:
             return metaBool(node->prop(), hint::Flags, false);
+        case FilterValueRole:
+        {
+            // Value text for the property filter — the SAME string the value cell
+            // would show when collapsed, but computed regardless of the row's current
+            // expansion (so a struct's "[a, b]" summary or an array's "[N]" stays
+            // matchable even while the tree is force-expanded during filtering).
+            // Cheap: leaves reuse the cached display; struct summaries scan ≤4 fields.
+            if (node->isExpandable())
+            {
+                if (node->arraySize() >= 0)
+                {
+                    return QStringLiteral("[%1]").arg(node->arraySize());
+                }
+                return _structSummary(node);
+            }
+            const rttr::variant v = node->effectiveValue();
+            if (!v.is_valid())
+            {
+                return QString();
+            }
+            if (node->cachedDisplay().isEmpty())
+            {
+                const bool asFlags = v.get_type().is_enumeration() && metaBool(node->prop(), hint::Flags, false);
+                node->setCachedDisplay(asFlags ? TypeRenderer::flagsToDisplayString(v)
+                                               : TypeRenderer::toDisplayString(v));
+            }
+            return node->cachedDisplay();
+        }
         case DeclaredTypeRole:
             // The node's schema type, always valid — unlike the live value, which may
             // be absent (not yet mirrored) or a transient editor type mid-edit. The

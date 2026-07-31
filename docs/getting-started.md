@@ -160,3 +160,8 @@ qApp->setStyleSheet(rpe::darkStyleSheet());    // built-in dark theme (optional 
 **Right-click a property row** for **Copy value**, **Copy name**, and
 **Copy "name = value"** (all work in read-only mode), plus Local edit / Reset
 and — when enabled — Pin to watch list.
+
+The toolbar **filter** matches a row's **value** as well as its name, so typing
+`7.5`, `true`, or a struct's `[1, 2]` summary narrows the tree (matched rows keep
+their ancestors visible). It only re-runs on filter-text change, so live values
+cost nothing at steady state.
