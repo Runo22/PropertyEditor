@@ -10,7 +10,12 @@
 #include <rttr/registration.h>
 
 #include <QApplication>
+#include <QAbstractItemDelegate>
 #include <QBrush>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QSpinBox>
+#include <QStyleOptionViewItem>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 
@@ -29,11 +34,32 @@ struct Armor // bridged LATE in the test (plugin load-order scenario)
     int def = 1;
 };
 
+enum class Team
+{
+    Red,
+    Blue,
+    Green
+};
+struct Unit // exercises the type-specialized pin editors (bool / enum / int)
+{
+    bool alive = true;
+    Team team = Team::Red;
+    int level = 3;
+};
+
 RTTR_REGISTRATION
 {
     rttr::registration::class_<Health>("Health").property("hp", &Health::hp);
     rttr::registration::class_<Speed>("Speed").property("v", &Speed::v);
     rttr::registration::class_<Armor>("Armor").property("def", &Armor::def);
+    rttr::registration::enumeration<Team>("Team")(
+        rttr::value("Red", Team::Red),
+        rttr::value("Blue", Team::Blue),
+        rttr::value("Green", Team::Green));
+    rttr::registration::class_<Unit>("Unit")
+        .property("alive", &Unit::alive)
+        .property("team", &Unit::team)
+        .property("level", &Unit::level);
 }
 
 static int g_fails = 0;
@@ -130,29 +156,117 @@ int main(int argc, char** argv)
         check("unpin removes the row", w.pins().size() == 1 && changed == 3);
     }
 
-    // ── 3b. Widget edits: gated before the first value, applied after ──────────
+    // ── 3b. Widget edits via the type-specialized delegate: gated before the first
+    //        value, a real spin-box editor after ─────────────────────────────────
     {
         rpe::PinnedPropertiesWidget w;
         w.setChannel(mirror.channel());
         w.pin(aid, QStringLiteral("A"), QStringLiteral("Health"), QStringLiteral("hp"));
         auto* tree = w.findChild<QTreeWidget*>();
         QTreeWidgetItem* it = tree->topLevelItem(0);
+        auto* delegate = tree->itemDelegateForColumn(2);
+        const QModelIndex vIdx = tree->model()->index(0, 2);
+        const QStyleOptionViewItem opt;
 
-        // Edit BEFORE any mirrored value: parse has no type anchor → must be
-        // ignored and the placeholder restored (not sent as a string and dropped).
-        it->setText(2, QStringLiteral("55"));
-        check("edit before the first value restores the placeholder", it->text(2) == QStringLiteral("…"));
+        // BEFORE any mirrored value: the delegate has no type to anchor an editor to,
+        // so createEditor yields nothing (double-click is a no-op) and hp is untouched.
+        check("no editor opens before the first value", delegate->createEditor(tree->viewport(), opt, vIdx) == nullptr);
         world.progress(0.016f);
         mirror.pump();
         check("no edit was queued (hp still 70)", a.get<Health>().hp == 70);
 
-        // First value arrives → edits work and reach the world.
+        // First value arrives → an int leaf gets a QSpinBox seeded with the live value.
         w.pollNow();
         check("first mirrored value lands (70)", it->text(2) == QStringLiteral("70"));
-        it->setText(2, QStringLiteral("55"));
+        QWidget* editor = delegate->createEditor(tree->viewport(), opt, vIdx);
+        delegate->setEditorData(editor, vIdx);
+        auto* spin = qobject_cast<QSpinBox*>(editor);
+        check("int pin leaf opens a QSpinBox", spin != nullptr);
+        check("the spin box is seeded with the live value (70)", spin && spin->value() == 70);
+        spin->setValue(55);
+        delegate->setModelData(editor, tree->model(), vIdx);
+        check("committed value echoes in the row (55)", it->text(2) == QStringLiteral("55"));
         world.progress(0.016f);
         mirror.pump();
-        check("widget edit reached the world (hp == 55)", a.get<Health>().hp == 55);
+        check("delegate edit reached the world (hp == 55)", a.get<Health>().hp == 55);
+        delete editor;
+    }
+
+    // ── 3c. The pin editor is TYPE-SPECIALIZED like the property grid ──────────
+    {
+        rpe::TypeBridge::registerType<Unit>();
+        auto d = world.entity("D").set<Unit>({ true, Team::Blue, 7 });
+        const auto did = static_cast<qulonglong>(d.id());
+
+        rpe::PinnedPropertiesWidget w;
+        w.setChannel(mirror.channel());
+        w.pin(did, QStringLiteral("D"), QStringLiteral("Unit"), QStringLiteral("alive"));
+        w.pin(did, QStringLiteral("D"), QStringLiteral("Unit"), QStringLiteral("team"));
+        w.pin(did, QStringLiteral("D"), QStringLiteral("Unit"), QStringLiteral("level"));
+        world.progress(0.016f);
+        mirror.pump();
+        w.pollNow();
+
+        auto* tree = w.findChild<QTreeWidget*>();
+        auto* delegate = tree->itemDelegateForColumn(2);
+        const QStyleOptionViewItem opt;
+        auto editorFor = [&](const QString& leaf) -> QWidget* {
+            for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            {
+                if (tree->topLevelItem(i)->text(1).endsWith(leaf))
+                {
+                    return delegate->createEditor(tree->viewport(), opt, tree->model()->index(i, 2));
+                }
+            }
+            return nullptr;
+        };
+
+        auto rowFor = [&](const QString& leaf) {
+            for (int i = 0; i < tree->topLevelItemCount(); ++i)
+                if (tree->topLevelItem(i)->text(1).endsWith(leaf))
+                    return i;
+            return -1;
+        };
+
+        QWidget* boolEd = editorFor(QStringLiteral("alive"));
+        QWidget* enumEd = editorFor(QStringLiteral("team"));
+        QWidget* intEd = editorFor(QStringLiteral("level"));
+        check("bool pin leaf opens a QCheckBox", qobject_cast<QCheckBox*>(boolEd) != nullptr);
+        check("enum pin leaf opens a QComboBox", qobject_cast<QComboBox*>(enumEd) != nullptr);
+        check("int pin leaf opens a QSpinBox", qobject_cast<QSpinBox*>(intEd) != nullptr);
+
+        // The combo is populated with the enum's names, seeded to the live value, and
+        // a new selection reaches the world as the exact enum type.
+        if (auto* combo = qobject_cast<QComboBox*>(enumEd))
+        {
+            const QModelIndex teamIdx = tree->model()->index(rowFor(QStringLiteral("team")), 2);
+            delegate->setEditorData(combo, teamIdx);
+            check("enum combo lists all names", combo->count() == 3);
+            check("enum combo is seeded to the live value (Blue)", combo->currentText() == QStringLiteral("Blue"));
+
+            combo->setCurrentText(QStringLiteral("Green"));
+            delegate->setModelData(combo, tree->model(), teamIdx);
+            world.progress(0.016f);
+            mirror.pump();
+            check("enum pin edit reached the world (team == Green)", d.get<Unit>().team == Team::Green);
+        }
+
+        // Commit a bool toggle through the check box.
+        if (auto* box = qobject_cast<QCheckBox*>(boolEd))
+        {
+            const QModelIndex aliveIdx = tree->model()->index(rowFor(QStringLiteral("alive")), 2);
+            delegate->setEditorData(box, aliveIdx);
+            check("check box is seeded to the live value (checked)", box->isChecked());
+            box->setChecked(false);
+            delegate->setModelData(box, tree->model(), aliveIdx);
+            world.progress(0.016f);
+            mirror.pump();
+            check("bool pin edit reached the world (alive == false)", d.get<Unit>().alive == false);
+        }
+
+        delete boolEd;
+        delete enumEd;
+        delete intEd;
     }
 
     // ── 4. Pinned rows tint the main property tree ─────────────────────────────

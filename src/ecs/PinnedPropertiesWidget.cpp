@@ -3,15 +3,19 @@
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
+#include "rpe/gui/VariantEditorFactory.h"
 
 #include <QApplication>
 #include <QHeaderView>
 #include <QLabel>
 #include <QMenu>
+#include <QStyledItemDelegate>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
+
+#include <functional>
 
 namespace rpe
 {
@@ -37,37 +41,73 @@ namespace rpe
             return QStringLiteral("\u2026");
         }
 
-        // Parse an edited cell back into a variant matching the last known value's
-        // type. The bridge's coerce() finishes the job on the sim thread (string →
-        // path, exact integer widths, …); this only picks the broad category.
-        rttr::variant textToVariant(const QString& text, const rttr::variant& last)
+        // ─────────────────────────────────────────────────────────────────────────
+        //  PinnedValueDelegate — type-specialized inline editor for the Value column,
+        //  reusing the exact same factory as the property grid's PropertyDelegate:
+        //  bool → check box, number → spin box, enum → combo, QColor → picker, path →
+        //  file/dir picker, string → line edit, etc. The editor type is chosen from
+        //  the LAST MIRRORED value's type (all we know here — there's no schema/hints
+        //  in the pin list), and a committed value is routed straight to the channel
+        //  as a pin edit (no text round-trip through the item model).
+        // ─────────────────────────────────────────────────────────────────────────
+        class PinnedValueDelegate : public QStyledItemDelegate
         {
-            const rttr::type t = last.is_valid() ? TypeRenderer::rawType(last.get_type()) : rttr::type::get<void>();
-            if (t == rttr::type::get<bool>())
+        public:
+            using Commit = std::function<void(int row, const rttr::variant&)>;
+
+            PinnedValueDelegate(QTreeWidget* tree, Commit commit, QObject* parent)
+                : QStyledItemDelegate(parent)
+                , _tree(tree)
+                , _commit(std::move(commit))
             {
-                const QString s = text.trimmed().toLower();
-                return rttr::variant(s == QLatin1String("true") || s == QLatin1String("1"));
             }
-            if (t.is_arithmetic())
+
+            QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const override
             {
-                bool ok = false;
-                if (t == rttr::type::get<float>() || t == rttr::type::get<double>())
+                const rttr::variant last = _valueAt(index);
+                if (!last.is_valid())
                 {
-                    const double v = text.toDouble(&ok);
-                    return ok ? rttr::variant(v) : rttr::variant();
+                    return nullptr; // nothing to anchor the editor's type to yet
                 }
-                if (t == rttr::type::get<unsigned char>() || t == rttr::type::get<unsigned short>()
-                    || t == rttr::type::get<unsigned int>() || t == rttr::type::get<unsigned long>()
-                    || t == rttr::type::get<unsigned long long>())
-                {
-                    const qulonglong v = text.toULongLong(&ok);
-                    return ok ? rttr::variant(static_cast<uint64_t>(v)) : rttr::variant();
-                }
-                const qlonglong v = text.toLongLong(&ok);
-                return ok ? rttr::variant(static_cast<int64_t>(v)) : rttr::variant();
+                // No declared-type / hint metadata in the pin list — drive purely off
+                // the mirrored value's raw type, with default numeric ranges.
+                return varedit::makeEditor(TypeRenderer::rawType(last.get_type()), QString(), {}, parent);
             }
-            return rttr::variant(text); // strings/paths — coerce() converts
-        }
+
+            void setEditorData(QWidget* editor, const QModelIndex& index) const override
+            {
+                varedit::setEditorData(editor, _valueAt(index));
+            }
+
+            void setModelData(QWidget* editor, QAbstractItemModel*, const QModelIndex& index) const override
+            {
+                const rttr::variant last = _valueAt(index);
+                const rttr::type t = last.is_valid() ? TypeRenderer::rawType(last.get_type())
+                                                     : rttr::type::get<void>();
+                const rttr::variant v = varedit::readEditorData(editor, t);
+                if (v.is_valid())
+                {
+                    _commit(index.row(), v);
+                }
+            }
+
+            void updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option, const QModelIndex&) const override
+            {
+                editor->setGeometry(option.rect);
+            }
+
+        private:
+            // Pins are a FLAT top-level list, so the visual row maps 1:1 to a
+            // top-level item.
+            rttr::variant _valueAt(const QModelIndex& index) const
+            {
+                QTreeWidgetItem* it = _tree->topLevelItem(index.row());
+                return it ? it->data(0, LastValueRole).value<rttr::variant>() : rttr::variant();
+            }
+
+            QTreeWidget* _tree;
+            Commit _commit;
+        };
     } // namespace
 
     PinnedPropertiesWidget::PinnedPropertiesWidget(QWidget* parent)
@@ -104,17 +144,23 @@ namespace rpe
         // the Value column — otherwise a double-click on the Property column would
         // let the label be renamed (ignored by logic, but visually corrupting).
         _tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        // Type-specialized inline editor on the Value column (bool → check box, enum
+        // → combo, number → spin box, …), just like the main property grid. A commit
+        // is written back to the display and queued to the sim thread as a pin edit.
+        _tree->setItemDelegateForColumn(kValueColumn, new PinnedValueDelegate(
+            _tree,
+            [this](int row, const rttr::variant& v) { _commitValueEdit(row, v); },
+            _tree));
         layout->addWidget(_tree, 1);
 
         connect(_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int column) {
             // Value edits are anchored to the LAST MIRRORED value's type; until one
-            // has arrived there is nothing to parse against, so don't open an editor.
+            // has arrived the delegate can't pick an editor, so don't try to open one.
             if (column == kValueColumn && item->data(0, LastValueRole).value<rttr::variant>().is_valid())
             {
                 _tree->editItem(item, kValueColumn);
             }
         });
-        connect(_tree, &QTreeWidget::itemChanged, this, &PinnedPropertiesWidget::_onItemChanged);
         connect(_tree, &QTreeWidget::customContextMenuRequested, this, &PinnedPropertiesWidget::_onContextMenu);
     }
 
@@ -287,32 +333,19 @@ namespace rpe
         _updating = false;
     }
 
-    void PinnedPropertiesWidget::_onItemChanged(QTreeWidgetItem* item, int column)
+    void PinnedPropertiesWidget::_commitValueEdit(int row, const rttr::variant& v)
     {
-        if (_updating || column != kValueColumn || !_channel)
+        QTreeWidgetItem* item = _tree->topLevelItem(row);
+        if (!item || !_channel)
         {
             return;
         }
-        const rttr::variant last = item->data(0, LastValueRole).value<rttr::variant>();
-        if (!last.is_valid())
-        {
-            // No mirrored value yet — nothing anchors the parse (a "42" would go out
-            // as a string and be dropped by coerce for arithmetic targets). Restore
-            // the placeholder instead of sending an edit that silently fails.
-            _updating = true;
-            item->setText(kValueColumn, placeholderText());
-            _updating = false;
-            return;
-        }
-        const rttr::variant v = textToVariant(item->text(kValueColumn), last);
-        if (!v.is_valid())
-        {
-            // Unparseable input: restore the last known display instead of sending garbage.
-            _updating = true;
-            item->setText(kValueColumn, TypeRenderer::toDisplayString(last));
-            _updating = false;
-            return;
-        }
+        // Echo the committed value immediately (guarded so it isn't mistaken for a
+        // user edit), then queue it to the sim thread exactly like the property grid.
+        // The next mirror poll re-confirms it (and updates LastValueRole).
+        _updating = true;
+        item->setText(kValueColumn, TypeRenderer::toDisplayString(v));
+        _updating = false;
         _channel->queuePinEdit(_itemKey(item), v);
     }
 

@@ -114,6 +114,7 @@ set_target_properties(rpe_core PROPERTIES
 set(RPE_GUI_SOURCES
     src/gui/PropertyModel.cpp
     src/gui/PropertyDelegate.cpp
+    src/gui/VariantEditorFactory.cpp
     src/gui/EditorWidgets.cpp
     src/gui/PropertyEditor.cpp
     src/gui/VariantEditor.cpp

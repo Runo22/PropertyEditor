@@ -68,12 +68,14 @@ namespace rpe
         void pinsChanged();
 
     private slots:
-        void _onItemChanged(QTreeWidgetItem* item, int column);
         void _onContextMenu(const QPoint& pos);
 
     private:
         void _setupUi();
         void _pushPins(); // send the current pin set to the channel
+        // Route a value committed by the inline editor (row → top-level item) to the
+        // display and the sim thread as a pin edit.
+        void _commitValueEdit(int row, const rttr::variant& v);
         QTreeWidgetItem* _findItem(const MirrorChannel::PinKey& key) const;
         static MirrorChannel::PinKey _itemKey(const QTreeWidgetItem* item);
 
