@@ -5,6 +5,7 @@
 #include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
 #include "rpe/gui/VariantEditorFactory.h"
 
+#include <QAbstractItemDelegate>
 #include <QApplication>
 #include <QHeaderView>
 #include <QLabel>
@@ -147,10 +148,14 @@ namespace rpe
         // Type-specialized inline editor on the Value column (bool → check box, enum
         // → combo, number → spin box, …), just like the main property grid. A commit
         // is written back to the display and queued to the sim thread as a pin edit.
-        _tree->setItemDelegateForColumn(kValueColumn, new PinnedValueDelegate(
+        auto* delegate = new PinnedValueDelegate(
             _tree,
             [this](int row, const rttr::variant& v) { _commitValueEdit(row, v); },
-            _tree));
+            _tree);
+        _tree->setItemDelegateForColumn(kValueColumn, delegate);
+        // The editor is closed (commit or cancel) → live polling may refresh the row
+        // again. Covers modal-picker editors too: they stay open across the dialog.
+        connect(delegate, &QAbstractItemDelegate::closeEditor, this, [this] { _editingItem = nullptr; });
         layout->addWidget(_tree, 1);
 
         connect(_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int column) {
@@ -158,6 +163,7 @@ namespace rpe
             // has arrived the delegate can't pick an editor, so don't try to open one.
             if (column == kValueColumn && item->data(0, LastValueRole).value<rttr::variant>().is_valid())
             {
+                _editingItem = item; // pause live refresh on this row until the editor closes
                 _tree->editItem(item, kValueColumn);
             }
         });
@@ -275,6 +281,10 @@ namespace rpe
     {
         if (QTreeWidgetItem* it = _findItem({ entity, component, path, 0 }))
         {
+            if (it == _editingItem)
+            {
+                _editingItem = nullptr;
+            }
             delete it;
             _pushPins();
             emit pinsChanged();
@@ -287,6 +297,7 @@ namespace rpe
         {
             return;
         }
+        _editingItem = nullptr;
         _updating = true;
         _tree->clear();
         _updating = false;
@@ -318,11 +329,10 @@ namespace rpe
         {
             if (QTreeWidgetItem* it = _findItem(u.key))
             {
-                // Skip the refresh while the user is editing this very cell, so the
-                // live echo doesn't stomp their typing. An open inline editor is a
-                // focused child of the tree (the tree itself has focus otherwise).
-                QWidget* fw = QApplication::focusWidget();
-                if (fw && fw != _tree && _tree->isAncestorOf(fw) && it == _tree->currentItem())
+                // Never refresh the row with an editor open: overwriting the cell
+                // would commit/close (and delete) the editor mid-edit — losing a
+                // value being picked from a modal file/color dialog.
+                if (it == _editingItem)
                 {
                     continue;
                 }

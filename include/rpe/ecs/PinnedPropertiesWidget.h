@@ -84,6 +84,11 @@ namespace rpe
         QTreeWidget* _tree = nullptr;
         QTimer* _timer = nullptr;
         bool _updating = false; // guards itemChanged during programmatic updates
+        // The row with an inline editor open, if any. Live polling must not touch it
+        // (overwriting the cell would close/destroy the editor) — tracked explicitly
+        // rather than inferred from focus, which leaves the tree while a modal picker
+        // (file/color dialog) is up.
+        QTreeWidgetItem* _editingItem = nullptr;
     };
 
 } // namespace rpe

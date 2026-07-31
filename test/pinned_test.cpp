@@ -5,6 +5,7 @@
 #include <rpe/core/TypeRenderer.h>
 #include <rpe/ecs/EcsMirror.h>
 #include <rpe/ecs/PinnedPropertiesWidget.h>
+#include <rpe/gui/EditorWidgets.h>
 #include <rpe/gui/PropertyModel.h>
 
 #include <rttr/registration.h>
@@ -20,6 +21,7 @@
 #include <QTreeWidgetItem>
 
 #include <cstdio>
+#include <filesystem>
 
 struct Health
 {
@@ -46,6 +48,10 @@ struct Unit // exercises the type-specialized pin editors (bool / enum / int)
     Team team = Team::Red;
     int level = 3;
 };
+struct Doc // a std::filesystem::path leaf → FilePathEditor (modal-picker editor)
+{
+    std::filesystem::path file = "a.txt";
+};
 
 RTTR_REGISTRATION
 {
@@ -60,6 +66,7 @@ RTTR_REGISTRATION
         .property("alive", &Unit::alive)
         .property("team", &Unit::team)
         .property("level", &Unit::level);
+    rttr::registration::class_<Doc>("Doc").property("file", &Doc::file);
 }
 
 static int g_fails = 0;
@@ -267,6 +274,55 @@ int main(int argc, char** argv)
         delete boolEd;
         delete enumEd;
         delete intEd;
+    }
+
+    // ── 3d. A live poll MUST NOT clobber an open editor (modal-picker safety) ───
+    // A file/color picker steals focus from the tree while it's up, so the live
+    // ~30 Hz refresh must skip the edited row by tracking it explicitly (a
+    // focus-based guard would overwrite the cell here and destroy the editor,
+    // discarding the value being picked). Exercised with an fs::path leaf.
+    {
+        rpe::TypeBridge::registerType<Doc>();
+        auto e = world.entity("Doc1").set<Doc>({ "orig.txt" });
+        const auto id = static_cast<qulonglong>(e.id());
+
+        rpe::PinnedPropertiesWidget w;
+        w.setChannel(mirror.channel());
+        w.pin(id, QStringLiteral("Doc1"), QStringLiteral("Doc"), QStringLiteral("file"));
+        world.progress(0.016f);
+        mirror.pump();
+        w.pollNow();
+        auto* tree = w.findChild<QTreeWidget*>();
+        QTreeWidgetItem* it = tree->topLevelItem(0);
+        check("path pin shows its value", it->text(2) == QStringLiteral("orig.txt"));
+        check("path leaf is a std::filesystem::path variant",
+              rpe::TypeRenderer::isFilePath(rpe::TypeRenderer::rawType(
+                  it->data(0, Qt::UserRole + 3).value<rttr::variant>().get_type())));
+
+        // Open the editor exactly as a double-click would (this arms the edit guard).
+        tree->itemDoubleClicked(it, 2);
+        auto* fe = tree->viewport()->findChild<rpe::FilePathEditor*>();
+        check("path pin opens a FilePathEditor", fe != nullptr);
+
+        // Mimic the modal picker: focus leaves the tree AND a fresh live value lands.
+        QWidget other;
+        other.show();
+        other.setFocus();
+        fe->setPath(QStringLiteral("picked/from/dialog.dat"));
+        e.set<Doc>({ "changed-by-sim.txt" });
+        world.progress(0.016f);
+        mirror.pump();
+        w.pollNow();
+        check("live poll does not overwrite the row being edited", it->text(2) == QStringLiteral("orig.txt"));
+        check("the in-progress picked path survives the poll", fe->path() == QStringLiteral("picked/from/dialog.dat"));
+
+        // Commit → the browsed path reaches the world.
+        auto* delegate = tree->itemDelegateForColumn(2);
+        delegate->setModelData(fe, tree->model(), tree->model()->index(0, 2));
+        world.progress(0.016f);
+        mirror.pump();
+        check("browsed path commits to the world",
+              e.get<Doc>().file == std::filesystem::path("picked/from/dialog.dat"));
     }
 
     // ── 4. Pinned rows tint the main property tree ─────────────────────────────
