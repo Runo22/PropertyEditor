@@ -74,23 +74,29 @@ static void partA()
     feed({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") } });
     check("A: first populate auto-selects the top entity", curId(list) == 10 && idSel == 1 && lastId == 10);
 
-    // Add an entity → the NEWCOMER is selected (add-then-edit), and notified.
-    feed({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
-    check("A: adding an entity selects the newcomer", curId(list) == 40 && idSel == 2 && lastId == 40);
-
-    // A newcomer is picked by identity (newest id), not list position: Aaa sorts to
-    // the very top yet is the one just added, so it's selected.
-    feed({ { 99, QStringLiteral("Aaa") }, { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
-    check("A: the newcomer is selected even when it sorts to the top", curId(list) == 99 && idSel == 3);
-
     // Move to a MIDDLE entity so removals can be told apart from a snap-to-first.
     check("A: selectById(Gamma) selects it", list.selectById(30) && curId(list) == 30);
     const int selBefore = idSel;
 
+    // Add an entity (e.g. a world spawn) → the current selection is UNTOUCHED, and no
+    // selection signal fires. A newcomer never steals selection, even a top-sorted or
+    // high-id one — only an explicit selectById() (below) changes it on appearance.
+    feed({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
+    check("A: adding an entity keeps the current selection", curId(list) == 30);
+    feed({ { 99, QStringLiteral("Aaa") }, { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
+    check("A: a newly spawned entity never steals the selection", curId(list) == 30);
+    check("A: ...silently (no redundant selection signal on add)", idSel == selBefore);
+
+    // Explicit selectById() for an entity not present yet is honoured when it appears.
+    check("A: selectById(absent) is pending", !list.selectById(77));
+    feed({ { 77, QStringLiteral("Spawned") }, { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
+    check("A: an explicitly requested entity IS selected when it appears", curId(list) == 77);
+    check("A: selectById(Gamma) again", list.selectById(30) && curId(list) == 30);
+    const int selBefore2 = idSel;
+
     // Remove some OTHER entity → the current selection is untouched, silently.
     feed({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
-    check("A: removing another entity keeps the current selection", curId(list) == 30);
-    check("A: ...silently (no redundant selection signal)", idSel == selBefore);
+    check("A: removing another entity keeps the current selection", curId(list) == 30 && idSel == selBefore2);
 
     // Remove the SELECTED entity (Gamma, middle) → its NEIGHBOUR (Delta, which took
     // its slot) is selected — NOT the first entity (Alpha).

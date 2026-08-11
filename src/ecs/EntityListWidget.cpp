@@ -608,10 +608,8 @@ namespace rpe
             return;
         }
 
-        // Snapshot what we need from the PRE-update state, before the diff below
-        // overwrites _lastEntries: whether this is the first populate, and where the
-        // current selection sat (so a delete can pick its neighbour, not the top).
-        const bool wasEmpty = _lastEntries.isEmpty();
+        // Snapshot, before the diff overwrites _lastEntries, where the current
+        // selection sat — so if it gets removed we can pick its neighbour, not the top.
         int prevSelRow = -1;
         if (_selectedId != 0)
         {
@@ -634,7 +632,6 @@ namespace rpe
         // is never disturbed by an add/remove.
         _list->blockSignals(true);
         _list->setUpdatesEnabled(false);
-        QVector<qulonglong> added; // entities new in this update (drives select-newest)
         int row = 0; // widget row cursor (= kept + inserted so far)
         int i = 0;   // index into _lastEntries (mirrors the widget's current rows)
         int j = 0;   // index into the new entries
@@ -658,7 +655,6 @@ namespace rpe
                 auto* item = new QListWidgetItem(entries[j].second);
                 item->setData(Qt::UserRole, entries[j].first);
                 _list->insertItem(row, item); // added entity
-                added.push_back(entries[j].first);
                 ++j;
                 ++row;
             }
@@ -686,44 +682,26 @@ namespace rpe
             }
         }
 
-        // 1) An explicit selectById() target that just appeared wins.
+        // 1) An explicit selectById() target that just appeared wins — this is the
+        //    ONLY way an add changes the selection, so a host can opt in per entity
+        //    (e.g. select an entity it just spawned) without every world-spawned
+        //    entity ever stealing the current selection.
         if (requested)
         {
             _requestedId = 0;
             _list->setCurrentItem(requested);
             return;
         }
-        // 2) A genuine addition (not the first populate) selects the NEWEST new entity
-        //    — "add an entity, start editing it". Newest ≈ the highest raw id (fresh
-        //    entities take increasing indices); ties just pick one.
-        if (!wasEmpty && !added.isEmpty())
-        {
-            qulonglong pickId = added.front();
-            for (qulonglong id : added)
-            {
-                if (id > pickId)
-                {
-                    pickId = id;
-                }
-            }
-            for (int r = 0; r < _list->count(); ++r)
-            {
-                if (_list->item(r)->data(Qt::UserRole).toULongLong() == pickId)
-                {
-                    _list->setCurrentRow(r); // signals live → notifies the new selection
-                    return;
-                }
-            }
-        }
-        // 3) No addition: KEEP the current selection when it survived — silently, so a
-        //    removal of some OTHER entity never disturbs a host that drives selection
-        //    (setCurrentItem on the already-current item does not re-emit).
+        // 2) KEEP the current selection when it survived — silently, so adding entities
+        //    (world spawns) or removing some OTHER entity never disturbs a host that
+        //    drives selection (setCurrentItem on the already-current item does not
+        //    re-emit).
         if (reselect)
         {
             _list->setCurrentItem(reselect);
             return;
         }
-        // 4) The selected entity itself was removed → pick its NEIGHBOUR (the row that
+        // 3) The selected entity itself was removed → pick its NEIGHBOUR (the row that
         //    shifted into its slot), not the top, so a delete doesn't yank the view to
         //    the first entity. Clamped to the last row if it was the last.
         if (_selectedId != 0 && prevSelRow >= 0 && _list->count() > 0)
@@ -738,13 +716,13 @@ namespace rpe
             _list->setCurrentRow(qMin(prevSelRow, _list->count() - 1));
             return;
         }
-        // 5) No prior selection (first populate) → default to the first row.
+        // 4) No prior selection (first populate) → default to the first row.
         if (_list->count() > 0)
         {
             _list->setCurrentRow(0);
             return;
         }
-        // 6) Empty list → nothing to select.
+        // 5) Empty list → nothing to select.
         if (_selectedId != 0)
         {
             _selectedId = 0;
