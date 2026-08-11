@@ -389,6 +389,13 @@ namespace rpe
         {
             return;
         }
+        // Drop rows whose watched target no longer exists — the entity was destroyed
+        // or the component was removed from it. unpin() is a no-op for a row already
+        // gone, so a duplicate report (before setPins takes effect) is harmless.
+        for (const auto& k : _channel->pollDeadPins())
+        {
+            unpin(k.entity, k.component, k.path);
+        }
         const auto updates = _channel->pollPinValues();
         if (updates.empty())
         {

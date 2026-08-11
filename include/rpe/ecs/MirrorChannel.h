@@ -199,6 +199,12 @@ namespace rpe
         // Latest changed pin values (drained; keyed producer-side so a hidden
         // consumer can't make this grow unbounded).
         std::vector<PinValue> pollPinValues();
+        // Pins whose target is GONE — the entity was destroyed, or the component was
+        // removed from it. Drained; the watch widget removes these rows so a pin can't
+        // linger showing a stale value after the thing it watched is deleted. (A pin
+        // that is merely temporarily unresolvable — e.g. its bridge hasn't registered
+        // yet — is NOT reported here.)
+        QVector<PinKey> pollDeadPins();
 
         // ── GUI thread: results ──────────────────────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out);
@@ -238,6 +244,9 @@ namespace rpe
         void publishComponentRows(const QVector<ComponentRow>& rows);
         void publishValues(std::vector<ValueUpdate>&& values);
         void publishPinValues(std::vector<PinValue>&& values);
+        // Report pins whose target no longer exists (entity destroyed / component
+        // removed). Coalesced producer-side by pin identity.
+        void publishDeadPins(const QVector<PinKey>& keys);
         void publishCatalog(const QStringList& catalog); // legacy → non-tag entries
         void publishCatalogEntries(const QVector<CatalogEntry>& entries);
         void publishPrefabs(const QVector<PrefabEntry>& prefabs);
@@ -275,6 +284,8 @@ namespace rpe
         QHash<QString, rttr::variant> _outValues;
         // Same idea for pins, keyed by "entity|component|path".
         QHash<QString, PinValue> _outPinValues;
+        // Pins whose target vanished, coalesced by the same key (drained by the GUI).
+        QHash<QString, PinKey> _outDeadPins;
 
         std::atomic<bool> _producerAlive { true };
     };

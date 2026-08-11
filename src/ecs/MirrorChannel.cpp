@@ -96,6 +96,19 @@ namespace rpe
         return v;
     }
 
+    QVector<MirrorChannel::PinKey> MirrorChannel::pollDeadPins()
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        QVector<PinKey> v;
+        v.reserve(_outDeadPins.size());
+        for (auto it = _outDeadPins.cbegin(); it != _outDeadPins.cend(); ++it)
+        {
+            v.push_back(it.value());
+        }
+        _outDeadPins.clear();
+        return v;
+    }
+
     // ── GUI thread: results ─────────────────────────────────────────────────────
 
     bool MirrorChannel::pollEntities(QVector<EntityEntry>& out)
@@ -281,6 +294,19 @@ namespace rpe
             // Coalesce: keep only the latest value per pin.
             const QString k = QStringLiteral("%1|%2|%3").arg(v.key.entity).arg(v.key.component, v.key.path);
             _outPinValues.insert(k, std::move(v));
+        }
+    }
+
+    void MirrorChannel::publishDeadPins(const QVector<PinKey>& keys)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        for (const PinKey& k : keys)
+        {
+            const QString kk = QStringLiteral("%1|%2|%3").arg(k.entity).arg(k.component, k.path);
+            _outDeadPins.insert(kk, k);
+            // A pin can't be both "changed value" and "dead" in the same drain — drop
+            // any pending value so the consumer doesn't resurrect the row it removes.
+            _outPinValues.remove(kk);
         }
     }
 

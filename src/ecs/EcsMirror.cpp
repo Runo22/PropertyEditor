@@ -910,7 +910,7 @@ namespace rpe
                     {
                         return false;
                     }
-                    ptrOut = pe.get_mut(k.rawId);
+                    ptrOut = pe.try_get_mut(k.rawId); // nullptr (not a panic) if removed
                     return ptrOut != nullptr;
                 }
                 PinResolve pr = _pinRt.value(k.component);
@@ -948,7 +948,10 @@ namespace rpe
                 {
                     return false;
                 }
-                ptrOut = pe.get_mut(pr.compId);
+                // try_get_mut (not get_mut): returns nullptr instead of panicking when
+                // the component was removed from a still-living entity — that nullptr is
+                // exactly the "component gone" signal the dead-pin classifier acts on.
+                ptrOut = pe.try_get_mut(pr.compId);
                 return ptrOut != nullptr;
             };
 
@@ -985,6 +988,7 @@ namespace rpe
             }
 
             std::vector<MirrorChannel::PinValue> pinUpdates;
+            QVector<MirrorChannel::PinKey> deadPins;
             for (const MirrorChannel::PinKey& k : in.pins)
             {
                 void* pp = nullptr;
@@ -992,6 +996,29 @@ namespace rpe
                 uint64_t cid = 0;
                 if (!resolvePin(k, pp, pt, cid))
                 {
+                    // The pin didn't resolve. Report it as DEAD only when its target is
+                    // provably GONE — the entity was destroyed, or the component was
+                    // removed from a still-living entity — so the watch widget can drop
+                    // the row. A pin that's merely unresolvable for now (its bridge type
+                    // hasn't registered yet — plugin load order) is KEPT so it resumes
+                    // when the type appears.
+                    const flecs::entity pe = world.entity(k.entity);
+                    bool dead = !pe.is_alive();
+                    if (!dead && k.rawId != 0)
+                    {
+                        dead = !ecs_has_id(world.c_ptr(), k.entity, k.rawId); // pair removed
+                    }
+                    else if (!dead)
+                    {
+                        const flecs::entity comp = findComponentEntity(world, k.component);
+                        // comp still exists globally but the entity no longer has it →
+                        // removed. (comp invalid = type gone / not loaded → ambiguous → keep.)
+                        dead = comp.is_valid() && !ecs_has_id(world.c_ptr(), k.entity, comp.raw_id());
+                    }
+                    if (dead)
+                    {
+                        deadPins.push_back(k);
+                    }
                     continue;
                 }
                 rttr::variant access = TypeBridge::wrap(pt, pp);
@@ -1017,6 +1044,10 @@ namespace rpe
             if (!pinUpdates.empty())
             {
                 _ch->publishPinValues(std::move(pinUpdates));
+            }
+            if (!deadPins.empty())
+            {
+                _ch->publishDeadPins(deadPins);
             }
         }
 
