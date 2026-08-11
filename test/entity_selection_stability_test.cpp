@@ -74,24 +74,29 @@ static void partA()
     feed({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") } });
     check("A: first populate auto-selects the top entity", curId(list) == 10 && idSel == 1 && lastId == 10);
 
-    // Select Beta explicitly.
-    check("A: selectById(Beta) selects + notifies", list.selectById(20) && curId(list) == 20 && idSel == 2);
-
-    // Add an entity (Delta sorts between Beta and Gamma): selection stays on Beta,
-    // and NO new selection signal is emitted (silent — a host isn't disturbed).
-    const int selBefore = idSel;
+    // Add an entity → the NEWCOMER is selected (add-then-edit), and notified.
     feed({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
-    check("A: adding an entity keeps the current selection", curId(list) == 20);
+    check("A: adding an entity selects the newcomer", curId(list) == 40 && idSel == 2 && lastId == 40);
+
+    // A newcomer is picked by identity (newest id), not list position: Aaa sorts to
+    // the very top yet is the one just added, so it's selected.
+    feed({ { 99, QStringLiteral("Aaa") }, { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
+    check("A: the newcomer is selected even when it sorts to the top", curId(list) == 99 && idSel == 3);
+
+    // Move to a MIDDLE entity so removals can be told apart from a snap-to-first.
+    check("A: selectById(Gamma) selects it", list.selectById(30) && curId(list) == 30);
+    const int selBefore = idSel;
+
+    // Remove some OTHER entity → the current selection is untouched, silently.
+    feed({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") }, { 40, QStringLiteral("Delta") } });
+    check("A: removing another entity keeps the current selection", curId(list) == 30);
     check("A: ...silently (no redundant selection signal)", idSel == selBefore);
 
-    // Add an entity that sorts to the very top: still no change to the selection.
-    feed({ { 5, QStringLiteral("Aaa") }, { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 40, QStringLiteral("Delta") } });
-    check("A: a new top-sorted entity still doesn't steal the selection", curId(list) == 20 && idSel == selBefore);
-
-    // Remove the SELECTED entity (Beta) → fall back to the first, and notify.
-    feed({ { 5, QStringLiteral("Aaa") }, { 10, QStringLiteral("Alpha") }, { 40, QStringLiteral("Delta") } });
-    check("A: removing the selected entity falls back to the first", curId(list) == 5);
-    check("A: ...and notifies the real change", idSel == selBefore + 1 && lastId == 5);
+    // Remove the SELECTED entity (Gamma, middle) → its NEIGHBOUR (Delta, which took
+    // its slot) is selected — NOT the first entity (Alpha).
+    feed({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 40, QStringLiteral("Delta") } });
+    check("A: removing the selected entity picks the neighbour, not the first",
+          curId(list) == 40 && lastId == 40);
 
     // Empty the list → deselect.
     const int deBefore = deselect;

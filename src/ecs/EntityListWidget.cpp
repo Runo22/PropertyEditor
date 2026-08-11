@@ -608,15 +608,33 @@ namespace rpe
             return;
         }
 
+        // Snapshot what we need from the PRE-update state, before the diff below
+        // overwrites _lastEntries: whether this is the first populate, and where the
+        // current selection sat (so a delete can pick its neighbour, not the top).
+        const bool wasEmpty = _lastEntries.isEmpty();
+        int prevSelRow = -1;
+        if (_selectedId != 0)
+        {
+            for (int k = 0; k < _lastEntries.size(); ++k)
+            {
+                if (_lastEntries[k].first == _selectedId)
+                {
+                    prevSelRow = k;
+                    break;
+                }
+            }
+        }
+
         // DIFF update instead of clear+rebuild: both lists are sorted by the same
         // comparator, so a single merge pass finds exactly the added/removed rows.
         // A dynamic world then costs a handful of row operations per publish, not
         // thousands — a full rebuild of a big list (item churn on the GUI thread,
         // serialized process-wide by the Windows debug heap) was a periodic stall.
-        // Surviving items are KEPT (not recreated), so the current selection is
-        // untouched by an add/remove — that alone preserves it across a rebuild.
+        // Surviving items are KEPT (not recreated), so an existing selection's item
+        // is never disturbed by an add/remove.
         _list->blockSignals(true);
         _list->setUpdatesEnabled(false);
+        QVector<qulonglong> added; // entities new in this update (drives select-newest)
         int row = 0; // widget row cursor (= kept + inserted so far)
         int i = 0;   // index into _lastEntries (mirrors the widget's current rows)
         int j = 0;   // index into the new entries
@@ -640,6 +658,7 @@ namespace rpe
                 auto* item = new QListWidgetItem(entries[j].second);
                 item->setData(Qt::UserRole, entries[j].first);
                 _list->insertItem(row, item); // added entity
+                added.push_back(entries[j].first);
                 ++j;
                 ++row;
             }
@@ -648,12 +667,9 @@ namespace rpe
         _list->setUpdatesEnabled(true);
         _list->blockSignals(false);
 
-        // Selection: a pending selectById() request wins; else KEEP the authoritative
-        // current selection when its row survived — driven by _selectedId (not the
-        // list's transient currentItem, which can be null mid-update), so an
-        // add/remove never moves it while it's still valid, and never re-emits
-        // (setCurrentItem on the already-current item is a no-op). Only when the
-        // selection is genuinely gone do we fall back to the first row, or deselect.
+        // Locate the survivor of the current selection (by the authoritative
+        // _selectedId, not the list's transient currentItem) and any pending
+        // selectById() target.
         QListWidgetItem* reselect = nullptr;
         QListWidgetItem* requested = nullptr;
         for (int r = 0; r < _list->count(); ++r)
@@ -669,20 +685,67 @@ namespace rpe
                 requested = it;
             }
         }
+
+        // 1) An explicit selectById() target that just appeared wins.
         if (requested)
         {
             _requestedId = 0;
             _list->setCurrentItem(requested);
+            return;
         }
-        else if (reselect)
+        // 2) A genuine addition (not the first populate) selects the NEWEST new entity
+        //    — "add an entity, start editing it". Newest ≈ the highest raw id (fresh
+        //    entities take increasing indices); ties just pick one.
+        if (!wasEmpty && !added.isEmpty())
+        {
+            qulonglong pickId = added.front();
+            for (qulonglong id : added)
+            {
+                if (id > pickId)
+                {
+                    pickId = id;
+                }
+            }
+            for (int r = 0; r < _list->count(); ++r)
+            {
+                if (_list->item(r)->data(Qt::UserRole).toULongLong() == pickId)
+                {
+                    _list->setCurrentRow(r); // signals live → notifies the new selection
+                    return;
+                }
+            }
+        }
+        // 3) No addition: KEEP the current selection when it survived — silently, so a
+        //    removal of some OTHER entity never disturbs a host that drives selection
+        //    (setCurrentItem on the already-current item does not re-emit).
+        if (reselect)
         {
             _list->setCurrentItem(reselect);
+            return;
         }
-        else if (_list->count() > 0)
+        // 4) The selected entity itself was removed → pick its NEIGHBOUR (the row that
+        //    shifted into its slot), not the top, so a delete doesn't yank the view to
+        //    the first entity. Clamped to the last row if it was the last.
+        if (_selectedId != 0 && prevSelRow >= 0 && _list->count() > 0)
+        {
+            // Removing the current row may have left Qt's "current" already on the
+            // neighbour (silently — the removal ran under blockSignals), which would
+            // make setCurrentRow a no-op. Clear it first so a fresh selection signal
+            // always fires for the new selection.
+            _list->blockSignals(true);
+            _list->setCurrentItem(nullptr);
+            _list->blockSignals(false);
+            _list->setCurrentRow(qMin(prevSelRow, _list->count() - 1));
+            return;
+        }
+        // 5) No prior selection (first populate) → default to the first row.
+        if (_list->count() > 0)
         {
             _list->setCurrentRow(0);
+            return;
         }
-        else if (_selectedId != 0)
+        // 6) Empty list → nothing to select.
+        if (_selectedId != 0)
         {
             _selectedId = 0;
             emit entityDeselected();

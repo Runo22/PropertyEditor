@@ -772,6 +772,11 @@ namespace rpe
 
         std::sort(extraRows.begin(), extraRows.end(), rowLess);
 
+        // Remember the selected component (by displayed name) so it survives the
+        // rebuild — e.g. after a sibling component is removed, or when switching to an
+        // entity that also has it — instead of snapping back to the first row.
+        const QString prevSelName = _list->currentItem() ? _list->currentItem()->text() : QString();
+
         _list->blockSignals(true);
         _list->clear();
         for (int i = 0; i < names.size(); ++i)
@@ -789,7 +794,26 @@ namespace rpe
             item->setFlags(Qt::ItemIsEnabled); // presence row: removable, not selectable
         }
         _list->blockSignals(false);
-        if (!names.isEmpty())
+        // Reselect the previously-selected component if it's still here (only the
+        // DATA rows — the first names.size() items — are selectable); else default to
+        // the first, or deselect when there are no data rows.
+        QListWidgetItem* reselect = nullptr;
+        if (!prevSelName.isEmpty())
+        {
+            for (int i = 0; i < names.size(); ++i)
+            {
+                if (_list->item(i)->text() == prevSelName)
+                {
+                    reselect = _list->item(i);
+                    break;
+                }
+            }
+        }
+        if (reselect)
+        {
+            _list->setCurrentItem(reselect);
+        }
+        else if (!names.isEmpty())
         {
             _list->setCurrentRow(0); // auto-select first DATA row → drives the editor
         }

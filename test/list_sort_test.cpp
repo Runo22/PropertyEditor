@@ -102,7 +102,8 @@ int main(int argc, char** argv)
                 mangoAfter = lw->item(i);
         check("diff update keeps existing row objects (no rebuild)",
               lw->count() == 4 && mangoAfter != nullptr && mangoAfter == mangoBefore);
-        check("diff update preserved the selection", lw->currentItem()->data(Qt::UserRole).toULongLong() == 30ull);
+        // Adding an entity selects the NEWCOMER (Kiwi = 15) — "add, then edit it".
+        check("diff update selects the newly added entity", lw->currentItem()->data(Qt::UserRole).toULongLong() == 15ull);
     }
 
     // ── Components: sorted alphabetically by displayed leaf name ───────────────
