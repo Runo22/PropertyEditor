@@ -608,18 +608,13 @@ namespace rpe
             return;
         }
 
-        // Remember current selection so it survives the update.
-        qulonglong selectedId = 0;
-        if (auto* cur = _list->currentItem())
-        {
-            selectedId = cur->data(Qt::UserRole).toULongLong();
-        }
-
         // DIFF update instead of clear+rebuild: both lists are sorted by the same
         // comparator, so a single merge pass finds exactly the added/removed rows.
         // A dynamic world then costs a handful of row operations per publish, not
         // thousands — a full rebuild of a big list (item churn on the GUI thread,
         // serialized process-wide by the Windows debug heap) was a periodic stall.
+        // Surviving items are KEPT (not recreated), so the current selection is
+        // untouched by an add/remove — that alone preserves it across a rebuild.
         _list->blockSignals(true);
         _list->setUpdatesEnabled(false);
         int row = 0; // widget row cursor (= kept + inserted so far)
@@ -653,17 +648,19 @@ namespace rpe
         _list->setUpdatesEnabled(true);
         _list->blockSignals(false);
 
-        // Selection: a pending selectById() request wins; else the user's selection
-        // (if its row survived); else auto-select the top row so the panel is never
-        // blank. Signals are live here, so listeners hear about real changes only
-        // (setCurrentItem on the already-current item does not re-emit).
+        // Selection: a pending selectById() request wins; else KEEP the authoritative
+        // current selection when its row survived — driven by _selectedId (not the
+        // list's transient currentItem, which can be null mid-update), so an
+        // add/remove never moves it while it's still valid, and never re-emits
+        // (setCurrentItem on the already-current item is a no-op). Only when the
+        // selection is genuinely gone do we fall back to the first row, or deselect.
         QListWidgetItem* reselect = nullptr;
         QListWidgetItem* requested = nullptr;
         for (int r = 0; r < _list->count(); ++r)
         {
             auto* it = _list->item(r);
             const qulonglong id = it->data(Qt::UserRole).toULongLong();
-            if (id == selectedId)
+            if (_selectedId != 0 && id == _selectedId)
             {
                 reselect = it;
             }
@@ -685,8 +682,9 @@ namespace rpe
         {
             _list->setCurrentRow(0);
         }
-        else if (selectedId != 0)
+        else if (_selectedId != 0)
         {
+            _selectedId = 0;
             emit entityDeselected();
         }
     }
@@ -700,6 +698,7 @@ namespace rpe
             return;
         }
         const auto id = item->data(Qt::UserRole).toULongLong();
+        _selectedId = id; // authoritative selection — survives the next list rebuild
         emit entityIdSelected(id); // world-free; used by mirror mode
         if (_world)
         {

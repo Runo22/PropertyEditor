@@ -401,8 +401,23 @@ namespace rpe
     {
         _liveTimer->stop();
         _selectedEntity = {};
+        // Forget the mirror-mode selection too, otherwise _pushInterest keeps feeding
+        // the now-gone entity and the next poll would refill the component panel with
+        // its (stale) components — e.g. an entity that a required-component filter has
+        // just excluded.
+        _mirrorEntity = 0;
+        _mirrorComponent.clear();
+        _currentComps.clear();
+        _currentTags.clear();
+        _pairTypeName.clear();
+        _pairRawId.clear();
         _componentList->clearEntity();
         _propertyEditor->unbind();
+        if (_channel)
+        {
+            _pushInterest(); // interest for entity 0 → producer stops sending components
+        }
+        _refreshPinnedTint(); // the pin set is per entity+component
         emit entityDeselected();
     }
 
@@ -591,25 +606,31 @@ namespace rpe
         QVector<MirrorChannel::ComponentRow> compRows;
         if (_channel->pollComponentRows(compRows))
         {
-            _componentList->setComponentRows(compRows);
             _currentComps.clear();
             _currentTags.clear();
             _pairTypeName.clear();
             _pairRawId.clear();
-            for (const auto& r : compRows)
+            // With no entity selected (e.g. a required-component filter emptied the
+            // list), ignore any component feed still in flight for the old entity so
+            // the panel doesn't show a non-matching entity's components.
+            if (_mirrorEntity != 0)
             {
-                if (r.kind == MirrorChannel::RowKind::Data)
+                _componentList->setComponentRows(compRows);
+                for (const auto& r : compRows)
                 {
-                    _currentComps.append(r.name);
-                }
-                else if (r.kind == MirrorChannel::RowKind::Tag)
-                {
-                    _currentTags.insert(r.name);
-                }
-                else if (r.kind == MirrorChannel::RowKind::PairData)
-                {
-                    _pairTypeName.insert(r.key(), r.typeName);
-                    _pairRawId.insert(r.key(), r.rawId);
+                    if (r.kind == MirrorChannel::RowKind::Data)
+                    {
+                        _currentComps.append(r.name);
+                    }
+                    else if (r.kind == MirrorChannel::RowKind::Tag)
+                    {
+                        _currentTags.insert(r.name);
+                    }
+                    else if (r.kind == MirrorChannel::RowKind::PairData)
+                    {
+                        _pairTypeName.insert(r.key(), r.typeName);
+                        _pairRawId.insert(r.key(), r.rawId);
+                    }
                 }
             }
             _updateAddable();
@@ -628,9 +649,19 @@ namespace rpe
             _entityList->setAddablePrefabs(prefabs);
         }
 
-        for (auto& u : _channel->pollValues())
+        // With no entity selected (e.g. a required-component filter emptied the list),
+        // drain the value feed still in flight for the old entity instead of applying
+        // it, so it can't land on the next selection.
+        if (_mirrorEntity != 0)
         {
-            _propertyEditor->setPropertyValue(u.path, u.value);
+            for (auto& u : _channel->pollValues())
+            {
+                _propertyEditor->setPropertyValue(u.path, u.value);
+            }
+        }
+        else
+        {
+            _channel->pollValues(); // drain
         }
 
         // Re-send interest each tick so newly expanded fields start mirroring.

@@ -129,6 +129,11 @@ namespace rpe
         // A pending selectById() request whose entity isn't in the list yet (0 = none).
         // Applied on the next rebuild that contains it.
         qulonglong _requestedId = 0;
+        // The authoritative current selection (0 = none). Updated on every real
+        // selection change; a list rebuild (entity add/remove) keeps this selection
+        // when it survives — silently, so a host driving selection isn't disturbed —
+        // and only falls back to the first entity when it's genuinely gone.
+        qulonglong _selectedId = 0;
     };
 
 } // namespace rpe
