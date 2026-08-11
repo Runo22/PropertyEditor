@@ -100,6 +100,11 @@ namespace rpe
         void _onAddEntityClicked();
         void _onContextMenu(const QPoint& pos);
 
+    protected:
+        // Swallows the mouse press on a row's trash glyph so clicking it never selects
+        // the row — an entity can be deleted without changing the current selection.
+        bool eventFilter(QObject* obj, QEvent* ev) override;
+
     private:
         void _setupUi();
         void _applyEntries(const QVector<QPair<qulonglong, QString>>& entries);

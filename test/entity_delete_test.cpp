@@ -34,19 +34,17 @@ static void check(const char* n, bool ok)
         ++g_fails;
 }
 
-// Drive the trash delegate's two-step confirm on `row` (arm then delete).
-static void clickTrashTwice(QListWidget* lw, int row)
+// Send a real press+release at the trash glyph of `row` (the row's right-hand
+// square). Goes through the view + the widget's event filter, exactly like a click.
+static void sendGlyphClick(QListWidget* lw, int row)
 {
-    auto* del = lw->itemDelegate();
-    QStyleOptionViewItem opt;
-    opt.rect = QRect(0, 0, 200, 20);        // glyphRect() = right 20px square
-    const QPointF pos(190, 10);             // inside it
-    const QModelIndex idx = lw->model()->index(row, 0);
-    for (int i = 0; i < 2; ++i)
-    {
-        QMouseEvent ev(QEvent::MouseButtonRelease, pos, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        del->editorEvent(&ev, lw->model(), opt, idx);
-    }
+    const QRect vr = lw->visualRect(lw->model()->index(row, 0));
+    const QPointF p(vr.right() - vr.height() / 2.0, vr.center().y());
+    const QPoint g = lw->viewport()->mapToGlobal(p.toPoint());
+    QMouseEvent press(QEvent::MouseButtonPress, p, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(lw->viewport(), &press);
+    QMouseEvent rel(QEvent::MouseButtonRelease, p, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(lw->viewport(), &rel);
 }
 
 static int rowOfId(QListWidget* lw, qulonglong id)
@@ -62,11 +60,15 @@ int main(int argc, char** argv)
     qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
 
-    // ── 1. Widget: the trash emits removeEntityRequested with THAT row's id ─────
+    // ── 1. Widget: the trash's two-step confirm emits removeEntityRequested with
+    //        THAT row's id (arm, then delete). ──────────────────────────────────
     {
         rpe::EntityListWidget w;
         w.setEntityRemovingEnabled(true);
         w.setEntries({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") } });
+        w.resize(240, 200);
+        w.show();
+        QApplication::processEvents();
         auto* lw = w.findChild<QListWidget*>();
 
         qulonglong removed = 0;
@@ -74,23 +76,46 @@ int main(int argc, char** argv)
 
         const int r = rowOfId(lw, 20);
         check("Beta row present", r >= 0);
-        clickTrashTwice(lw, r);
-        check("trash delete emits the row's exact entity id", removed == 20ull);
-
-        // A single click only ARMS (no delete yet).
-        removed = 0;
-        auto* del = lw->itemDelegate();
-        QStyleOptionViewItem opt;
-        opt.rect = QRect(0, 0, 200, 20);
-        QMouseEvent ev(QEvent::MouseButtonRelease, QPointF(190, 10), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        del->editorEvent(&ev, lw->model(), opt, lw->model()->index(rowOfId(lw, 30), 0));
+        sendGlyphClick(lw, r); // first click → arm only
         check("first click only arms, does not delete", removed == 0ull);
+        sendGlyphClick(lw, r); // second click → delete
+        check("trash delete emits the row's exact entity id", removed == 20ull);
 
         // Disabling removal hides the affordance → clicks do nothing.
         w.setEntityRemovingEnabled(false);
         removed = 0;
-        clickTrashTwice(lw, rowOfId(lw, 10));
+        sendGlyphClick(lw, rowOfId(lw, 10));
+        sendGlyphClick(lw, rowOfId(lw, 10));
         check("no delete when removing is disabled", removed == 0ull);
+    }
+
+    // ── 1b. Clicking the trash must NOT change the selection — you can delete an
+    //        UNSELECTED entity while another stays selected. Uses REAL viewport mouse
+    //        events (selection is decided on press, which the widget must swallow). ─
+    {
+        rpe::EntityListWidget w;
+        w.setEntityRemovingEnabled(true);
+        w.setEntries({ { 10, QStringLiteral("Alpha") }, { 20, QStringLiteral("Beta") }, { 30, QStringLiteral("Gamma") } });
+        w.resize(240, 200);
+        w.show();
+        QApplication::processEvents();
+        auto* lw = w.findChild<QListWidget*>();
+
+        lw->setCurrentRow(rowOfId(lw, 10)); // select Alpha
+        const qulonglong selBefore = lw->currentItem()->data(Qt::UserRole).toULongLong();
+
+        qulonglong removed = 0;
+        QObject::connect(&w, &rpe::EntityListWidget::removeEntityRequested, &w, [&](qulonglong id) { removed = id; });
+
+        // Click the trash glyph of Beta (NOT the selected row) via real press+release.
+        const int br = rowOfId(lw, 20);
+        sendGlyphClick(lw, br); // arm
+        check("clicking an entity's trash does not select it",
+              lw->currentItem() && lw->currentItem()->data(Qt::UserRole).toULongLong() == selBefore);
+        sendGlyphClick(lw, br); // confirm → delete
+        check("the unselected entity's trash still deletes it", removed == 20ull);
+        check("the selection is unchanged after the delete",
+              lw->currentItem() && lw->currentItem()->data(Qt::UserRole).toULongLong() == selBefore);
     }
 
     // ── 2. The dynamic context-menu hook is invoked with the clicked entity id ─

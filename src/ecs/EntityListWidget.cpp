@@ -147,30 +147,9 @@ namespace rpe
                 p->restore();
             }
 
-            bool editorEvent(QEvent* ev, QAbstractItemModel*, const QStyleOptionViewItem& opt, const QModelIndex& index) override
-            {
-                if (!enabled || ev->type() != QEvent::MouseButtonRelease)
-                    return false;
-                auto* me = static_cast<QMouseEvent*>(ev);
-                const qulonglong id = index.data(Qt::UserRole).toULongLong();
-                if (me->button() == Qt::LeftButton && id != 0 && glyphRect(opt).contains(me->pos()))
-                {
-                    if (id == confirmId)
-                    {
-                        confirmId = 0;
-                        if (onRemove)
-                            onRemove(id); // second click → delete
-                    }
-                    else
-                    {
-                        confirmId = id; // first click → arm
-                    }
-                    repaint();
-                    return true; // consume: no selection change
-                }
-                clearConfirm();
-                return false;
-            }
+            // Paint-only: the two-step click is handled by EntityListWidget's viewport
+            // event filter (on mouse press, so the row is never selected). glyphRect()
+            // and the confirm state are shared with it.
         };
     } // namespace
 
@@ -223,6 +202,9 @@ namespace rpe
         };
         _list->setItemDelegate(del);
         _rowDelegate = del;
+        // Intercept presses on the trash glyph before the view selects the row (see
+        // eventFilter): deleting an entity must not steal the current selection.
+        _list->viewport()->installEventFilter(this);
         _list->setContextMenuPolicy(Qt::CustomContextMenu);
         layout->addWidget(_list, 1);
 
@@ -240,6 +222,51 @@ namespace rpe
             del->clearConfirm();
             _list->viewport()->update();
         }
+    }
+
+    bool EntityListWidget::eventFilter(QObject* obj, QEvent* ev)
+    {
+        // The view selects a row on mouse PRESS. So the trash glyph's two-step confirm
+        // is driven HERE, from the press, and the press is consumed — the row is never
+        // selected, and clicking an unselected entity's trash deletes it without
+        // disturbing the current selection. (Consuming the press stops the release from
+        // reaching the delegate, so the delegate is paint-only; the action lives here.)
+        if (obj == _list->viewport()
+            && (ev->type() == QEvent::MouseButtonPress || ev->type() == QEvent::MouseButtonDblClick))
+        {
+            auto* del = static_cast<EntityTrashDelegate*>(_rowDelegate);
+            auto* me = static_cast<QMouseEvent*>(ev);
+            if (del && del->enabled && me->button() == Qt::LeftButton)
+            {
+                const QModelIndex idx = _list->indexAt(me->pos());
+                if (idx.isValid())
+                {
+                    const QRect vr = _list->visualRect(idx);
+                    const QRect glyph(vr.right() - vr.height(), vr.top(), vr.height(), vr.height());
+                    if (glyph.contains(me->pos()))
+                    {
+                        const qulonglong id = idx.data(Qt::UserRole).toULongLong();
+                        if (id != 0)
+                        {
+                            if (id == del->confirmId)
+                            {
+                                del->confirmId = 0; // second click → delete
+                                if (del->onRemove)
+                                    del->onRemove(id);
+                            }
+                            else
+                            {
+                                del->confirmId = id; // first click → arm
+                            }
+                            del->repaint();
+                        }
+                        return true; // consume → no selection change
+                    }
+                }
+                del->clearConfirm(); // pressed a row but not its glyph → revert any arm
+            }
+        }
+        return QWidget::eventFilter(obj, ev);
     }
 
     void EntityListWidget::setContextActions(const QVector<EntityAction>& actions)
