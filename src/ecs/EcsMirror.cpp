@@ -1056,8 +1056,24 @@ namespace rpe
             return;
         }
         flecs::entity e = world.entity(entity);
-        if (!e.is_alive())
+
+        // The selected entity can stop qualifying BETWEEN the wall-clock entity scans,
+        // through a DIRECT world edit the mirror never routed: it was destroyed, or the
+        // required component was removed from it. The entity list wouldn't notice until
+        // the next scan (up to a scan interval later), leaving a non-matching entity
+        // selected with its components on show. Detect it here — every pump, O(1) — and
+        // force a prompt rescan (clear the wall-clock gate) so the list drops it and the
+        // GUI deselects; publish an empty component list so the panel clears at once
+        // rather than lingering on the stale rows.
+        const bool gone = !e.is_alive();
+        const bool failsFilter = !gone && !required.isEmpty() && _reqId != 0
+            && !ecs_has_id(world.c_ptr(), entity, _reqId);
+        if (gone || failsFilter)
         {
+            _lastEntityScan = {};           // bypass the 0.5s gate → rescan next pump
+            _compsEntity = 0;               // invalidate the component-list cache
+            _lastCompRows.clear();          // force the empty publish through the dedup
+            _ch->publishComponentRows({});  // clear the panel now
             return;
         }
 
