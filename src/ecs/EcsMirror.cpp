@@ -1070,10 +1070,15 @@ namespace rpe
             && !ecs_has_id(world.c_ptr(), entity, _reqId);
         if (gone || failsFilter)
         {
-            _lastEntityScan = {};           // bypass the 0.5s gate → rescan next pump
-            _compsEntity = 0;               // invalidate the component-list cache
-            _lastCompRows.clear();          // force the empty publish through the dedup
-            _ch->publishComponentRows({});  // clear the panel now
+            _lastEntityScan = {}; // bypass the 0.5s gate → rescan next pump
+            _compsEntity = 0;     // invalidate the component-list cache
+            // Clear the panel ONCE (on the transition), not every pump until the entity
+            // list drops the entity and the GUI re-points interest at a neighbour.
+            if (!_lastCompRows.isEmpty())
+            {
+                _lastCompRows.clear();
+                _ch->publishComponentRows({});
+            }
             return;
         }
 

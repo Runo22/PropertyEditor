@@ -612,7 +612,10 @@ namespace rpe
             _pairRawId.clear();
             // With no entity selected (e.g. a required-component filter emptied the
             // list), ignore any component feed still in flight for the old entity so
-            // the panel doesn't show a non-matching entity's components.
+            // the panel doesn't show a non-matching entity's components. (The producer
+            // clears the feed when the SELECTED entity becomes invalid — see EcsMirror's
+            // gone/failsFilter block — but on a plain deselect it just stops publishing,
+            // so this consumer-side gate covers the one-pump window before it does.)
             if (_mirrorEntity != 0)
             {
                 _componentList->setComponentRows(compRows);

@@ -762,6 +762,7 @@ namespace rpe
         auto* item = _list->currentItem();
         if (!item)
         {
+            _selectedId = 0; // keep the authoritative tracker consistent on any deselect
             emit entityDeselected();
             return;
         }
