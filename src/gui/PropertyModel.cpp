@@ -472,8 +472,22 @@ namespace rpe
         for (auto it = batch.cbegin(); it != batch.cend(); ++it)
         {
             auto* node = _findNode(it.key());
-            if (!node || node->hasLocalEdit())
+            if (!node)
             {
+                continue;
+            }
+            if (node->hasLocalEdit())
+            {
+                // Frozen leaf: don't disturb the shown draft, but keep the underlying
+                // live value current so a later reset snaps to the REAL live value.
+                // Mirror mode dedups, so it may never resend an unchanged value — and
+                // in direct mode the 50 Hz refresh would keep it fresh, which is why
+                // this staleness only bit mirror mode. (Expandable frozen nodes are
+                // left as-is; their structure isn't rebuilt on this path.)
+                if (!node->isExpandable())
+                {
+                    node->setLiveValueQuiet(TypeRenderer::unwrap(it.value()));
+                }
                 continue;
             }
             // Route mirror injections through the same dispatch refresh() uses, so an
