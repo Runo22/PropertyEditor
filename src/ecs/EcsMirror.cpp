@@ -578,8 +578,16 @@ namespace rpe
         const auto scanNow = std::chrono::steady_clock::now();
         const bool requiredChanged = (required != _lastRequired);
         _lastRequired = required;
+        // While the list is EMPTY (nothing selected/inspectable) poll more eagerly, so
+        // a freshly spawned / plugin-loaded entity appears promptly instead of after a
+        // full scan interval — there's nothing to fall back on to force a rescan here.
+        // Cheap in this state: a filtered query visits ~nothing, and an empty result
+        // appends nothing; capped at 10 Hz so it never becomes a per-frame full scan.
+        const auto effGap = (_lastEntities.isEmpty() && _entityScanGap.count() > 0.1)
+            ? std::chrono::duration<double>(0.1)
+            : _entityScanGap;
         const bool scanDue = requiredChanged || structuralApplied
-            || (scanNow - _lastEntityScan >= _entityScanGap);
+            || (scanNow - _lastEntityScan >= effGap);
 
         // A filter/structural change invalidates an in-flight cycle: restart with
         // fresh parameters instead of finishing a stale pass.
