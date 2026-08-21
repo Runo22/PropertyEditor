@@ -563,6 +563,7 @@ namespace rpe
         node->setLocalEditValue(node->liveValue());
         const auto idx = _indexFromNode(node);
         emit dataChanged(idx, idx.siblingAtColumn(columnCount() - 1));
+        emit localEditsChanged();
     }
 
     void PropertyModel::resetNode(const QString& path)
@@ -575,6 +576,7 @@ namespace rpe
         node->setLocalEdit(false);
         const auto idx = _indexFromNode(node);
         emit dataChanged(idx, idx.siblingAtColumn(columnCount() - 1));
+        emit localEditsChanged();
     }
 
     void PropertyModel::resetAll()
@@ -592,6 +594,7 @@ namespace rpe
         if (any && !_root->children().isEmpty())
         {
             emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1));
+            emit localEditsChanged();
         }
     }
 
@@ -735,6 +738,7 @@ namespace rpe
             node->setLiveValue(newVal);
             _editSink(node->path(), newVal);
             emit propertyEdited(node->path(), newVal);
+            emit localEditsChanged();
             return true;
         }
 
@@ -759,6 +763,7 @@ namespace rpe
                 node->setLocalEdit(false);
                 node->setLiveValue(actual.is_valid() ? actual : newVal);
                 emit propertyEdited(node->path(), node->liveValue());
+                emit localEditsChanged();
                 return true;
             }
             // Write failed — fall through to a local draft so the edit is not lost.
@@ -767,6 +772,7 @@ namespace rpe
         node->setLocalEditValue(newVal);
         node->setLocalEdit(true);
         emit propertyEdited(node->path(), newVal);
+        emit localEditsChanged();
         return true;
     }
 

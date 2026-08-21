@@ -151,6 +151,10 @@ namespace rpe
 
     signals:
         void propertyEdited(const QString& path, const rttr::variant& newValue);
+        // Fires when the set of locally-edited (frozen) nodes may have changed — a
+        // node was frozen, reset, or an edit released one. Lets the view enable the
+        // Reset control only while there is actually something frozen to release.
+        void localEditsChanged();
 
     private slots:
         void _flushPending();

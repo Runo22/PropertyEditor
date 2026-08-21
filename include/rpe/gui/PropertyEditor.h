@@ -107,6 +107,8 @@ namespace rpe
     private:
         void _setupUi();
         void _pushExpansionState();
+        // Enable the Reset control only while the current component has a frozen value.
+        void _updateResetEnabled();
 
         PropertyModel* _model = nullptr;
         PropertyDelegate* _delegate = nullptr;

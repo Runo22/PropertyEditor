@@ -62,6 +62,8 @@ namespace rpe
         _delegate = new PropertyDelegate(_model, this);
         _setupUi();
         connect(_model, &PropertyModel::propertyEdited, this, &PropertyEditor::propertyEdited);
+        connect(_model, &PropertyModel::localEditsChanged, this, &PropertyEditor::_updateResetEnabled);
+        _updateResetEnabled(); // start disabled — nothing is frozen yet
     }
 
     void PropertyEditor::_setupUi()
@@ -154,11 +156,13 @@ namespace rpe
         _model->bindType(type);
         _view->expandToDepth(0);
         _pushExpansionState();
+        _updateResetEnabled(); // a fresh schema has no frozen nodes
     }
 
     void PropertyEditor::unbind()
     {
         _model->unbind();
+        _updateResetEnabled();
     }
     void PropertyEditor::refresh(const rttr::instance& obj)
     {
@@ -174,7 +178,15 @@ namespace rpe
     void PropertyEditor::setReadOnly(bool ro)
     {
         _model->setReadOnly(ro);
-        _resetBtn->setEnabled(!ro);
+        _updateResetEnabled();
+    }
+
+    // The Reset button releases frozen (locally-edited) values — enable it only while
+    // the current component actually has one, so it reads as an active affordance
+    // rather than an always-lit button that looks like "reset to defaults".
+    void PropertyEditor::_updateResetEnabled()
+    {
+        _resetBtn->setEnabled(!isReadOnly() && _model->hasAnyLocalEdit());
     }
     bool PropertyEditor::isReadOnly() const
     {
