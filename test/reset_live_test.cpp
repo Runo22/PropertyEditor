@@ -11,7 +11,9 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QSpinBox>
 #include <QToolButton>
+#include <QTreeView>
 
 #include <cstdio>
 
@@ -115,6 +117,52 @@ int main(int argc, char** argv)
         check("Reset enabled once a value is frozen", resetBtn && resetBtn->isEnabled());
         m->resetAll();
         check("Reset disabled again after releasing the freeze", resetBtn && !resetBtn->isEnabled());
+    }
+
+    // ── Pressing Reset while an inline editor is OPEN must be safe ──────────────
+    // (An open editor frozen its row, so the button is enabled during editing; make
+    // sure clicking it then doesn't corrupt anything.)
+    {
+        rpe::PropertyEditor editor;
+        editor.setEditSink([](const QString&, const rttr::variant&) {}); // mirror-mode commits
+        editor.bindType(rttr::type::get<Comp>());
+        Comp c3 { 5, 6 };
+        rttr::instance inst3(c3);
+        editor.refresh(inst3);
+        editor.resize(400, 300);
+        editor.show();
+        QCoreApplication::processEvents();
+
+        auto* view = editor.findChild<QTreeView*>();
+        auto* proxy = view->model();
+        QModelIndex hpVal;
+        for (int r = 0; r < proxy->rowCount(); ++r)
+        {
+            const QModelIndex i0 = proxy->index(r, 0);
+            if (i0.data(rpe::PropertyPathRole).toString() == QStringLiteral("hp"))
+            {
+                hpVal = proxy->index(r, 1);
+                break;
+            }
+        }
+        auto* m = editor.findChild<rpe::PropertyModel*>();
+
+        view->setCurrentIndex(hpVal);
+        view->edit(hpVal); // open the inline editor → freezes the row
+        QCoreApplication::processEvents();
+        const bool editorOpen = view->findChild<QSpinBox*>() != nullptr;
+        check("inline editor opened (row frozen)", editorOpen && m->hasAnyLocalEdit());
+
+        // Press Reset mid-edit — must not crash or corrupt state.
+        m->resetAll();
+        QCoreApplication::processEvents();
+        check("Reset while editing releases the freeze", !m->hasAnyLocalEdit());
+        check("the open editor still exists after Reset", view->findChild<QSpinBox*>() != nullptr);
+
+        // Close the editor (move selection away) — clean teardown, still no crash.
+        view->setCurrentIndex(proxy->index(0, 0));
+        QCoreApplication::processEvents();
+        check("closing the editor after a mid-edit Reset is clean", !m->hasAnyLocalEdit());
     }
 
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);

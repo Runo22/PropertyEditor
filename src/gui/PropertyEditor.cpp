@@ -85,7 +85,11 @@ namespace rpe
 
         _resetBtn = new QToolButton(_toolbar);
         _resetBtn->setText(tr("Reset"));
-        _resetBtn->setToolTip(tr("Release all local edits (return to live values)"));
+        // Spell out what "Reset" does, since the short label can read like "reset to
+        // defaults": it only releases FROZEN values and resumes live updates — it does
+        // not change any value in the world.
+        _resetBtn->setToolTip(tr("Release frozen values and resume live updates.\n"
+                                 "Does not modify the world (only editing a value does)."));
         tb->addWidget(_resetBtn);
 
         root->addWidget(_toolbar);
