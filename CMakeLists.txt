@@ -325,6 +325,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_flecs_naming_test test/flecs_naming_test.cpp)
     target_link_libraries(rpe_flecs_naming_test PRIVATE rpe_gui)
 
+    add_executable(rpe_namespace_carryover_test test/namespace_carryover_test.cpp)
+    target_link_libraries(rpe_namespace_carryover_test PRIVATE rpe_gui)
+
     add_executable(rpe_namespaced_components_gui_test test/namespaced_components_gui_test.cpp)
     target_link_libraries(rpe_namespaced_components_gui_test PRIVATE rpe_gui)
 endif()

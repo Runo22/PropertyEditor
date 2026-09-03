@@ -867,11 +867,13 @@ namespace rpe
         // its row, so if that component was DELETED we can select the neighbour that
         // took its place rather than snapping back to the top of the list.
         const QString prevSelPath = _list->currentItem() ? _list->currentItem()->data(Qt::UserRole).toString() : QString();
+        const QString prevSelLeaf = componentLeaf(prevSelPath); // for same-leaf carry-over across entities
         const int prevSelRow = _list->currentRow();
 
         _list->blockSignals(true);
         _list->clear();
         QListWidgetItem* reselect = nullptr;
+        QListWidgetItem* leafMatch = nullptr; // same leaf name, different namespace (entity switch)
         QListWidgetItem* firstData = nullptr;
         QVector<QListWidgetItem*> selectables; // in row order
         for (const auto& r : rows)
@@ -892,6 +894,14 @@ namespace rpe
                 if (r.key() == prevSelPath)
                 {
                     reselect = item;
+                }
+                else if (!leafMatch && !prevSelLeaf.isEmpty() && componentLeaf(r.name) == prevSelLeaf)
+                {
+                    // The exact component isn't here, but one with the SAME leaf name is
+                    // (e.g. switching to an entity whose "Stats" is a DIFFERENT namespaced
+                    // type). Prefer it over the first row, and — crucially — its own full
+                    // path drives resolution, so the RIGHT type binds, not the old one.
+                    leafMatch = item;
                 }
                 if (r.kind == MirrorChannel::RowKind::PairData)
                 {
@@ -915,6 +925,12 @@ namespace rpe
         {
             // The selected component survived → keep it.
             _list->setCurrentItem(reselect);
+        }
+        else if (leafMatch)
+        {
+            // Same leaf on the newly-selected entity → follow it to that entity's own
+            // (correctly-typed) component instead of carrying over the old namespace.
+            _list->setCurrentItem(leafMatch);
         }
         else if (!prevSelPath.isEmpty() && !selectables.isEmpty())
         {

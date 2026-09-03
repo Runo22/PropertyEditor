@@ -24,6 +24,33 @@ struct Health
     int hp = 100;
 };
 
+// Same LEAF ("Panel") in two namespaces — must resolve by full path, not ambiguously.
+namespace game
+{
+    struct Panel
+    {
+        int a = 0;
+    };
+}
+namespace ui
+{
+    struct Panel
+    {
+        int b = 0;
+    };
+}
+// A DEEPER namespace than the flecs path carries — exercises the scoped-suffix match.
+namespace app
+{
+    namespace gfx
+    {
+        struct Sprite
+        {
+            int s = 0;
+        };
+    }
+}
+
 RTTR_REGISTRATION
 {
     // Scoped RTTR name; flecs will report the short name "Transform".
@@ -34,6 +61,10 @@ RTTR_REGISTRATION
     // Registered under a name that does NOT match the flecs component name.
     rttr::registration::class_<Health>("rpg::HealthComponent")
         .property("hp", &Health::hp);
+
+    rttr::registration::class_<game::Panel>("game::Panel").property("a", &game::Panel::a);
+    rttr::registration::class_<ui::Panel>("ui::Panel").property("b", &ui::Panel::b);
+    rttr::registration::class_<app::gfx::Sprite>("app::gfx::Sprite").property("s", &app::gfx::Sprite::s);
 }
 
 static int g_fails = 0;
@@ -49,6 +80,7 @@ int main()
     rpe::TypeBridge::registerType<game::Transform>();
     // Map the flecs component name "Health" onto the RTTR type "rpg::HealthComponent".
     rpe::TypeBridge::registerType<Health>("Health");
+    rpe::TypeBridge::registerTypes<game::Panel, ui::Panel, app::gfx::Sprite>();
 
     // 1) Short-name resolution: flecs "Transform" → RTTR "game::Transform".
     const rttr::type t1 = rpe::TypeBridge::resolveByName("Transform");
@@ -70,6 +102,24 @@ int main()
     check("resolveByName accepts std::string", rpe::TypeBridge::resolveByName(healthStr) == rttr::type::get<Health>());
     check("resolveByName accepts std::string_view", rpe::TypeBridge::resolveByName(healthView) == rttr::type::get<Health>());
     check("resolveByName(empty) is invalid", !rpe::TypeBridge::resolveByName(std::string_view {}).is_valid());
+
+    // 3c) Same-leaf types in different namespaces resolve by FULL PATH (no ambiguity).
+    check("full path resolves game::Panel",
+          rpe::TypeBridge::resolveByName("game.Panel") == rttr::type::get<game::Panel>());
+    check("full path resolves ui::Panel (not the other Panel)",
+          rpe::TypeBridge::resolveByName("ui.Panel") == rttr::type::get<ui::Panel>());
+
+    // 3d) Scoped-SUFFIX: a flecs path shallower than the RTTR namespace still
+    //     disambiguates ("gfx.Sprite" → "app::gfx::Sprite").
+    check("scoped-suffix resolves app::gfx::Sprite from \"gfx.Sprite\"",
+          rpe::TypeBridge::resolveByName("gfx.Sprite") == rttr::type::get<app::gfx::Sprite>());
+
+    // 3e) Bare-leaf lookup of an ambiguous name is DETERMINISTIC (same every call /
+    //     build) and valid — never an unordered_map coin-flip.
+    const rttr::type p1 = rpe::TypeBridge::resolveByName("Panel");
+    const rttr::type p2 = rpe::TypeBridge::resolveByName("Panel");
+    check("ambiguous leaf resolves to a valid type", p1.is_valid());
+    check("ambiguous leaf resolution is deterministic", p1 == p2);
 
     // 4) wrap() yields a working RTTR instance over a live object.
     game::Transform tf { 3.0, 4.0 };
