@@ -320,7 +320,10 @@ namespace rpe
         _filterEdit->setPlaceholderText(tr("Filter components…"));
         _filterEdit->setClearButtonEnabled(true);
         layout->addWidget(_filterEdit);
-        connect(_filterEdit, &QLineEdit::textChanged, this, [this] { _applyFilter(); });
+        connect(_filterEdit, &QLineEdit::textChanged, this, [this] {
+            _applyFilter();
+            _ensureSelectionVisible(); // don't leave the selection on a row the filter hid
+        });
 
         _list = new QListWidget(this);
         _list->setMouseTracking(true); // so the row icon can highlight on hover
@@ -822,6 +825,7 @@ namespace rpe
             emit componentDeselected();
         }
         _applyFilter();
+        _ensureSelectionVisible();
     }
 
     void ComponentListWidget::setWorldAccess(AccessGuard guard)
@@ -874,7 +878,6 @@ namespace rpe
         _list->clear();
         QListWidgetItem* reselect = nullptr;
         QListWidgetItem* leafMatch = nullptr; // same leaf name, different namespace (entity switch)
-        QListWidgetItem* firstData = nullptr;
         QVector<QListWidgetItem*> selectables; // in row order
         for (const auto& r : rows)
         {
@@ -886,10 +889,6 @@ namespace rpe
                 || r.kind == MirrorChannel::RowKind::PairData;
             if (selectable)
             {
-                if (!firstData)
-                {
-                    firstData = item;
-                }
                 selectables.append(item);
                 if (r.key() == prevSelPath)
                 {
@@ -949,16 +948,45 @@ namespace rpe
             }
             _list->setCurrentItem(pick);
         }
-        else if (firstData)
-        {
-            // Nothing was selected before (initial load) → default to the first.
-            _list->setCurrentItem(firstData);
-        }
         else
         {
             emit componentDeselected();
         }
         _applyFilter(); // re-apply over the rebuilt rows
+        _ensureSelectionVisible();
+    }
+
+    // The chosen row must be one the user can actually SEE: the text filter is applied
+    // after the rows are rebuilt, so a pick made before it can land on a hidden row —
+    // and even a visible pick leaves the view wherever the rebuild left it (typically
+    // scrolled to the end). Re-home the selection onto the first visible selectable
+    // when it's filtered out, then scroll it into view.
+    void ComponentListWidget::_ensureSelectionVisible()
+    {
+        QListWidgetItem* cur = _list->currentItem();
+        if (cur && cur->isHidden())
+        {
+            cur = nullptr; // filtered out → fall through to the first visible row
+        }
+        if (!cur)
+        {
+            for (int i = 0; i < _list->count(); ++i)
+            {
+                QListWidgetItem* it = _list->item(i);
+                if (!it->isHidden() && (it->flags() & Qt::ItemIsSelectable))
+                {
+                    cur = it;
+                    break;
+                }
+            }
+            if (!cur)
+            {
+                _list->setCurrentItem(nullptr); // nothing matches the filter
+                return;
+            }
+            _list->setCurrentItem(cur);
+        }
+        _list->scrollToItem(cur, QAbstractItemView::EnsureVisible);
     }
 
     void ComponentListWidget::_applyFilter()

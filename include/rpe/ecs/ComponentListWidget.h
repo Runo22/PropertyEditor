@@ -118,6 +118,9 @@ namespace rpe
     private:
         void _setupUi();
         void _applyFilter(); // hide list rows not matching the filter text
+        // Keep the selection on a row the user can SEE: re-home it to the first visible
+        // selectable when the filter hides it, then scroll it into view.
+        void _ensureSelectionVisible();
 
         QListWidget* _list = nullptr;
         QLineEdit* _filterEdit = nullptr;
