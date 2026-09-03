@@ -39,11 +39,22 @@ namespace rpe
             r.path = path;
             const flecs::Component* cd = comp.try_get<flecs::Component>();
             r.tag = !cd || cd->size <= 0;
-            const rttr::type t = TypeBridge::resolveByName(raw);
+            // Resolve by the FULL PATH, exactly as the inspector's component listing
+            // does — resolving by the leaf here would report a different (ambiguously
+            // picked) type than the one actually bound whenever two components share a
+            // leaf name in different namespaces, i.e. it would lie in the very case you
+            // are most likely debugging. Fall back to the leaf for components whose
+            // path doesn't resolve (matches resolveByName's own ordering).
+            rttr::type t = TypeBridge::resolveByName(path.toUtf8().constData());
+            if (!t.is_valid())
+            {
+                t = TypeBridge::resolveByName(raw);
+            }
             r.bridged = t.is_valid();
             if (r.bridged)
             {
                 r.rttrType = QString::fromStdString(t.get_name().to_string());
+                r.propertyCount = static_cast<int>(t.get_properties().size());
             }
             out.push_back(std::move(r));
         });
