@@ -103,7 +103,9 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        r.aliases[std::string(flecsName)] = t.get_id();
+        // Store normalised ("::") so an alias registered either way matches a flecs
+        // path spelled the other way ("game::Stats" alias ↔ "game.Stats" path).
+        r.aliases[normalizeScopes(std::string(flecsName))] = t.get_id();
         r.generation.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -141,8 +143,14 @@ namespace rpe
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
 
-        // 1) Explicit alias (registerType<T>(name) / registerAlias) wins.
-        if (const auto a = r.aliases.find(name); a != r.aliases.end())
+        const std::string normName = normalizeScopes(name);
+
+        // 1) Alias wins — an explicit registerType<T>(name)/registerAlias, or the
+        //    automatic C++-type-name alias registerType<T>() records. The latter is
+        //    what keeps two types apart when their RTTR names are identical (the RTTR
+        //    name is whatever was registered; the C++ name always carries the
+        //    namespace). Matched separator-insensitively.
+        if (const auto a = r.aliases.find(normName); a != r.aliases.end())
         {
             if (const auto e = r.map.find(a->second); e != r.map.end())
             {
@@ -154,7 +162,6 @@ namespace rpe
         //    "game.Transform" matches the RTTR type "game::Transform". This is the
         //    UNAMBIGUOUS path — pass the full flecs component path here and two
         //    components that share a short name ("Panel") still resolve correctly.
-        const std::string normName = normalizeScopes(name);
         for (const auto& [id, entry] : r.map)
         {
             if (normalizeScopes(entry.type.get_name().to_string()) == normName)
