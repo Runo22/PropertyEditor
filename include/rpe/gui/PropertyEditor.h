@@ -11,6 +11,7 @@
 class QTreeView;
 class QLineEdit;
 class QToolButton;
+class QLabel;
 class QSortFilterProxyModel;
 
 namespace rpe
@@ -109,6 +110,8 @@ namespace rpe
         void _pushExpansionState();
         // Enable the Reset control only while the current component has a frozen value.
         void _updateResetEnabled();
+        // Show/hide the "no reflected properties" hint for the just-bound type.
+        void _updateEmptyHint(rttr::type t);
 
         PropertyModel* _model = nullptr;
         PropertyDelegate* _delegate = nullptr;
@@ -117,6 +120,9 @@ namespace rpe
         QWidget* _toolbar = nullptr;
         QLineEdit* _filter = nullptr;
         QToolButton* _resetBtn = nullptr;
+        // Explains an empty panel when the bound type reflects no properties, instead
+        // of leaving a silent blank (see _updateEmptyHint).
+        QLabel* _emptyHint = nullptr;
         bool _pinningEnabled = false;
     };
 

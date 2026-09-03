@@ -5,6 +5,7 @@
 #include <QAction>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QLabel>
 #include <QLineEdit>
 #include <QApplication>
 #include <QClipboard>
@@ -94,6 +95,15 @@ namespace rpe
 
         root->addWidget(_toolbar);
 
+        // Empty-state hint: a component can resolve (so it lists) yet reflect no
+        // properties, which otherwise leaves a silent blank panel. See _updateEmptyHint.
+        _emptyHint = new QLabel(this);
+        _emptyHint->setWordWrap(true);
+        _emptyHint->setContentsMargins(6, 4, 6, 4);
+        _emptyHint->setStyleSheet(QStringLiteral("color: palette(mid);"));
+        _emptyHint->setVisible(false);
+        root->addWidget(_emptyHint);
+
         // proxy for filtering (matches property name OR value — see PropertyFilterProxy)
         _proxy = new PropertyFilterProxy(this);
         _proxy->setSourceModel(_model);
@@ -161,12 +171,37 @@ namespace rpe
         _view->expandToDepth(0);
         _pushExpansionState();
         _updateResetEnabled(); // a fresh schema has no frozen nodes
+        _updateEmptyHint(type);
     }
 
     void PropertyEditor::unbind()
     {
         _model->unbind();
         _updateResetEnabled();
+        _emptyHint->setVisible(false);
+    }
+
+    // A type can be perfectly valid yet reflect NOTHING: rttr::type::get<T>() succeeds
+    // for any complete type, registration or not. Such a component still resolves and
+    // still lists — it just binds an empty schema, so the panel goes blank with no
+    // explanation. Say so, and point at the usual cause (a registration block the
+    // linker dropped, which is why it typically only bites in Release).
+    void PropertyEditor::_updateEmptyHint(rttr::type t)
+    {
+        const bool noProps = t.is_valid() && t.get_properties().empty();
+        if (noProps)
+        {
+            const auto n = t.get_name();
+            _emptyHint->setText(tr("“%1” reflects no properties — nothing to edit.")
+                                    .arg(QString::fromUtf8(n.data(), static_cast<int>(n.size()))));
+            _emptyHint->setToolTip(tr(
+                "The type resolved, but RTTR reports no properties for it.\n\n"
+                "If this works in a Debug build but not in Release, its RTTR_REGISTRATION "
+                "block was most likely stripped by the linker as an unreferenced static "
+                "initializer. Force-link that translation unit (e.g. --whole-archive / "
+                "/WHOLEARCHIVE, or reference a symbol from it)."));
+        }
+        _emptyHint->setVisible(noProps);
     }
     void PropertyEditor::refresh(const rttr::instance& obj)
     {
