@@ -86,6 +86,23 @@ int main(int argc, char** argv)
     check("explicit alias is separator-insensitive",
           rpe::TypeBridge::resolveByName("weird::Legacy::Name") == rttr::type::get<Other>());
 
+    // ── Degenerate input: an empty name is a no-op, never a stored empty key ────
+    rpe::TypeBridge::registerAlias(rttr::type::get<game::Stats>(), "");
+    check("empty alias name is ignored", !rpe::TypeBridge::resolveByName("").is_valid());
+    check("...and an empty alias can't hijack the real paths",
+          rpe::TypeBridge::resolveByName("game.Stats") == rttr::type::get<game::Stats>()
+              && rpe::TypeBridge::resolveByName("ai.Stats") == rttr::type::get<ai::Stats>());
+
+    // The C++-name extraction yields EMPTY on a signature it can't parse — which
+    // registerAlias then ignores, so an unexpected compiler simply falls back to
+    // name matching instead of storing a bogus (empty) alias.
+    check("type-name extraction returns empty for an unparsable signature",
+          rpe::detail::extractTypeName("no template here").empty());
+    check("type-name extraction reads the GCC/Clang form",
+          rpe::detail::extractTypeName("void f() [with T = game::Stats]") == "game::Stats");
+    check("type-name extraction reads the MSVC form (and strips 'struct')",
+          rpe::detail::extractTypeName("void __cdecl f<struct game::Stats>(void)") == "game::Stats");
+
     // ── End to end: two entities whose same-RTTR-named components are DIFFERENT
     //    types must each bind their own schema when you switch between them. ──────
     {
