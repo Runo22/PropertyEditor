@@ -95,7 +95,9 @@ set(RPE_CORE_SOURCES
     src/core/TypeRenderer.cpp
     src/core/RttrBridge.cpp
     src/core/RttrVariantWrapper.cpp
-    src/core/TypeBridge.cpp)
+    src/core/TypeBridge.cpp
+    src/core/OptionalSupport.cpp
+    src/core/FlagsSupport.cpp)
 
 add_library(rpe_core SHARED ${RPE_CORE_SOURCES})
 add_library(rpe::core ALIAS rpe_core)
@@ -112,6 +114,7 @@ set_target_properties(rpe_core PROPERTIES
 set(RPE_GUI_SOURCES
     src/gui/PropertyModel.cpp
     src/gui/PropertyDelegate.cpp
+    src/gui/VariantEditorFactory.cpp
     src/gui/EditorWidgets.cpp
     src/gui/PropertyEditor.cpp
     src/gui/VariantEditor.cpp
@@ -177,6 +180,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_list_sort_test test/list_sort_test.cpp)
     target_link_libraries(rpe_list_sort_test PRIVATE rpe_gui)
 
+    add_executable(rpe_filter_test test/filter_test.cpp)
+    target_link_libraries(rpe_filter_test PRIVATE rpe_gui)
+
     add_executable(rpe_select_entity_test test/select_entity_test.cpp)
     target_link_libraries(rpe_select_entity_test PRIVATE rpe_gui)
 
@@ -186,14 +192,83 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_variant_editor_test test/variant_editor_test.cpp)
     target_link_libraries(rpe_variant_editor_test PRIVATE rpe_gui)
 
+    add_executable(rpe_scan_budget_test test/scan_budget_test.cpp)
+    target_link_libraries(rpe_scan_budget_test PRIVATE rpe_gui)
+
+    add_executable(rpe_tags_pairs_test test/tags_pairs_test.cpp)
+    target_link_libraries(rpe_tags_pairs_test PRIVATE rpe_gui)
+
     add_executable(rpe_pinned_test test/pinned_test.cpp)
     target_link_libraries(rpe_pinned_test PRIVATE rpe_gui)
+
+    add_executable(rpe_pin_pair_test test/pin_pair_test.cpp)
+    target_link_libraries(rpe_pin_pair_test PRIVATE rpe_gui)
+
+    add_executable(rpe_plugin_unload_test test/plugin_unload_test.cpp)
+    target_link_libraries(rpe_plugin_unload_test PRIVATE rpe_gui)
+
+    add_executable(rpe_remove_flow_test test/remove_flow_test.cpp)
+    target_link_libraries(rpe_remove_flow_test PRIVATE rpe_gui)
+
+    add_executable(rpe_entity_delete_test test/entity_delete_test.cpp)
+    target_link_libraries(rpe_entity_delete_test PRIVATE rpe_gui)
+
+    add_executable(rpe_context_actions_test test/context_actions_test.cpp)
+    target_link_libraries(rpe_context_actions_test PRIVATE rpe_gui)
+
+    add_executable(rpe_spawn_prefab_test test/spawn_prefab_test.cpp)
+    target_link_libraries(rpe_spawn_prefab_test PRIVATE rpe_gui)
+
+    add_executable(rpe_entity_add_gui_test test/entity_add_gui_test.cpp)
+    target_link_libraries(rpe_entity_add_gui_test PRIVATE rpe_gui)
+
+    add_executable(rpe_pair_live_gui_test test/pair_live_gui_test.cpp)
+    target_link_libraries(rpe_pair_live_gui_test PRIVATE rpe_gui)
+
+    add_executable(rpe_entity_selection_stability_test test/entity_selection_stability_test.cpp)
+    target_link_libraries(rpe_entity_selection_stability_test PRIVATE rpe_gui)
+
+    add_executable(rpe_pin_cleanup_test test/pin_cleanup_test.cpp)
+    target_link_libraries(rpe_pin_cleanup_test PRIVATE rpe_gui)
+
+    add_executable(rpe_entity_filter_clear_test test/entity_filter_clear_test.cpp)
+    target_link_libraries(rpe_entity_filter_clear_test PRIVATE rpe_gui)
+
+    add_executable(rpe_entity_selection_mirror_test test/entity_selection_mirror_test.cpp)
+    target_link_libraries(rpe_entity_selection_mirror_test PRIVATE rpe_gui)
+
+    add_executable(rpe_entity_delete_refresh_test test/entity_delete_refresh_test.cpp)
+    target_link_libraries(rpe_entity_delete_refresh_test PRIVATE rpe_gui)
+
+    add_executable(rpe_reset_live_test test/reset_live_test.cpp)
+    target_link_libraries(rpe_reset_live_test PRIVATE rpe_gui)
 
     add_executable(rpe_dark_style_shot test/dark_style_shot.cpp)
     target_link_libraries(rpe_dark_style_shot PRIVATE rpe_gui)
 
+    add_executable(rpe_optional_test test/optional_test.cpp)
+    target_link_libraries(rpe_optional_test PRIVATE rpe_gui)
+
     add_executable(rpe_display_format_test test/display_format_test.cpp)
     target_link_libraries(rpe_display_format_test PRIVATE rpe_core)
+
+    add_executable(rpe_nested_array_update_test test/nested_array_update_test.cpp)
+    target_link_libraries(rpe_nested_array_update_test PRIVATE rpe_gui)
+
+    add_executable(rpe_struct_summary_test test/struct_summary_test.cpp)
+    target_link_libraries(rpe_struct_summary_test PRIVATE rpe_gui)
+
+    add_executable(rpe_property_copy_test test/property_copy_test.cpp)
+    target_link_libraries(rpe_property_copy_test PRIVATE rpe_gui)
+
+    add_executable(rpe_property_copy_shot test/property_copy_shot.cpp)
+    target_link_libraries(rpe_property_copy_shot PRIVATE rpe_gui)
+
+    add_executable(rpe_type_support_test test/type_support_test.cpp)
+    target_link_libraries(rpe_type_support_test PRIVATE rpe_gui)
+
+    add_executable(rpe_flags_test test/flags_test.cpp)
+    target_link_libraries(rpe_flags_test PRIVATE rpe_gui)
 
     add_executable(rpe_mirror_test test/mirror_test.cpp)
     target_link_libraries(rpe_mirror_test PRIVATE rpe_gui)
@@ -231,6 +306,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_feature_shot test/feature_shot.cpp)
     target_link_libraries(rpe_feature_shot PRIVATE rpe_gui)
 
+    add_executable(rpe_context_menu_shot test/context_menu_shot.cpp)
+    target_link_libraries(rpe_context_menu_shot PRIVATE rpe_gui)
+
     add_executable(rpe_add_button_shot test/add_button_shot.cpp)
     target_link_libraries(rpe_add_button_shot PRIVATE rpe_gui)
 
@@ -247,6 +325,37 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_flecs_naming_test test/flecs_naming_test.cpp)
     target_link_libraries(rpe_flecs_naming_test PRIVATE rpe_gui)
 
+    add_executable(rpe_same_rttr_name_test test/same_rttr_name_test.cpp)
+    target_link_libraries(rpe_same_rttr_name_test PRIVATE rpe_gui)
+
+    add_executable(rpe_component_list_view_test test/component_list_view_test.cpp)
+    target_link_libraries(rpe_component_list_view_test PRIVATE rpe_gui)
+
+    add_executable(rpe_missing_rttr_props_test test/missing_rttr_props_test.cpp)
+    target_link_libraries(rpe_missing_rttr_props_test PRIVATE rpe_gui)
+
+    add_executable(rpe_namespace_carryover_test test/namespace_carryover_test.cpp)
+    target_link_libraries(rpe_namespace_carryover_test PRIVATE rpe_gui)
+
     add_executable(rpe_namespaced_components_gui_test test/namespaced_components_gui_test.cpp)
     target_link_libraries(rpe_namespaced_components_gui_test PRIVATE rpe_gui)
 endif()
+
+# ── IDE target organisation ──────────────────────────────────────────────────
+# Group every target this project defines under an "rpe" folder in IDEs that
+# show a target tree (Visual Studio, Xcode, some Qt Creator/CLion views), so the
+# ~30 tests/tools/libs don't clutter the top level. Only targets declared in
+# THIS directory are swept — FetchContent's rttr/flecs live in their own
+# subdirectories and are left as-is.
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+get_property(_rpe_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_t IN LISTS _rpe_targets)
+    get_target_property(_ttype ${_t} TYPE)
+    if(_ttype STREQUAL "EXECUTABLE" AND NOT _t STREQUAL "rpe_demo")
+        # tests, shots, benches and dev tools
+        set_target_properties(${_t} PROPERTIES FOLDER "rpe/tests")
+    else()
+        # rpe_core, rpe_gui, rpe_demo
+        set_target_properties(${_t} PROPERTIES FOLDER "rpe")
+    endif()
+endforeach()

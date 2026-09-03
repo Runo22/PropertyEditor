@@ -5,7 +5,10 @@
 #include <QAction>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QLabel>
 #include <QLineEdit>
+#include <QApplication>
+#include <QClipboard>
 #include <QMenu>
 #include <QSortFilterProxyModel>
 #include <QToolButton>
@@ -14,6 +17,44 @@
 
 namespace rpe
 {
+    namespace
+    {
+        // Filters property rows by NAME (column 0 display) OR VALUE (the model's
+        // expansion-independent FilterValueRole), so typing "7.5" or a struct's
+        // "[1, 2]" summary narrows the tree too — not just names. Recursive: a row
+        // survives if it matches or any descendant does (ancestors of a match stay
+        // visible). Only runs on filter-text change, so the extra per-row value read
+        // (a cached string) costs nothing at steady state.
+        class PropertyFilterProxy : public QSortFilterProxyModel
+        {
+        public:
+            using QSortFilterProxyModel::QSortFilterProxyModel;
+            void setFilterText(const QString& t)
+            {
+                _text = t.trimmed();
+                invalidateFilter();
+            }
+
+        protected:
+            bool filterAcceptsRow(int row, const QModelIndex& parent) const override
+            {
+                if (_text.isEmpty())
+                {
+                    return true;
+                }
+                const QModelIndex idx = sourceModel()->index(row, 0, parent);
+                if (idx.data(Qt::DisplayRole).toString().contains(_text, Qt::CaseInsensitive))
+                {
+                    return true;
+                }
+                return idx.data(FilterValueRole).toString().contains(_text, Qt::CaseInsensitive);
+            }
+
+        private:
+            QString _text;
+        };
+    } // namespace
+
 
     PropertyEditor::PropertyEditor(QWidget* parent)
         : QWidget(parent)
@@ -22,6 +63,8 @@ namespace rpe
         _delegate = new PropertyDelegate(_model, this);
         _setupUi();
         connect(_model, &PropertyModel::propertyEdited, this, &PropertyEditor::propertyEdited);
+        connect(_model, &PropertyModel::localEditsChanged, this, &PropertyEditor::_updateResetEnabled);
+        _updateResetEnabled(); // start disabled — nothing is frozen yet
     }
 
     void PropertyEditor::_setupUi()
@@ -43,16 +86,27 @@ namespace rpe
 
         _resetBtn = new QToolButton(_toolbar);
         _resetBtn->setText(tr("Reset"));
-        _resetBtn->setToolTip(tr("Release all local edits (return to live values)"));
+        // Spell out what "Reset" does, since the short label can read like "reset to
+        // defaults": it only releases FROZEN values and resumes live updates — it does
+        // not change any value in the world.
+        _resetBtn->setToolTip(tr("Release frozen values and resume live updates.\n"
+                                 "Does not modify the world (only editing a value does)."));
         tb->addWidget(_resetBtn);
 
         root->addWidget(_toolbar);
 
-        // proxy for filtering
-        _proxy = new QSortFilterProxyModel(this);
+        // Empty-state hint: a component can resolve (so it lists) yet reflect no
+        // properties, which otherwise leaves a silent blank panel. See _updateEmptyHint.
+        _emptyHint = new QLabel(this);
+        _emptyHint->setWordWrap(true);
+        _emptyHint->setContentsMargins(6, 4, 6, 4);
+        _emptyHint->setStyleSheet(QStringLiteral("color: palette(mid);"));
+        _emptyHint->setVisible(false);
+        root->addWidget(_emptyHint);
+
+        // proxy for filtering (matches property name OR value — see PropertyFilterProxy)
+        _proxy = new PropertyFilterProxy(this);
         _proxy->setSourceModel(_model);
-        _proxy->setFilterCaseSensitivity(Qt::CaseInsensitive);
-        _proxy->setFilterKeyColumn(0);
         _proxy->setRecursiveFilteringEnabled(true);
 
         _view = new QTreeView(this);
@@ -71,6 +125,42 @@ namespace rpe
         connect(_filter, &QLineEdit::textChanged, this, &PropertyEditor::_onFilterChanged);
         connect(_resetBtn, &QToolButton::clicked, this, &PropertyEditor::_onResetAll);
         connect(_view, &QTreeView::customContextMenuRequested, this, &PropertyEditor::_onContextMenu);
+
+        // Keep the model's notion of expansion in sync with the view, so collapsed
+        // struct rows can show a "[a, b]" summary that disappears on expand.
+        // (Custom roles pass through the proxy, so no mapToSource needed here.)
+        connect(_view, &QTreeView::expanded, this, [this](const QModelIndex& idx) {
+            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), true);
+        });
+        connect(_view, &QTreeView::collapsed, this, [this](const QModelIndex& idx) {
+            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), false);
+        });
+    }
+
+    // Bulk expansion calls (expandAll / expandToDepth / collapseAll) do NOT emit
+    // the per-row expanded/collapsed signals, so after any of them the model's
+    // expansion set must be rebuilt by walking the view.
+    void PropertyEditor::_pushExpansionState()
+    {
+        QList<QModelIndex> stack;
+        for (int r = _proxy->rowCount({}) - 1; r >= 0; --r)
+        {
+            stack.append(_proxy->index(r, 0, {}));
+        }
+        while (!stack.isEmpty())
+        {
+            const QModelIndex idx = stack.takeLast();
+            const int rows = _proxy->rowCount(idx);
+            if (rows == 0)
+            {
+                continue;
+            }
+            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), _view->isExpanded(idx));
+            for (int r = rows - 1; r >= 0; --r)
+            {
+                stack.append(_proxy->index(r, 0, idx));
+            }
+        }
     }
 
     // ── data / schema ────────────────────────────────────────────────────────────
@@ -79,11 +169,39 @@ namespace rpe
     {
         _model->bindType(type);
         _view->expandToDepth(0);
+        _pushExpansionState();
+        _updateResetEnabled(); // a fresh schema has no frozen nodes
+        _updateEmptyHint(type);
     }
 
     void PropertyEditor::unbind()
     {
         _model->unbind();
+        _updateResetEnabled();
+        _emptyHint->setVisible(false);
+    }
+
+    // A type can be perfectly valid yet reflect NOTHING: rttr::type::get<T>() succeeds
+    // for any complete type, registration or not. Such a component still resolves and
+    // still lists — it just binds an empty schema, so the panel goes blank with no
+    // explanation. Say so, and point at the usual cause (a registration block the
+    // linker dropped, which is why it typically only bites in Release).
+    void PropertyEditor::_updateEmptyHint(rttr::type t)
+    {
+        const bool noProps = t.is_valid() && t.get_properties().empty();
+        if (noProps)
+        {
+            const auto n = t.get_name();
+            _emptyHint->setText(tr("“%1” reflects no properties — nothing to edit.")
+                                    .arg(QString::fromUtf8(n.data(), static_cast<int>(n.size()))));
+            _emptyHint->setToolTip(tr(
+                "The type resolved, but RTTR reports no properties for it.\n\n"
+                "If this works in a Debug build but not in Release, its RTTR_REGISTRATION "
+                "block was most likely stripped by the linker as an unreferenced static "
+                "initializer. Force-link that translation unit (e.g. --whole-archive / "
+                "/WHOLEARCHIVE, or reference a symbol from it)."));
+        }
+        _emptyHint->setVisible(noProps);
     }
     void PropertyEditor::refresh(const rttr::instance& obj)
     {
@@ -99,7 +217,15 @@ namespace rpe
     void PropertyEditor::setReadOnly(bool ro)
     {
         _model->setReadOnly(ro);
-        _resetBtn->setEnabled(!ro);
+        _updateResetEnabled();
+    }
+
+    // The Reset button releases frozen (locally-edited) values — enable it only while
+    // the current component actually has one, so it reads as an active affordance
+    // rather than an always-lit button that looks like "reset to defaults".
+    void PropertyEditor::_updateResetEnabled()
+    {
+        _resetBtn->setEnabled(!isReadOnly() && _model->hasAnyLocalEdit());
     }
     bool PropertyEditor::isReadOnly() const
     {
@@ -175,6 +301,22 @@ namespace rpe
                     stack.append(_proxy->index(r, 0, idx));
                 }
             }
+            else if (!idx.data(IsArrayRole).toBool() && rows <= 4)
+            {
+                // A collapsed small struct shows a "[a, b]" summary of its direct
+                // leaf children — those leaves must be watched even though their
+                // rows are hidden, or the summary would stay forever blank in
+                // mirror mode. Nested structs inside it render as "…" and need no
+                // watch.
+                for (int r = 0; r < rows; ++r)
+                {
+                    const QModelIndex c = _proxy->index(r, 0, idx);
+                    if (_proxy->rowCount(c) == 0)
+                    {
+                        out.append(c.data(PropertyPathRole).toString());
+                    }
+                }
+            }
         }
         return out;
     }
@@ -188,13 +330,14 @@ namespace rpe
     void PropertyEditor::expandAll()
     {
         _view->expandAll();
+        _pushExpansionState();
     }
 
     // ── slots ─────────────────────────────────────────────────────────────────────
 
     void PropertyEditor::_onFilterChanged(const QString& text)
     {
-        _proxy->setFilterFixedString(text);
+        static_cast<PropertyFilterProxy*>(_proxy)->setFilterText(text);
         if (text.isEmpty())
         {
             _view->expandToDepth(0);
@@ -203,6 +346,7 @@ namespace rpe
         {
             _view->expandAll();
         }
+        _pushExpansionState();
     }
 
     void PropertyEditor::_onResetAll()
@@ -225,8 +369,19 @@ namespace rpe
 
         const QString path = srcIdx.data(PropertyPathRole).toString();
         const bool hasLocalEdit = srcIdx.data(HasLocalEditRole).toBool();
+        const QString name = srcIdx.siblingAtColumn(0).data(Qt::DisplayRole).toString();
+        const QString value = srcIdx.siblingAtColumn(1).data(Qt::DisplayRole).toString();
 
         QMenu menu(this);
+        // Copy the row's text to the clipboard — available regardless of read-only /
+        // pinning, since it never mutates anything.
+        connect(menu.addAction(tr("Copy value")), &QAction::triggered, this,
+                [value] { QApplication::clipboard()->setText(value); });
+        connect(menu.addAction(tr("Copy name")), &QAction::triggered, this,
+                [name] { QApplication::clipboard()->setText(name); });
+        connect(menu.addAction(tr("Copy \"name = value\"")), &QAction::triggered, this,
+                [name, value] { QApplication::clipboard()->setText(name + QStringLiteral(" = ") + value); });
+        menu.addSeparator();
         if (!isReadOnly())
         {
             if (!hasLocalEdit)

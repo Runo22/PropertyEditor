@@ -1,7 +1,9 @@
 #include "rpe/gui/EditorWidgets.h"
 
+#include <QAbstractItemView>
 #include <QAction>
 #include <QColorDialog>
+#include <QEvent>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -9,10 +11,12 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
 #include <QProxyStyle>
+#include <QStandardItemModel>
 #include <QStyle>
 #include <QToolButton>
 
@@ -302,6 +306,109 @@ namespace rpe
         {
             setColor(c);
         }
+    }
+
+    // ── FlagsEditor ────────────────────────────────────────────────────────────
+
+    namespace
+    {
+        constexpr int kFlagBitsRole = Qt::UserRole + 1; // qint64 bit value per row
+    }
+
+    FlagsEditor::FlagsEditor(QWidget* parent)
+        : QComboBox(parent)
+    {
+        _model = new QStandardItemModel(this);
+        setModel(_model);
+        // The line area shows the combined text; the popup holds the checkboxes.
+        setEditable(true);
+        lineEdit()->setReadOnly(true);
+        lineEdit()->setFocusPolicy(Qt::NoFocus);
+        // Keep the popup open while toggling: swallow the release that would close it
+        // and toggle the row's check state ourselves.
+        view()->viewport()->installEventFilter(this);
+    }
+
+    void FlagsEditor::setFlags(const QList<QPair<QString, qint64>>& flags)
+    {
+        _guard = true;
+        _model->clear();
+        for (const auto& f : flags)
+        {
+            if (f.second == 0)
+            {
+                continue; // clearing all boxes already means "zero"
+            }
+            auto* item = new QStandardItem(f.first);
+            item->setFlags(Qt::ItemIsUserCheckable | Qt::ItemIsEnabled);
+            item->setData(Qt::Unchecked, Qt::CheckStateRole);
+            item->setData(QVariant::fromValue<qlonglong>(f.second), kFlagBitsRole);
+            _model->appendRow(item);
+        }
+        _guard = false;
+        _refreshText();
+    }
+
+    qlonglong FlagsEditor::bits() const
+    {
+        qlonglong out = 0;
+        for (int i = 0; i < _model->rowCount(); ++i)
+        {
+            const QStandardItem* it = _model->item(i);
+            if (it->checkState() == Qt::Checked)
+            {
+                out |= it->data(kFlagBitsRole).toLongLong();
+            }
+        }
+        return out;
+    }
+
+    void FlagsEditor::setBits(qlonglong bits)
+    {
+        _guard = true;
+        for (int i = 0; i < _model->rowCount(); ++i)
+        {
+            QStandardItem* it = _model->item(i);
+            const qlonglong b = it->data(kFlagBitsRole).toLongLong();
+            it->setCheckState((b != 0 && (bits & b) == b) ? Qt::Checked : Qt::Unchecked);
+        }
+        _guard = false;
+        _refreshText();
+    }
+
+    void FlagsEditor::_refreshText()
+    {
+        QStringList on;
+        for (int i = 0; i < _model->rowCount(); ++i)
+        {
+            const QStandardItem* it = _model->item(i);
+            if (it->checkState() == Qt::Checked)
+            {
+                on << it->text();
+            }
+        }
+        lineEdit()->setText(on.isEmpty() ? QStringLiteral("0") : on.join(QStringLiteral(" | ")));
+    }
+
+    bool FlagsEditor::eventFilter(QObject* obj, QEvent* ev)
+    {
+        if (obj == view()->viewport() && ev->type() == QEvent::MouseButtonRelease)
+        {
+            auto* me = static_cast<QMouseEvent*>(ev);
+            const QModelIndex idx = view()->indexAt(me->pos());
+            if (idx.isValid())
+            {
+                QStandardItem* it = _model->itemFromIndex(idx);
+                it->setCheckState(it->checkState() == Qt::Checked ? Qt::Unchecked : Qt::Checked);
+                if (!_guard)
+                {
+                    _refreshText();
+                    emit bitsChanged();
+                }
+                return true; // consume: don't let the view close the popup
+            }
+        }
+        return QComboBox::eventFilter(obj, ev);
     }
 
 } // namespace rpe

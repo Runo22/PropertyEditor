@@ -1,8 +1,10 @@
 #include "rpe/core/RttrBridge.h"
+#include "rpe/core/OptionalSupport.h"
 #include "rpe/core/TypeRenderer.h"
 
 #include <filesystem>
 
+#include <rttr/variant_associative_view.h>
 #include <rttr/variant_sequential_view.h>
 
 namespace rpe::bridge
@@ -18,15 +20,37 @@ namespace rpe::bridge
         return out;
     }
 
-    static bool isIndexSegment(const QString& seg, int& outIndex)
+    // "[…]" path segment: an array index ("[3]") or an associative key ("[alice]").
+    static bool isBracketSegment(const QString& seg, QString& outInner)
     {
         if (seg.size() < 3 || !seg.startsWith(QLatin1Char('[')) || !seg.endsWith(QLatin1Char(']')))
         {
             return false;
         }
-        bool ok = false;
-        outIndex = seg.mid(1, seg.size() - 2).toInt(&ok);
-        return ok;
+        outInner = seg.mid(1, seg.size() - 2);
+        return true;
+    }
+
+    // Build an exact-typed key from its bracket-segment string form. String keys
+    // pass through; everything else (arithmetic, enum) goes through RTTR's
+    // string conversion. `keyType` is const so variant::convert unambiguously
+    // resolves to convert(const type&) rather than the extract-into-T& template.
+    static rttr::variant assocKeyFromString(const QString& keyStr, const rttr::type& keyType)
+    {
+        if (keyType == rttr::type::get<QString>())
+        {
+            return rttr::variant(keyStr);
+        }
+        if (keyType == rttr::type::get<std::string>())
+        {
+            return rttr::variant(keyStr.toStdString());
+        }
+        rttr::variant v(keyStr.toStdString());
+        if (v.convert(keyType))
+        {
+            return v;
+        }
+        return {};
     }
 
     namespace
@@ -133,10 +157,38 @@ namespace rpe::bridge
 
     rttr::variant coerce(rttr::variant value, rttr::type target)
     {
+        // Optional target: the editor produced an INNER value (target's rawType is
+        // the inner type). Coerce it to the inner type, then wrap it into an engaged
+        // std::optional<T>. (A value already of the optional type — e.g. an explicit
+        // nullopt — is passed through untouched.) Do this before rawType() strips
+        // the optional away.
+        if (OptionalBridge::isOptional(target))
+        {
+            if (value.is_valid() && value.get_type() == target)
+            {
+                return value;
+            }
+            rttr::variant inner = coerce(value, OptionalBridge::innerType(target));
+            return OptionalBridge::engage(target, inner);
+        }
+
         const rttr::type raw = TypeRenderer::rawType(target);
         if (!value.is_valid() || value.get_type() == raw)
         {
             return value;
+        }
+
+        // chrono duration target: editors and mirrors hand over a plain number
+        // (the tick count) — rebuild the exact duration type from it. RTTR has no
+        // built-in arithmetic→duration conversion.
+        if (TypeRenderer::isChronoDuration(raw))
+        {
+            bool ok = false;
+            const int64_t n = value.to_int64(&ok);
+            if (ok)
+            {
+                return TypeRenderer::makeChronoDuration(raw, n);
+            }
         }
 
         // std::filesystem::path <- string: RTTR won't auto-convert, so build the
@@ -179,29 +231,65 @@ namespace rpe::bridge
         const QString& seg = segs[i];
         const bool isLast = (i == segs.size() - 1);
 
-        int idx = -1;
-        if (isIndexSegment(seg, idx))
+        QString bracket;
+        if (isBracketSegment(seg, bracket))
         {
-            if (!obj.is_sequential_container())
+            if (obj.is_sequential_container())
             {
-                return false;
-            }
-            auto view = obj.create_sequential_view();
-            if (idx < 0 || idx >= static_cast<int>(view.get_size()))
-            {
-                return false;
-            }
-            if (isLast)
-            {
-                return view.set_value(idx, coerce(value, view.get_value_type()));
-            }
+                bool okIdx = false;
+                const int idx = bracket.toInt(&okIdx);
+                auto view = obj.create_sequential_view();
+                if (!okIdx || idx < 0 || idx >= static_cast<int>(view.get_size()))
+                {
+                    return false;
+                }
+                if (isLast)
+                {
+                    return view.set_value(idx, coerce(value, view.get_value_type()));
+                }
 
-            rttr::variant elem = TypeRenderer::unwrap(view.get_value(idx));
-            if (!setInVariant(elem, segs, i + 1, value))
-            {
-                return false;
+                rttr::variant elem = TypeRenderer::unwrap(view.get_value(idx));
+                if (!setInVariant(elem, segs, i + 1, value))
+                {
+                    return false;
+                }
+                return view.set_value(idx, elem);
             }
-            return view.set_value(idx, elem);
+            if (obj.is_associative_container())
+            {
+                auto view = obj.create_associative_view();
+                const rttr::variant key = assocKeyFromString(bracket, view.get_key_type());
+                if (!key.is_valid() || view.is_key_only_type())
+                {
+                    return false;
+                }
+                auto it = view.find(key);
+                if (it == view.end())
+                {
+                    return false;
+                }
+                rttr::variant elem = TypeRenderer::unwrap(it.get_value());
+                if (isLast)
+                {
+                    elem = coerce(value, view.get_value_type());
+                    if (!elem.is_valid())
+                    {
+                        return false;
+                    }
+                }
+                else if (!setInVariant(elem, segs, i + 1, value))
+                {
+                    return false;
+                }
+                else if (elem.get_type().is_pointer())
+                {
+                    return true; // edited in place through the pointee — no re-insert
+                }
+                // The associative view has no set_value: replace = erase + insert.
+                view.erase(key);
+                return view.insert(key, elem).second;
+            }
+            return false;
         }
 
         rttr::type t = TypeRenderer::rawType(obj.get_type());
@@ -221,6 +309,13 @@ namespace rpe::bridge
         if (!setInVariant(sub, segs, i + 1, value))
         {
             return false;
+        }
+        if (sub.get_type().is_pointer())
+        {
+            // The sub-object was reached through a pointer (e.g. a shared_ptr
+            // property): the write above mutated the pointee itself, and writing
+            // the raw pointer back into the wrapper property would be wrong.
+            return true;
         }
         return prop.set_value(inst, sub);
     }
@@ -254,6 +349,10 @@ namespace rpe::bridge
         {
             return false;
         }
+        if (sub.get_type().is_pointer())
+        {
+            return true; // mutated in place through the pointee (see setInVariant)
+        }
         return prop.set_value(root, sub);
     }
 
@@ -281,19 +380,39 @@ namespace rpe::bridge
         for (int i = 1; i < segs.size() && cur.is_valid(); ++i)
         {
             const QString& seg = segs[i];
-            int idx = -1;
-            if (isIndexSegment(seg, idx))
+            QString bracket;
+            if (isBracketSegment(seg, bracket))
             {
-                if (!cur.is_sequential_container())
+                if (cur.is_sequential_container())
+                {
+                    bool okIdx = false;
+                    const int idx = bracket.toInt(&okIdx);
+                    auto view = cur.create_sequential_view();
+                    if (!okIdx || idx < 0 || idx >= static_cast<int>(view.get_size()))
+                    {
+                        return {};
+                    }
+                    cur = TypeRenderer::unwrap(view.get_value(idx));
+                }
+                else if (cur.is_associative_container())
+                {
+                    auto view = cur.create_associative_view();
+                    const rttr::variant key = assocKeyFromString(bracket, view.get_key_type());
+                    if (!key.is_valid())
+                    {
+                        return {};
+                    }
+                    auto it = view.find(key);
+                    if (it == view.end())
+                    {
+                        return {};
+                    }
+                    cur = TypeRenderer::unwrap(it.get_value());
+                }
+                else
                 {
                     return {};
                 }
-                auto view = cur.create_sequential_view();
-                if (idx < 0 || idx >= static_cast<int>(view.get_size()))
-                {
-                    return {};
-                }
-                cur = TypeRenderer::unwrap(view.get_value(idx));
             }
             else
             {

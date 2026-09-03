@@ -35,6 +35,10 @@ namespace rpe
         DecimalsRole,     // int     — invalid QVariant if unset
         IsArrayRole,      // bool    — true for a sequential/array parent node
         DeclaredTypeRole, // rttr::variant wrapping the node's declared rttr::type
+        FlagsRole,        // bool    — true if the enum property carries hint::Flags
+        FilterValueRole,  // QString — value text for filtering (expansion-independent:
+                          //           a collapsed struct's "[a, b]" summary or an
+                          //           array's "[N]" is matchable even while expanded)
     };
 
     // How committed edits are applied.
@@ -116,6 +120,14 @@ namespace rpe
         // Paths pinned to a watch list (PinnedPropertiesWidget). Purely visual
         // here: pinned rows are tinted so they are recognisable in the main tree.
         void setPinnedPaths(const QSet<QString>& paths);
+
+        // View → model expansion state. A COLLAPSED struct row with few fields
+        // shows a compact "[a, b]" summary of its children in the value column;
+        // expanding it hides the summary (the children now show the values), so
+        // the same data is never on screen twice. The view reports its expand/
+        // collapse transitions here (PropertyEditor wires QTreeView::expanded/
+        // collapsed). Arrays are unaffected — they always show "[N]".
+        void setPathExpanded(const QString& path, bool expanded);
         bool isPinnedPath(const QString& path) const
         {
             return _pinnedPaths.contains(path);
@@ -139,6 +151,10 @@ namespace rpe
 
     signals:
         void propertyEdited(const QString& path, const rttr::variant& newValue);
+        // Fires when the set of locally-edited (frozen) nodes may have changed — a
+        // node was frozen, reset, or an edit released one. Lets the view enable the
+        // Reset control only while there is actually something frozen to release.
+        void localEditsChanged();
 
     private slots:
         void _flushPending();
@@ -150,10 +166,16 @@ namespace rpe
         void _refreshNode(PropertyNode* node, const rttr::variant& val);
         void _refreshSequential(PropertyNode* node, const rttr::variant& val);
         void _rebuildArrayChildren(PropertyNode* node, const rttr::variant& arrayVal);
+        void _refreshAssociative(PropertyNode* node, const rttr::variant& val);
+        void _rebuildAssocChildren(PropertyNode* node,
+                                   const QVector<QPair<QString, rttr::variant>>& entries,
+                                   rttr::type valueType);
         static bool _anyDescendantLocallyEdited(const PropertyNode* node);
         void _applyBatch(const QHash<QString, rttr::variant>& batch);
-        void _emitDirtyRanges(PropertyNode* parent);
+        bool _emitDirtyRanges(PropertyNode* parent);
+        QString _structSummary(PropertyNode* node) const;
         void _collectNodes(PropertyNode* node, QHash<QString, PropertyNode*>& out) const;
+        void _forgetNodes(PropertyNode* node); // remove node + its subtree from _nodeByPath
         PropertyNode* _findNode(const QString& path) const;
         bool _applyEdit(PropertyNode* node, const rttr::variant& newVal);
 
@@ -166,7 +188,8 @@ namespace rpe
         std::atomic<bool> _flushScheduled { false };
 
         bool _readOnly = false;
-        QSet<QString> _pinnedPaths; // watch-list tint (see setPinnedPaths)
+        QSet<QString> _pinnedPaths;   // watch-list tint (see setPinnedPaths)
+        QSet<QString> _expandedPaths; // rows currently expanded in the view (see setPathExpanded)
         EditPolicy _editPolicy = EditPolicy::LocalEdit;
         std::function<rttr::instance()> _instanceProvider;
         AccessGuard _writeGuard;

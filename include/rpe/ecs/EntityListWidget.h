@@ -1,15 +1,22 @@
 #pragma once
 
+#include <QHash>
+#include <QIcon>
 #include <QPair>
 #include <QVector>
 #include <QWidget>
 
 #include "rpe/core/AccessGuard.h"
+#include "rpe/ecs/MirrorChannel.h"
+#include "rpe/ecs/RowActions.h"
 #include "rpe/ecs/flecs_prelude.h"
 
 class QListWidget;
 class QLineEdit;
 class QTimer;
+class QToolButton;
+class QStyledItemDelegate;
+class QMenu;
 
 namespace rpe
 {
@@ -57,14 +64,46 @@ namespace rpe
         // Display label of the currently selected entity (empty if none).
         QString currentLabel() const;
 
+        // ── Add-entity (prefab spawning) ─────────────────────────────────────────
+        // Show the "Add" button (a spawn picker of prefabs). Off by default.
+        void setEntityAddingEnabled(bool on);
+        // Spawnable prefabs offered by the picker, grouped by their `group` tag.
+        void setAddablePrefabs(const QVector<MirrorChannel::PrefabEntry>& prefabs);
+        // Optional icon shown next to a group header, keyed by the group tag name.
+        void setPrefabGroupIcons(const QHash<QString, QIcon>& icons);
+
+        // ── Deletion + context menu ──────────────────────────────────────────────
+        // Show a per-row trash glyph (two-step confirm, like the component list) and
+        // a "Delete" entry in the right-click menu; both emit removeEntityRequested.
+        void setEntityRemovingEnabled(bool on);
+        // Extra right-click entries (run app-specific work on the clicked entity).
+        void setContextActions(const QVector<EntityAction>& actions);
+        // Dynamic hook: called each time the entity right-click menu is built, with
+        // the clicked entity id and the live QMenu, so the host can add whatever
+        // buttons/submenus it wants — conditional on that entity. Runs after the
+        // built-in Delete and any static setContextActions entries.
+        void setContextMenuHook(std::function<void(qulonglong entityId, QMenu& menu)> hook);
+
     signals:
         void entitySelected(flecs::entity e); // direct mode (world available)
         void entityIdSelected(qulonglong id); // always; mirror mode uses this
         void entityDeselected();
+        // The user picked a prefab to spawn; the host instantiates it (mirror queues
+        // a SpawnPrefab structural, direct mode spawns under the world guard).
+        void spawnPrefabRequested(qulonglong prefabId);
+        // The user asked to delete an entity (trash glyph or the menu's "Delete").
+        void removeEntityRequested(qulonglong entityId);
 
     private slots:
         void _refresh();
         void _onSelectionChanged();
+        void _onAddEntityClicked();
+        void _onContextMenu(const QPoint& pos);
+
+    protected:
+        // Swallows the mouse press on a row's trash glyph so clicking it never selects
+        // the row — an entity can be deleted without changing the current selection.
+        bool eventFilter(QObject* obj, QEvent* ev) override;
 
     private:
         void _setupUi();
@@ -76,7 +115,13 @@ namespace rpe
         flecs::world* _world = nullptr;
         QListWidget* _list = nullptr;
         QLineEdit* _filterEdit = nullptr;
+        QToolButton* _addBtn = nullptr;
         QTimer* _timer = nullptr;
+        QStyledItemDelegate* _rowDelegate = nullptr; // trash-button delegate
+        QVector<MirrorChannel::PrefabEntry> _prefabs;
+        QHash<QString, QIcon> _groupIcons;
+        QVector<EntityAction> _contextActions;
+        std::function<void(qulonglong, QMenu&)> _menuHook;
         QString _requiredComponent;
         bool _requiredEnabled = false;
         AccessGuard _guard;
@@ -89,6 +134,11 @@ namespace rpe
         // A pending selectById() request whose entity isn't in the list yet (0 = none).
         // Applied on the next rebuild that contains it.
         qulonglong _requestedId = 0;
+        // The authoritative current selection (0 = none). Updated on every real
+        // selection change; a list rebuild (entity add/remove) keeps this selection
+        // when it survives — silently, so a host driving selection isn't disturbed —
+        // and only falls back to the first entity when it's genuinely gone.
+        qulonglong _selectedId = 0;
     };
 
 } // namespace rpe

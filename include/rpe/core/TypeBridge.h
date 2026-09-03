@@ -3,11 +3,81 @@
 #include "rpe/core/rttr_prelude.h"
 
 #include <cstdint>
+#include <initializer_list>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace rpe
 {
+
+    namespace detail
+    {
+        template <class T>
+        constexpr std::string_view prettyTypeSignature()
+        {
+#if defined(_MSC_VER)
+            return __FUNCSIG__;
+#else
+            return __PRETTY_FUNCTION__;
+#endif
+        }
+
+        // Pull the fully-qualified C++ name of T out of the compiler's function
+        // signature ("game::Stats"). This is the type's REAL namespaced identity —
+        // unlike rttr::type::get_name(), which is whatever string the RTTR
+        // registration passed and may be namespace-stripped (or even identical for
+        // two different types, which is precisely when name-based lookup breaks).
+        inline std::string extractTypeName(std::string_view sig)
+        {
+            if (const auto eq = sig.find("T = "); eq != std::string_view::npos)
+            {
+                // GCC/Clang: "... [with T = game::Stats; ...]" / "... [T = game::Stats]"
+                const auto start = eq + 4;
+                auto end = sig.find_first_of(";]", start);
+                if (end == std::string_view::npos)
+                {
+                    end = sig.size();
+                }
+                sig = sig.substr(start, end - start);
+            }
+            else
+            {
+                // MSVC: "...prettyTypeSignature<struct game::Stats>(void)"
+                const auto lt = sig.find('<');
+                const auto gt = sig.rfind('>');
+                if (lt == std::string_view::npos || gt == std::string_view::npos || gt <= lt)
+                {
+                    return {};
+                }
+                sig = sig.substr(lt + 1, gt - lt - 1);
+            }
+            for (std::string_view kw : { std::string_view("struct "), std::string_view("class "),
+                                         std::string_view("enum "), std::string_view("union ") })
+            {
+                if (sig.size() > kw.size() && sig.substr(0, kw.size()) == kw)
+                {
+                    sig.remove_prefix(kw.size());
+                    break;
+                }
+            }
+            while (!sig.empty() && sig.front() == ' ')
+            {
+                sig.remove_prefix(1);
+            }
+            while (!sig.empty() && sig.back() == ' ')
+            {
+                sig.remove_suffix(1);
+            }
+            return std::string(sig);
+        }
+
+        template <class T>
+        inline std::string cppTypeName()
+        {
+            return extractTypeName(prettyTypeSignature<T>());
+        }
+    } // namespace detail
 
     // ─────────────────────────────────────────────────────────────────────────────
     //  TypeBridge — process-global registry that, for an rttr::type, knows how to:
@@ -68,6 +138,12 @@ namespace rpe
                 rttr::type::get<T>(),
                 +[](void* p) -> rttr::variant { return rttr::variant(static_cast<T*>(p)); },
                 +[](void* p) -> rttr::variant { return rttr::variant(*static_cast<T*>(p)); });
+            // Alias the type by its REAL C++ name ("game::Stats"), so a flecs path
+            // resolves to the right type even when the RTTR registration used a
+            // different — or namespace-stripped, or duplicated — name. Without this,
+            // two types registered in RTTR under the same name are indistinguishable
+            // and the first one always wins.
+            registerAlias(rttr::type::get<T>(), detail::cppTypeName<T>());
         }
 
         // Same, but also register an explicit flecs component name to resolve to T.

@@ -5,9 +5,13 @@
 #include "rpe/core/RttrVariantWrapper.h"
 #include "rpe/ecs/ComponentListWidget.h"
 #include "rpe/ecs/MirrorChannel.h"
+#include "rpe/ecs/RowActions.h"
 #include "rpe/gui/PropertyModel.h"
 
+#include <QIcon>
 #include <QMetaType>
+#include <QSet>
+#include <QVector>
 #include <QWidget>
 
 #include <memory>
@@ -17,6 +21,7 @@
 class QSplitter;
 class QCheckBox;
 class QTimer;
+class QMenu;
 class QVBoxLayout;
 
 namespace rpe
@@ -124,6 +129,47 @@ namespace rpe
             return _settings.allowComponentEditing;
         }
 
+        // ── Add-entity (prefab spawning) ─────────────────────────────────────────
+        // A group tag the "Add entity" picker separates prefabs by, with an optional
+        // icon shown next to the group header.
+        struct PrefabGroup
+        {
+            QString tag;
+            QIcon icon;
+        };
+        // Show the entity-list "Add" button and offer prefabs to spawn. In mirror
+        // mode a pick queues a SpawnPrefab to the sim thread; set the per-instance
+        // component overrides via EcsMirror::setSpawnConfigurator (sim thread).
+        void setEntityAddingEnabled(bool on);
+        bool isEntityAddingEnabled() const
+        {
+            return _entityAddingEnabled;
+        }
+        // The tags the prefab picker groups by (+ optional icons). The tag names are
+        // forwarded to the producer (which computes each prefab's group and filters
+        // the list by the required component); the icons stay GUI-side.
+        void setPrefabGroups(const QVector<PrefabGroup>& groups);
+
+        // ── Deletion + custom context-menu actions ───────────────────────────────
+        // Show a per-row trash glyph and a "Delete entity" right-click entry (mirror
+        // mode queues a destroy on the sim thread; direct mode destructs under the
+        // guard). Off by default.
+        void setEntityRemovingEnabled(bool on);
+        // Add an app-specific entry to the ENTITY right-click menu (runs on the GUI
+        // thread with the clicked entity's id). Sits beside the built-in Delete.
+        void addEntityAction(const EntityAction& action);
+        // Add an app-specific entry to the COMPONENT right-click menu (runs with the
+        // selected entity's id, the component key and its flecs id).
+        void addComponentAction(const ComponentAction& action);
+
+        // Dynamic menu hooks — called each time a right-click menu is built, handed
+        // the live QMenu so the host can add entity-/component-specific entries at
+        // open time (conditional labels, submenus, …). More flexible than the static
+        // addEntityAction / addComponentAction; both can be used together.
+        void setEntityMenuHook(std::function<void(qulonglong entityId, QMenu& menu)> hook);
+        void setComponentMenuHook(
+            std::function<void(qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu)> hook);
+
         // Bundled get/set of all the above options. setSettings applies every field
         // (filter, snapshot policy, edit policy, component-editing, layout, timers);
         // settings() returns the current configuration.
@@ -186,6 +232,7 @@ namespace rpe
         void componentDeselected();
 
     private slots:
+        void _onRemoveComponentId(qulonglong rawId);
         void _onEntitySelected(flecs::entity e);
         void _onEntityDeselected();
         void _onComponentSelected(ComponentInfo info);
@@ -197,6 +244,8 @@ namespace rpe
         void _onMirrorPoll();
         void _onEntityIdSelected(qulonglong id);
         void _onComponentNameSelected(const QString& name);
+        void _onSpawnPrefab(qulonglong prefabId);
+        void _onRemoveEntity(qulonglong entityId);
 
         // component add/remove
         void _onAddComponent(const QString& name);
@@ -240,8 +289,17 @@ namespace rpe
         bool _openFieldsOnly = true;
 
         // Add/remove-component state (mirror mode).
-        QStringList _catalog;       // all bridged component names in the world
-        QStringList _currentComps;  // components on the selected entity
+        QVector<MirrorChannel::CatalogEntry> _catalog; // addable data comps + tags
+        QStringList _currentComps;  // DATA components on the selected entity
+        QSet<QString> _currentTags; // TAG rows on the selected entity
+        // PairData rows: selection key → the RTTR type name the pair carries. The
+        // property tree binds THIS type; pins are disabled for such rows (the pin
+        // resolver addresses components by name, not pair ids).
+        QHash<QString, QString> _pairTypeName;
+        QHash<QString, qulonglong> _pairRawId; // pair key → flecs pair id (for pinning)
+        bool _entityAddingEnabled = false;
+        QVector<EntityAction> _entityActions;
+        QVector<ComponentAction> _componentActions;
         Settings _settings;
 
         PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)

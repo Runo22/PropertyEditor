@@ -10,9 +10,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 #include "rpe/ecs/flecs_prelude.h"
 #include "rpe/ecs/MirrorChannel.h"
@@ -129,15 +131,29 @@ namespace rpe
         // data needed to tell mirror cost apart from everything else in a build.
         struct PumpStats
         {
-            quint64 pumps = 0;       // pumps actually executed since attach()
-            quint64 skipped = 0;     // pumps skipped by the rate cap since attach()
-            double lastPumpMs = 0.0; // duration of the most recent pump
-            double maxPumpMs = 0.0;  // worst pump since attach()
-            double lastScanMs = 0.0; // duration of the most recent entity-list scan
+            quint64 pumps = 0;          // pumps actually executed since attach()
+            quint64 skipped = 0;        // pumps skipped by the rate cap since attach()
+            double lastPumpMs = 0.0;    // duration of the most recent pump
+            double maxPumpMs = 0.0;     // worst pump since attach()
+            double lastScanMs = 0.0;    // TOTAL work of the last completed scan cycle
+                                        // (spread over pumps by the scan budget)
+            double maxScanMs = 0.0;     // worst completed scan cycle since attach()
+            double lastCatalogMs = 0.0; // duration of the most recent catalog scan
         };
         PumpStats pumpStats() const
         {
             return _stats;
+        }
+
+        // Per-pump wall-clock budget (ms) for the INCREMENTAL entity scan. A scan
+        // cycle snapshots the matched entity ids quickly (table-wise), then labels
+        // and filters them in slices of at most this much work per pump, publishing
+        // when the cycle completes — the per-frame spike of a monolithic scan
+        // becomes a flat, bounded cost. Default 1.0 ms; <= 0 restores the old
+        // single-shot scan (everything in one pump). GUI-thread safe.
+        void setScanBudgetMsPerPump(double ms)
+        {
+            _scanBudgetMs.store(ms, std::memory_order_relaxed);
         }
 
         // Wall-clock intervals for the two FULL-WORLD scans the pump performs on the
@@ -163,6 +179,13 @@ namespace rpe
         // it lacks, is a harmless no-op.
         void addComponent(qulonglong entity, const QString& component);
         void removeComponent(qulonglong entity, const QString& component);
+
+        // ── Prefab spawning (add entity) ─────────────────────────────────────────
+        // Called on the SIMULATION thread right after a spawned entity gets is_a(prefab),
+        // so the host can set/override components on the new instance (setting after
+        // is_a overrides the prefab's shared value — the flecs idiom). Runs where the
+        // world is owned; safe to touch the entity directly. Thread-safe to set.
+        void setSpawnConfigurator(std::function<void(flecs::entity)> fn);
 
         // ── GUI thread: pinned watches ───────────────────────────────────────────
         // Pins are mirrored EVERY pump, independent of the selected entity — the
@@ -202,6 +225,10 @@ namespace rpe
 
         std::shared_ptr<MirrorChannel> _ch; // shared with the GUI consumer
 
+        std::mutex _spawnMutex;                       // guards _spawnConfig (GUI set / sim read)
+        std::function<void(flecs::entity)> _spawnConfig;
+        QVector<MirrorChannel::PrefabEntry> _lastPrefabs; // publish dedup (sim thread)
+
         // Liveness/synchronisation token shared with the system callback and any
         // deferred install, so they no-op safely if this EcsMirror is destroyed
         // before they run, and so an in-flight pump never overlaps teardown. A
@@ -236,12 +263,12 @@ namespace rpe
 
         // Simulation-thread-only state (no lock needed).
         QVector<EntityEntry> _lastEntities;
-        QStringList _lastComponents;
+        QVector<MirrorChannel::ComponentRow> _lastCompRows; // published dedup
         QHash<QString, QString> _lastValueStr; // path -> last display, for dedup
         qulonglong _lastInterestEntity = 0;
         QString _lastInterestComponent;
         QString _lastRequired;    // entity-list filter, to detect changes
-        QStringList _lastCatalog; // last published add-component catalog (dedup)
+        QVector<MirrorChannel::CatalogEntry> _lastCatalog; // published catalog (dedup)
 
         // Wall-clock throttles for the full-world scans (see setScanIntervalsMs).
         // Epoch-initialised so the FIRST pump after attach() always scans.
@@ -250,6 +277,19 @@ namespace rpe
         std::chrono::steady_clock::time_point _lastEntityScan {};
         std::chrono::steady_clock::time_point _lastCatalogScan {};
 
+        // Incremental entity-scan cycle (sim thread). A cycle = fast id snapshot →
+        // budgeted label/filter slices → publish on completion. The per-TABLE
+        // verdict cache collapses the bridged/required check to O(tables) instead
+        // of O(entities × components).
+        std::atomic<double> _scanBudgetMs { 1.0 };
+        std::vector<uint64_t> _scanIds; // id snapshot for the current cycle
+        size_t _scanPos = 0;
+        QVector<EntityEntry> _scanStaging;
+        QHash<const void*, quint8> _scanVerdict; // table → bit0 bridged, bit1 required
+        bool _scanActive = false;
+        double _scanWorkMs = 0.0;
+        QString _scanReqShort; // required-filter leaf, frozen for the cycle
+
         // Selected-entity component list, rebuilt only when the entity or its
         // archetype (flecs table) changes — NOT every pump. Building it walks the
         // entity's components doing string allocation + a registry lookup each, so
@@ -257,8 +297,9 @@ namespace rpe
         qulonglong _compsEntity = 0;
         const void* _compsTable = nullptr; // opaque ecs_table_t*
         uint64_t _compsGen = 0;            // TypeBridge generation the list was built at
-        QStringList _selComps;             // full scoped names, parallel to _selCompIds
+        QStringList _selComps;             // DATA rows: full scoped names, ∥ _selCompIds
         QVector<uint64_t> _selCompIds;
+        QVector<MirrorChannel::ComponentRow> _selRows; // full composition (data+tag+pair)
 
         // Pinned-watch state (sim thread). Component id + RTTR type are cached by
         // name (a findComponentEntity walk / registry lookup otherwise — per pump);
@@ -270,15 +311,15 @@ namespace rpe
             rttr::type rtype = rttr::type::get<void>();
         };
         QHash<QString, PinResolve> _pinRt;
+        uint64_t _pinGen = 0;                // TypeBridge generation the pin cache was resolved at
         QHash<QString, QString> _lastPinStr; // "e|comp|path" -> last display
         QVector<MirrorChannel::PinKey> _lastPins;
 
-        // Per-pump hot-path caches (sim thread): the selected component's RTTR type
-        // (resolveByName takes a registry mutex + string normalisation) and the
-        // watched paths pre-split (splitPath allocates per read otherwise). Both
-        // refresh only when the corresponding intent field changes.
-        QString _selTypeName;
-        rttr::type _selType = rttr::type::get<void>();
+        // Per-pump hot-path caches (sim thread): RTTR types are resolved once per
+        // listing rebuild (parallel to _selComps/_selCompIds — resolveByName takes a
+        // registry mutex + string work), and the watched paths are pre-split
+        // (splitPath allocates per read otherwise).
+        std::vector<rttr::type> _selTypes;
         QStringList _lastPathList;
         std::vector<QStringList> _splitPaths;
     };

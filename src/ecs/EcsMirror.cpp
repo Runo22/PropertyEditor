@@ -5,6 +5,8 @@
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/ecs/ComponentScan.h"
 
+#include <algorithm>
+
 namespace rpe
 {
 
@@ -26,6 +28,24 @@ namespace rpe
             return pos >= 0 ? s.mid(pos + 2) : s;
         }
 
+        // Some asset pipelines suffix prefab entity names with " Prefab". Trim a
+        // trailing whitespace-delimited "prefab" (any case) for display, so the
+        // add-entity picker and instance labels read as "Goblin", not "Goblin
+        // Prefab". Conservative: only when preceded by whitespace (leaves
+        // "MyPrefab"/"Prefab" alone) and never blanks the whole name.
+        QString trimPrefabSuffix(QString s)
+        {
+            s = s.trimmed();
+            static const QString suffix = QStringLiteral(" prefab");
+            if (s.size() > suffix.size()
+                && s.right(suffix.size()).compare(suffix, Qt::CaseInsensitive) == 0)
+            {
+                s.chop(suffix.size());
+                s = s.trimmed();
+            }
+            return s;
+        }
+
         // Display label for an entity: its name, else its prefab's name + id,
         // else just the id. (No leading id for named entities.)
         QString entityLabel(const flecs::entity& e)
@@ -41,7 +61,7 @@ namespace rpe
                 const char* pn = prefab.name();
                 if (pn && pn[0] != '\0')
                 {
-                    return QStringLiteral("%1  #%2").arg(QString::fromUtf8(pn)).arg(e.id());
+                    return QStringLiteral("%1  #%2").arg(trimPrefabSuffix(QString::fromUtf8(pn))).arg(e.id());
                 }
             }
             return QStringLiteral("#%1").arg(e.id());
@@ -110,16 +130,26 @@ namespace rpe
         _compsTable = nullptr;
         _selComps.clear();
         _selCompIds.clear();
+        _selRows.clear();
+        _lastCompRows.clear();
+        _lastPrefabs.clear(); // prefab ids belong to the old world
         _pinRt.clear(); // component ids/types belong to the old world
+        _pinGen = 0;
         _lastPinStr.clear();
         _lastPins.clear();
-        _selTypeName.clear();
+        _selTypes.clear();
         _lastPathList.clear();
         _splitPaths.clear();
         _stats = {};
         _bridgedIds.clear(); // ids belong to the old world
         _reqId = 0;
         _lastComponentCount = -1;
+        _scanActive = false; // cycle state belongs to the old world
+        _scanIds.clear();
+        _scanPos = 0;
+        _scanStaging.clear();
+        _scanVerdict.clear();
+        _scanWorkMs = 0.0;
         ecs_world_t* w = _world;
         if (ecs_stage_is_readonly(w))
         {
@@ -280,6 +310,12 @@ namespace rpe
         _ch->queueStructural(MirrorChannel::StructuralKind::RemoveComponent, entity, component);
     }
 
+    void EcsMirror::setSpawnConfigurator(std::function<void(flecs::entity)> fn)
+    {
+        std::lock_guard<std::mutex> lk(_spawnMutex);
+        _spawnConfig = std::move(fn);
+    }
+
     void EcsMirror::setPins(const QVector<PinKey>& pins)
     {
         _ch->setPins(pins);
@@ -398,23 +434,89 @@ namespace rpe
         bool structuralApplied = false;
         for (const MirrorChannel::StructuralEdit& s : in.structurals)
         {
+            // Spawn: no target entity — instantiate a fresh one from the prefab, then
+            // hand it to the host's configurator so it can set/override components
+            // (setting AFTER is_a overrides the prefab's shared values). rawId is the
+            // prefab id.
+            if (s.kind == MirrorChannel::StructuralKind::SpawnPrefab)
+            {
+                const flecs::entity prefab = world.entity(static_cast<flecs::entity_t>(s.rawId));
+                if (!prefab.is_alive())
+                {
+                    continue;
+                }
+                flecs::entity ne = world.entity().is_a(static_cast<flecs::entity_t>(s.rawId));
+                // Give the instance a real NAME from the prefab (minus any " Prefab"
+                // suffix), so it reads as "Zombie" rather than an anonymous id. flecs
+                // aborts on a duplicate name in a scope, so uniquify with a numeric
+                // suffix ("Zombie", "Zombie (1)", …). Set BEFORE the configurator so
+                // the host can still override it.
+                const char* pn = prefab.name();
+                const QString base = pn ? trimPrefabSuffix(QString::fromUtf8(pn)) : QString();
+                if (!base.isEmpty())
+                {
+                    std::string name = base.toStdString();
+                    for (int i = 1; world.lookup(name.c_str()).is_valid(); ++i)
+                    {
+                        name = base.toStdString() + " (" + std::to_string(i) + ")";
+                    }
+                    ne.set_name(name.c_str());
+                }
+                std::function<void(flecs::entity)> cfg;
+                {
+                    std::lock_guard<std::mutex> lk(_spawnMutex);
+                    cfg = _spawnConfig;
+                }
+                if (cfg)
+                {
+                    cfg(ne);
+                }
+                structuralApplied = true;
+                continue;
+            }
+
             flecs::entity e = world.entity(s.entity);
             if (!e.is_alive())
             {
                 continue;
             }
-            if (s.kind == MirrorChannel::StructuralKind::AddComponent)
+            if (s.kind == MirrorChannel::StructuralKind::DestroyEntity)
             {
-                flecs::entity comp = findComponentEntity(world, s.component);
+                e.destruct();
+                structuralApplied = true;
+                continue;
+            }
+            // By-id form: exact, and the ONLY way to address a pair. Also used for
+            // tag rows so a leaf-name collision can never remove the wrong thing.
+            if (s.rawId != 0)
+            {
+                if (s.kind == MirrorChannel::StructuralKind::AddComponent)
+                {
+                    e.add(static_cast<flecs::id_t>(s.rawId));
+                }
+                else
+                {
+                    e.remove(static_cast<flecs::id_t>(s.rawId));
+                }
+                structuralApplied = true;
+            }
+            else if (s.kind == MirrorChannel::StructuralKind::AddComponent)
+            {
+                // bridgedOnly=false: the add catalog legitimately offers zero-size
+                // TAGS, which have no RTTR bridge (nothing to inspect, only add).
+                flecs::entity comp = findComponentEntity(world, s.component, /*bridgedOnly=*/false);
                 if (comp.is_valid())
                 {
                     e.add(comp);
                     structuralApplied = true;
                 }
             }
-            else // RemoveComponent
+            else // RemoveComponent (by name)
             {
-                // Remove by the component currently on the entity (unambiguous).
+                // Collect matches FIRST, then remove: e.remove() moves the entity to a
+                // new table, so removing inside e.each() (which iterates the current
+                // table's type) would corrupt the walk and could drop the wrong id.
+                std::vector<flecs::id_t> toRemove;
                 e.each([&](flecs::id id) {
                     if (!id.is_entity())
                     {
@@ -423,17 +525,22 @@ namespace rpe
                     const char* cn = id.entity().name();
                     if (cn && s.component == QString::fromUtf8(cn))
                     {
-                        e.remove(id);
-                        structuralApplied = true;
+                        toRemove.push_back(id.raw_id());
                     }
                 });
+                for (const flecs::id_t rid : toRemove)
+                {
+                    e.remove(rid);
+                    structuralApplied = true;
+                }
             }
         }
         if (structuralApplied)
         {
-            _lastComponents.clear();
+            _lastCompRows.clear();
             _lastEntities.clear();
             _lastCatalog.clear();
+            _lastPrefabs.clear();
         }
 
         // The GUI reset its view (re-selected the same entity/component, or its
@@ -447,8 +554,9 @@ namespace rpe
         {
             _lastValueStr.clear();
             _ch->publishEntities(_lastEntities);
-            _ch->publishComponents(_lastComponents);
-            _ch->publishCatalog(_lastCatalog);
+            _ch->publishComponentRows(_lastCompRows);
+            _ch->publishCatalogEntries(_lastCatalog);
+            _ch->publishPrefabs(_lastPrefabs);
         }
 
         // Interest changed → reset per-leaf dedup so the new selection refreshes fully.
@@ -470,20 +578,35 @@ namespace rpe
         const auto scanNow = std::chrono::steady_clock::now();
         const bool requiredChanged = (required != _lastRequired);
         _lastRequired = required;
-        const bool scanEntities = requiredChanged || structuralApplied
-            || (scanNow - _lastEntityScan >= _entityScanGap);
-        if (scanEntities && _haveQuery)
+        // While the list is EMPTY (nothing selected/inspectable) poll more eagerly, so
+        // a freshly spawned / plugin-loaded entity appears promptly instead of after a
+        // full scan interval — there's nothing to fall back on to force a rescan here.
+        // Cheap in this state: a filtered query visits ~nothing, and an empty result
+        // appends nothing; capped at 10 Hz so it never becomes a per-frame full scan.
+        const auto effGap = (_lastEntities.isEmpty() && _entityScanGap.count() > 0.1)
+            ? std::chrono::duration<double>(0.1)
+            : _entityScanGap;
+        const bool scanDue = requiredChanged || structuralApplied
+            || (scanNow - _lastEntityScan >= effGap);
+
+        // A filter/structural change invalidates an in-flight cycle: restart with
+        // fresh parameters instead of finishing a stale pass.
+        if ((requiredChanged || structuralApplied) && _scanActive)
         {
-            _lastEntityScan = scanNow;
-            const auto scanT0 = std::chrono::steady_clock::now();
+            _scanActive = false;
+        }
+
+        if (!_scanActive && scanDue && _haveQuery)
+        {
+            // ── Begin a scan cycle ────────────────────────────────────────────────
+            const auto beginT0 = std::chrono::steady_clock::now();
             const QString reqShort = required.isEmpty() ? QString() : shortName(required);
 
             // Refresh the set of bridged component ids (and locate the required one).
             // String work (flecs path allocation + registry lookup) per component
-            // TYPE — worth skipping entirely when nothing could have changed: the
-            // component-type count is a cheap, exact-enough change signal (new types
-            // only ever get ADDED; bridge registrations are picked up by the count
-            // check at startup and by the structural/filter forces below).
+            // TYPE — skipped entirely when nothing could have changed: the type
+            // count only ever grows, and bridge registrations bump the registry
+            // generation.
             const int compCount = _componentQuery.count();
             const uint64_t bridgeGen = TypeBridge::registryGeneration();
             if (compCount != _lastComponentCount || bridgeGen != _bridgeGen
@@ -519,18 +642,16 @@ namespace rpe
                     }
                 });
             }
-            const uint64_t reqId = _reqId;
 
             // Narrow the entity query to the required component when the filter
             // changes: flecs then visits ONLY entities that have it, instead of every
-            // entity in the world. This is the big win for large worlds with a
-            // filtered view. Rebuilt only on change (cheap, rare).
+            // entity in the world. Rebuilt only on change (cheap, rare).
             if (requiredChanged)
             {
                 flecs::world w = world; // the (non-staged) world in immediate mode
-                if (!reqShort.isEmpty() && reqId)
+                if (!reqShort.isEmpty() && _reqId)
                 {
-                    _entityQuery = w.query_builder().with(reqId).build();
+                    _entityQuery = w.query_builder().with(_reqId).build();
                 }
                 else if (reqShort.isEmpty())
                 {
@@ -538,40 +659,117 @@ namespace rpe
                 }
             }
 
-            // A list of more than a few thousand entities is not usefully browsable;
-            // cap it so an unfiltered scan of a huge world can't spend all its time
-            // building labels. (Use the required-component filter to narrow instead.)
-            constexpr int kMaxEntities = 5000;
-            QVector<EntityEntry> ents;
-            _entityQuery.each([&](flecs::entity ent) {
-                if (ents.size() >= kMaxEntities || !ent.is_alive())
+            // Fast id snapshot, TABLE-wise (no labels, no per-entity component
+            // walks) — bounded by the table count, so it stays cheap even when the
+            // labelling work below is spread over many pumps.
+            _scanIds.clear();
+            _scanPos = 0;
+            _scanStaging.clear();
+            _scanVerdict.clear();
+            _scanReqShort = reqShort;
+            constexpr size_t kMaxSnapshot = 1000000; // memory bound, far above any browsable set
+            _entityQuery.run([&](flecs::iter& it) {
+                while (it.next())
                 {
-                    return;
-                }
-                bool hasBridged = false;
-                bool hasReq = reqShort.isEmpty();
-                ent.each([&](flecs::id id) {
-                    const uint64_t rid = id.raw_id();
-                    if (_bridgedIds.count(rid))
+                    for (size_t i = 0; i < it.count(); ++i)
                     {
-                        hasBridged = true;
+                        if (_scanIds.size() >= kMaxSnapshot)
+                        {
+                            return;
+                        }
+                        _scanIds.push_back(it.entity(i).id());
                     }
-                    if (reqId && rid == reqId)
-                    {
-                        hasReq = true;
-                    }
-                });
-                if (hasBridged && hasReq)
-                {
-                    ents.append({ static_cast<qulonglong>(ent.id()), entityLabel(ent) });
                 }
             });
-            if (ents != _lastEntities)
+            _scanActive = true;
+            _scanWorkMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beginT0).count();
+        }
+
+        if (_scanActive)
+        {
+            // ── One budgeted slice ────────────────────────────────────────────────
+            // The bridged/required check is resolved per TABLE (all entities of a
+            // table share their type), so the per-entity work is a hash lookup plus
+            // the label build for actual matches.
+            const double budget = _scanBudgetMs.load(std::memory_order_relaxed);
+            const auto sliceT0 = std::chrono::steady_clock::now();
+            constexpr int kMaxEntities = 5000; // larger lists aren't usefully browsable
+            const uint64_t reqId = _reqId;
+            const bool reqEmpty = _scanReqShort.isEmpty();
+            size_t processed = 0;
+            while (_scanPos < _scanIds.size())
             {
-                _lastEntities = ents;
-                _ch->publishEntities(ents);
+                if (_scanStaging.size() >= kMaxEntities)
+                {
+                    _scanPos = _scanIds.size();
+                    break;
+                }
+                const flecs::entity ent = world.entity(_scanIds[_scanPos]);
+                ++_scanPos;
+                ++processed;
+                if (ent.is_alive())
+                {
+                    const void* tbl = ecs_get_table(world.c_ptr(), ent.id());
+                    quint8 v = 0;
+                    const auto itv = _scanVerdict.constFind(tbl);
+                    if (itv != _scanVerdict.constEnd())
+                    {
+                        v = itv.value();
+                    }
+                    else
+                    {
+                        const ecs_type_t* type = tbl
+                            ? ecs_table_get_type(static_cast<const ecs_table_t*>(tbl))
+                            : nullptr;
+                        if (type)
+                        {
+                            for (int32_t k = 0; k < type->count; ++k)
+                            {
+                                const uint64_t rid = type->array[k];
+                                if (_bridgedIds.count(rid))
+                                {
+                                    v |= 1;
+                                }
+                                if (reqId && rid == reqId)
+                                {
+                                    v |= 2;
+                                }
+                            }
+                        }
+                        _scanVerdict.insert(tbl, v);
+                    }
+                    if ((v & 1) && (reqEmpty || (v & 2)))
+                    {
+                        _scanStaging.append({ static_cast<qulonglong>(ent.id()), entityLabel(ent) });
+                    }
+                }
+                // Budget check every 32 entities: guarantees forward progress even
+                // with a microscopic budget, and keeps the clock reads rare.
+                if ((processed & 31u) == 0 && budget > 0.0
+                    && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceT0).count() >= budget)
+                {
+                    break;
+                }
             }
-            _stats.lastScanMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scanT0).count();
+            _scanWorkMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sliceT0).count();
+
+            if (_scanPos >= _scanIds.size())
+            {
+                // ── Cycle complete: publish + reschedule ─────────────────────────
+                if (_scanStaging != _lastEntities)
+                {
+                    _lastEntities = _scanStaging;
+                    _ch->publishEntities(_scanStaging);
+                }
+                _stats.lastScanMs = _scanWorkMs;
+                if (_scanWorkMs > _stats.maxScanMs)
+                {
+                    _stats.maxScanMs = _scanWorkMs;
+                }
+                _scanActive = false;
+                _scanVerdict.clear();
+                _lastEntityScan = std::chrono::steady_clock::now(); // next cycle after the gap
+            }
         }
 
         // ── Add-component catalog ──────────────────────────────────────────────────
@@ -582,21 +780,78 @@ namespace rpe
         if (scanCatalog)
         {
             _lastCatalogScan = scanNow;
-            QStringList catalog;
+            const auto catT0 = std::chrono::steady_clock::now();
+            // Addable = bridged data components + zero-size TAGS (presence markers
+            // need no bridge — there is nothing to inspect, only add/remove).
+            QVector<MirrorChannel::CatalogEntry> catalog;
             for (const ComponentResolution& c : scanComponents(world))
             {
-                if (c.bridged)
+                if (c.bridged || c.tag)
                 {
                     // Full scoped path so the GUI's add picker can group by namespace;
                     // findComponentEntity accepts either the path or the leaf name.
-                    catalog.append(c.path.isEmpty() ? c.name : c.path);
+                    catalog.append({ c.path.isEmpty() ? c.name : c.path, c.tag });
                 }
             }
-            catalog.sort();
+            std::sort(catalog.begin(), catalog.end(),
+                      [](const MirrorChannel::CatalogEntry& a, const MirrorChannel::CatalogEntry& b) {
+                          return a.path < b.path;
+                      });
             if (catalog != _lastCatalog)
             {
                 _lastCatalog = catalog;
-                _ch->publishCatalog(catalog);
+                _ch->publishCatalogEntries(catalog);
+            }
+            _stats.lastCatalogMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - catT0).count();
+
+            // ── Spawnable prefabs (add-entity picker) ─────────────────────────────
+            // On the same cadence: prefab entities, filtered by the required component
+            // (reusing the entity-list filter), each filed under the first host group
+            // tag it carries. Only prefabs with a name are offered (spawn needs a
+            // handle; the id is the spawn key).
+            std::vector<std::pair<QString, uint64_t>> groupTags; // (name, tag id)
+            groupTags.reserve(static_cast<size_t>(in.prefabGroups.size()));
+            for (const QString& g : in.prefabGroups)
+            {
+                // Group tags are arbitrary named entities (plain tags), not necessarily
+                // components — look them up by name/path, not via the component query.
+                const flecs::entity te = world.lookup(g.toUtf8().constData());
+                if (te.is_valid())
+                {
+                    groupTags.emplace_back(g, te.raw_id());
+                }
+            }
+            QVector<MirrorChannel::PrefabEntry> prefabs;
+            flecs::query<> pq = world.query_builder().with(flecs::Prefab).build();
+            pq.each([&](flecs::entity p) {
+                if (_reqId != 0 && !p.has(_reqId))
+                {
+                    return;
+                }
+                const char* pn = p.name();
+                if (!pn || pn[0] == '\0')
+                {
+                    return;
+                }
+                QString group;
+                for (const auto& [gname, gid] : groupTags)
+                {
+                    if (p.has(gid))
+                    {
+                        group = gname;
+                        break;
+                    }
+                }
+                prefabs.append({ static_cast<qulonglong>(p.id()), trimPrefabSuffix(QString::fromUtf8(pn)), group });
+            });
+            std::sort(prefabs.begin(), prefabs.end(),
+                      [](const MirrorChannel::PrefabEntry& a, const MirrorChannel::PrefabEntry& b) {
+                          return a.group != b.group ? a.group < b.group : a.name < b.name;
+                      });
+            if (prefabs != _lastPrefabs)
+            {
+                _lastPrefabs = prefabs;
+                _ch->publishPrefabs(prefabs);
             }
         }
 
@@ -605,6 +860,21 @@ namespace rpe
         // for entities/components that are NOT selected, feeding the watch widget.
         if (!in.pinEdits.empty() || !in.pins.isEmpty())
         {
+            // A registry change (e.g. a plugin unregistering/registering its types on
+            // unload/reload) can invalidate the cached pin types — an unregistered
+            // rttr::type stays is_valid() (RTTR has no unregister), so it wouldn't be
+            // re-resolved otherwise. Drop the cache so every pin re-resolves against
+            // the current bridge. Registry changes are rare, so this costs nothing at
+            // steady state. (The selected-component listing is already generation-gated
+            // via _compsGen; and every value read is guarded by TypeBridge::wrap, which
+            // returns invalid for an unregistered type — so no unloaded code is ever
+            // called regardless.)
+            const uint64_t pinGen = TypeBridge::registryGeneration();
+            if (pinGen != _pinGen)
+            {
+                _pinRt.clear();
+                _pinGen = pinGen;
+            }
             const auto dedupKey = [](const MirrorChannel::PinKey& k) {
                 return QStringLiteral("%1|%2|%3").arg(k.entity).arg(k.component, k.path);
             };
@@ -618,11 +888,51 @@ namespace rpe
                 {
                     return false;
                 }
+                // Id-addressed (data-carrying pair): resolve directly by the pair id +
+                // ecs_get_typeid, exactly as the selected-component listing does. Pairs
+                // have no flecs name, so findComponentEntity/resolveByName can't reach
+                // them. NOTE: rttr::type::get<void>() reports is_valid()==true, so a
+                // freshly-defaulted PinResolve.rtype (void) must NOT be treated as
+                // resolved — gate on compId (0 = never resolved) and reject void.
+                if (k.rawId != 0)
+                {
+                    PinResolve pr = _pinRt.value(k.component);
+                    if (pr.compId == 0)
+                    {
+                        const ecs_entity_t tid = ecs_get_typeid(world.c_ptr(), k.rawId);
+                        if (tid == 0)
+                        {
+                            return false;
+                        }
+                        const flecs::string tp = world.entity(tid).path(".", "");
+                        pr.rtype = TypeBridge::resolveByName(tp.c_str() ? tp.c_str() : "");
+                        pr.compId = k.rawId;
+                        if (pr.rtype.is_valid() && pr.rtype != rttr::type::get<void>())
+                        {
+                            _pinRt.insert(k.component, pr);
+                        }
+                    }
+                    tOut = pr.rtype;
+                    cidOut = k.rawId;
+                    if (!tOut.is_valid() || tOut == rttr::type::get<void>())
+                    {
+                        return false;
+                    }
+                    ptrOut = pe.try_get_mut(k.rawId); // nullptr (not a panic) if removed
+                    return ptrOut != nullptr;
+                }
                 PinResolve pr = _pinRt.value(k.component);
                 if (pr.compId == 0 || !world.entity(pr.compId).is_alive())
                 {
                     const flecs::entity comp = findComponentEntity(world, k.component);
                     if (!comp.is_valid())
+                    {
+                        return false;
+                    }
+                    // Data components only — get_mut on a tag/plain-entity id asserts
+                    // in debug flecs builds (see the selected-component listing).
+                    const flecs::Component* cd = comp.try_get<flecs::Component>();
+                    if (!cd || cd->size <= 0)
                     {
                         return false;
                     }
@@ -646,7 +956,10 @@ namespace rpe
                 {
                     return false;
                 }
-                ptrOut = pe.get_mut(pr.compId);
+                // try_get_mut (not get_mut): returns nullptr instead of panicking when
+                // the component was removed from a still-living entity — that nullptr is
+                // exactly the "component gone" signal the dead-pin classifier acts on.
+                ptrOut = pe.try_get_mut(pr.compId);
                 return ptrOut != nullptr;
             };
 
@@ -683,6 +996,7 @@ namespace rpe
             }
 
             std::vector<MirrorChannel::PinValue> pinUpdates;
+            QVector<MirrorChannel::PinKey> deadPins;
             for (const MirrorChannel::PinKey& k : in.pins)
             {
                 void* pp = nullptr;
@@ -690,6 +1004,29 @@ namespace rpe
                 uint64_t cid = 0;
                 if (!resolvePin(k, pp, pt, cid))
                 {
+                    // The pin didn't resolve. Report it as DEAD only when its target is
+                    // provably GONE — the entity was destroyed, or the component was
+                    // removed from a still-living entity — so the watch widget can drop
+                    // the row. A pin that's merely unresolvable for now (its bridge type
+                    // hasn't registered yet — plugin load order) is KEPT so it resumes
+                    // when the type appears.
+                    const flecs::entity pe = world.entity(k.entity);
+                    bool dead = !pe.is_alive();
+                    if (!dead && k.rawId != 0)
+                    {
+                        dead = !ecs_has_id(world.c_ptr(), k.entity, k.rawId); // pair removed
+                    }
+                    else if (!dead)
+                    {
+                        const flecs::entity comp = findComponentEntity(world, k.component);
+                        // comp still exists globally but the entity no longer has it →
+                        // removed. (comp invalid = type gone / not loaded → ambiguous → keep.)
+                        dead = comp.is_valid() && !ecs_has_id(world.c_ptr(), k.entity, comp.raw_id());
+                    }
+                    if (dead)
+                    {
+                        deadPins.push_back(k);
+                    }
                     continue;
                 }
                 rttr::variant access = TypeBridge::wrap(pt, pp);
@@ -716,6 +1053,10 @@ namespace rpe
             {
                 _ch->publishPinValues(std::move(pinUpdates));
             }
+            if (!deadPins.empty())
+            {
+                _ch->publishDeadPins(deadPins);
+            }
         }
 
         if (entity == 0)
@@ -723,8 +1064,29 @@ namespace rpe
             return;
         }
         flecs::entity e = world.entity(entity);
-        if (!e.is_alive())
+
+        // The selected entity can stop qualifying BETWEEN the wall-clock entity scans,
+        // through a DIRECT world edit the mirror never routed: it was destroyed, or the
+        // required component was removed from it. The entity list wouldn't notice until
+        // the next scan (up to a scan interval later), leaving a non-matching entity
+        // selected with its components on show. Detect it here — every pump, O(1) — and
+        // force a prompt rescan (clear the wall-clock gate) so the list drops it and the
+        // GUI deselects; publish an empty component list so the panel clears at once
+        // rather than lingering on the stale rows.
+        const bool gone = !e.is_alive();
+        const bool failsFilter = !gone && !required.isEmpty() && _reqId != 0
+            && !ecs_has_id(world.c_ptr(), entity, _reqId);
+        if (gone || failsFilter)
         {
+            _lastEntityScan = {}; // bypass the 0.5s gate → rescan next pump
+            _compsEntity = 0;     // invalidate the component-list cache
+            // Clear the panel ONCE (on the transition), not every pump until the entity
+            // list drops the entity and the GUI re-points interest at a neighbour.
+            if (!_lastCompRows.isEmpty())
+            {
+                _lastCompRows.clear();
+                _ch->publishComponentRows({});
+            }
             return;
         }
 
@@ -746,7 +1108,58 @@ namespace rpe
             _compsGen = compsGen;
             _selComps.clear();
             _selCompIds.clear();
+            _selTypes.clear();
+            _selRows.clear();
             e.each([&](flecs::id id) {
+                // PAIRS. Which side carries data is flecs' own rule (ecs_get_typeid:
+                // the relation's type first, else the target's). A data-carrying
+                // pair whose type is bridged becomes a SELECTABLE, editable row
+                // ("Damage \u2192 Fire"); dataless pairs stay badge rows. flecs-internal
+                // relations (ChildOf/IsA/Identifier…) stay hidden.
+                if (id.is_pair())
+                {
+                    const flecs::entity rel = id.first();
+                    const char* rn = rel.name();
+                    if (!rn || rn[0] == '\0')
+                    {
+                        return;
+                    }
+                    const flecs::string rp = rel.path(".", "");
+                    const QString relPath = rp.c_str() ? QString::fromUtf8(rp.c_str()) : QString();
+                    if (relPath.startsWith(QStringLiteral("flecs")))
+                    {
+                        return;
+                    }
+                    const flecs::entity tgt = id.second();
+                    const char* tn = tgt.name();
+                    const QString target = (tn && tn[0] != '\0')
+                        ? QString::fromUtf8(tn)
+                        : QStringLiteral("#%1").arg(static_cast<qulonglong>(tgt.id()));
+
+                    const ecs_entity_t tid = ecs_get_typeid(world.c_ptr(), id.raw_id());
+                    if (tid != 0)
+                    {
+                        const flecs::entity typeEnt = world.entity(tid);
+                        const flecs::string tp = typeEnt.path(".", "");
+                        const QString typePath = tp.c_str() ? QString::fromUtf8(tp.c_str()) : QString();
+                        const rttr::type rt = TypeBridge::resolveByName(typePath.toUtf8().constData());
+                        if (rt.is_valid())
+                        {
+                            MirrorChannel::ComponentRow row { relPath, target,
+                                                              MirrorChannel::RowKind::PairData,
+                                                              static_cast<qulonglong>(id.raw_id()),
+                                                              typePath };
+                            _selComps.append(row.key());
+                            _selCompIds.append(id.raw_id());
+                            _selTypes.push_back(rt);
+                            _selRows.append(row);
+                            return;
+                        }
+                    }
+                    _selRows.append({ relPath, target, MirrorChannel::RowKind::Pair,
+                                      static_cast<qulonglong>(id.raw_id()) });
+                    return;
+                }
                 if (!id.is_entity())
                 {
                     return;
@@ -756,24 +1169,42 @@ namespace rpe
                 {
                     return;
                 }
+                const flecs::string p = id.entity().path(".", "");
+                const QString qn = QString::fromUtf8(p.c_str());
+                if (qn.startsWith(QStringLiteral("flecs")))
+                {
+                    return;
+                }
+                // Only DATA components are inspectable. A zero-size tag — or a plain
+                // entity attached to this entity — has nothing to edit; it is shown
+                // as a TAG row (get_mut on a dataless id ASSERTS in debug flecs).
+                const flecs::Component* cd = id.entity().try_get<flecs::Component>();
+                if (!cd || cd->size <= 0)
+                {
+                    _selRows.append({ qn, QString(), MirrorChannel::RowKind::Tag,
+                                      static_cast<qulonglong>(id.raw_id()) });
+                    return;
+                }
                 // Identify the component by its FULL scoped path ("game.Transform"),
                 // which is unique even when two components share a leaf name. The GUI
                 // displays the leaf; resolveByName matches the path exactly against
                 // the RTTR full name.
-                const flecs::string p = id.entity().path(".", "");
-                const QString qn = QString::fromUtf8(p.c_str());
-                if (!TypeBridge::resolveByName(qn.toUtf8().constData()).is_valid())
+                const rttr::type dt = TypeBridge::resolveByName(qn.toUtf8().constData());
+                if (!dt.is_valid())
                 {
-                    return;
+                    return; // data component without a bridge → not inspectable, hidden
                 }
                 _selComps.append(qn);
                 _selCompIds.append(id.raw_id());
+                _selTypes.push_back(dt);
+                _selRows.append({ qn, QString(), MirrorChannel::RowKind::Data,
+                                  static_cast<qulonglong>(id.raw_id()) });
             });
         }
-        if (_selComps != _lastComponents)
+        if (_selRows != _lastCompRows)
         {
-            _lastComponents = _selComps;
-            _ch->publishComponents(_selComps);
+            _lastCompRows = _selRows;
+            _ch->publishComponentRows(_selRows);
         }
 
         const int selIdx = _selComps.indexOf(component);
@@ -781,16 +1212,9 @@ namespace rpe
         {
             return;
         }
-        // Cache the selected component's RTTR type by name — resolveByName does
-        // mutex-guarded registry + string work, needless every pump. An INVALID
-        // result is never cached: the bridge may register a moment later (plugin
-        // load order), and the pre-cache behaviour was to retry every pump.
-        if (component != _selTypeName || !_selType.is_valid())
-        {
-            _selTypeName = component;
-            _selType = TypeBridge::resolveByName(component.toUtf8().constData());
-        }
-        const rttr::type t = _selType;
+        // The row's RTTR type was resolved at listing rebuild (parallel array) —
+        // for a data pair this is the type the PAIR carries, not the relation name.
+        const rttr::type t = _selTypes[static_cast<size_t>(selIdx)];
         if (!t.is_valid())
         {
             return;

@@ -16,7 +16,14 @@ namespace rpe
         QString name;     // flecs component name (the unscoped/leaf name)
         QString path;     // flecs full scoped path (e.g. "game.Transform")
         bool bridged = false; // resolves to a bridged RTTR type the inspector can show
+        bool tag = false;     // zero-size component: addable presence marker, no data
         QString rttrType;     // the RTTR type name it resolved to ("" if unresolved)
+        // Number of properties RTTR reports for the resolved type. A bridged component
+        // with ZERO properties is the "it's listed but shows no editors" case: the type
+        // resolved (rttr::type::get<T>() is valid for ANY complete type) but nothing is
+        // reflected — usually an RTTR_REGISTRATION block that never ran, e.g. dropped by
+        // the linker as an unreferenced static initializer in a Release build.
+        int propertyCount = 0;
     };
 
     // Enumerate the registered flecs components in `world` and report, for each,

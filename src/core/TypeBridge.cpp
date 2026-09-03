@@ -103,7 +103,9 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        r.aliases[std::string(flecsName)] = t.get_id();
+        // Store normalised ("::") so an alias registered either way matches a flecs
+        // path spelled the other way ("game::Stats" alias ↔ "game.Stats" path).
+        r.aliases[normalizeScopes(std::string(flecsName))] = t.get_id();
         r.generation.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -141,8 +143,14 @@ namespace rpe
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
 
-        // 1) Explicit alias (registerType<T>(name) / registerAlias) wins.
-        if (const auto a = r.aliases.find(name); a != r.aliases.end())
+        const std::string normName = normalizeScopes(name);
+
+        // 1) Alias wins — an explicit registerType<T>(name)/registerAlias, or the
+        //    automatic C++-type-name alias registerType<T>() records. The latter is
+        //    what keeps two types apart when their RTTR names are identical (the RTTR
+        //    name is whatever was registered; the C++ name always carries the
+        //    namespace). Matched separator-insensitively.
+        if (const auto a = r.aliases.find(normName); a != r.aliases.end())
         {
             if (const auto e = r.map.find(a->second); e != r.map.end())
             {
@@ -154,7 +162,6 @@ namespace rpe
         //    "game.Transform" matches the RTTR type "game::Transform". This is the
         //    UNAMBIGUOUS path — pass the full flecs component path here and two
         //    components that share a short name ("Panel") still resolve correctly.
-        const std::string normName = normalizeScopes(name);
         for (const auto& [id, entry] : r.map)
         {
             if (normalizeScopes(entry.type.get_name().to_string()) == normName)
@@ -163,19 +170,51 @@ namespace rpe
             }
         }
 
-        // 3) Short-name match (flecs leaf name vs. scoped RTTR registration). This
-        //    is a best-effort fallback and is AMBIGUOUS if two bridged types share a
-        //    short name — it returns the first found. Prefer passing a full path so
-        //    step 2 resolves first.
-        const std::string target = shortName(name);
-        for (const auto& [id, entry] : r.map)
+        // 2.5) Scoped-SUFFIX match: the flecs path is a trailing, scope-aligned part of
+        //      the RTTR full name (flecs "game.Transform" ↔ RTTR "app::game::Transform").
+        //      This STILL disambiguates same-leaf types by namespace, unlike the bare
+        //      short-name fallback. Deterministic: closest (shortest) full name wins,
+        //      ties broken lexicographically — so debug and release always agree.
         {
-            if (shortName(entry.type.get_name().to_string()) == target)
+            const std::string suffix = "::" + normName;
+            rttr::type best = rttr::type::get_by_name(std::string());
+            std::string bestFull;
+            for (const auto& [id, entry] : r.map)
             {
-                return entry.type;
+                const std::string full = normalizeScopes(entry.type.get_name().to_string());
+                if (full.size() > suffix.size()
+                    && full.compare(full.size() - suffix.size(), suffix.size(), suffix) == 0
+                    && (!best.is_valid() || full.size() < bestFull.size()
+                        || (full.size() == bestFull.size() && full < bestFull)))
+                {
+                    best = entry.type;
+                    bestFull = full;
+                }
+            }
+            if (best.is_valid())
+            {
+                return best;
             }
         }
-        return rttr::type::get_by_name(std::string()); // invalid
+
+        // 3) Short-name (leaf) fallback — AMBIGUOUS when two bridged types share a leaf
+        //    ("game::Panel" vs "ui::Panel") and only the leaf was given. Pick the
+        //    smallest full name DETERMINISTICALLY (unordered_map order otherwise varies
+        //    between builds — the classic "works in debug, wrong in release"). Prefer a
+        //    full path (step 2) or a scoped suffix (2.5) so this is never reached.
+        const std::string target = shortName(name);
+        rttr::type best = rttr::type::get_by_name(std::string());
+        std::string bestFull;
+        for (const auto& [id, entry] : r.map)
+        {
+            const std::string full = entry.type.get_name().to_string();
+            if (shortName(full) == target && (!best.is_valid() || full < bestFull))
+            {
+                best = entry.type;
+                bestFull = full;
+            }
+        }
+        return best.is_valid() ? best : rttr::type::get_by_name(std::string()); // invalid
     }
 
     rttr::variant TypeBridge::wrap(rttr::type t, void* obj)

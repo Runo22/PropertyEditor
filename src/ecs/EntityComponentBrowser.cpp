@@ -13,6 +13,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <string>
+
 #include <rttr/instance.h>
 
 namespace rpe
@@ -70,11 +72,14 @@ namespace rpe
         connect(_entityList, &EntityListWidget::entitySelected, this, &EntityComponentBrowser::_onEntitySelected);
         connect(_entityList, &EntityListWidget::entityDeselected, this, &EntityComponentBrowser::_onEntityDeselected);
         connect(_entityList, &EntityListWidget::entityIdSelected, this, &EntityComponentBrowser::_onEntityIdSelected);
+        connect(_entityList, &EntityListWidget::spawnPrefabRequested, this, &EntityComponentBrowser::_onSpawnPrefab);
+        connect(_entityList, &EntityListWidget::removeEntityRequested, this, &EntityComponentBrowser::_onRemoveEntity);
         connect(_componentList, &ComponentListWidget::componentSelected, this, &EntityComponentBrowser::_onComponentSelected);
         connect(_componentList, &ComponentListWidget::componentNameSelected, this, &EntityComponentBrowser::_onComponentNameSelected);
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
         connect(_componentList, &ComponentListWidget::addComponentRequested, this, &EntityComponentBrowser::_onAddComponent);
         connect(_componentList, &ComponentListWidget::removeComponentRequested, this, &EntityComponentBrowser::_onRemoveComponent);
+        connect(_componentList, &ComponentListWidget::removeComponentIdRequested, this, &EntityComponentBrowser::_onRemoveComponentId);
         connect(_propertyEditor, &PropertyEditor::propertyEdited, this, &EntityComponentBrowser::propertyEdited);
         connect(_writeCheck, &QCheckBox::toggled, this, &EntityComponentBrowser::_onWriteToggled);
     }
@@ -195,6 +200,148 @@ namespace rpe
         _componentList->setComponentEditingEnabled(on);
     }
 
+    void EntityComponentBrowser::setEntityAddingEnabled(bool on)
+    {
+        _entityAddingEnabled = on;
+        _entityList->setEntityAddingEnabled(on);
+    }
+
+    void EntityComponentBrowser::setPrefabGroups(const QVector<PrefabGroup>& groups)
+    {
+        QStringList tags;
+        QHash<QString, QIcon> icons;
+        tags.reserve(groups.size());
+        for (const PrefabGroup& g : groups)
+        {
+            tags.append(g.tag);
+            if (!g.icon.isNull())
+            {
+                icons.insert(g.tag, g.icon);
+            }
+        }
+        _entityList->setPrefabGroupIcons(icons); // GUI-side rendering
+        if (_channel)
+        {
+            _channel->setPrefabGroupTags(tags); // producer grouping + filtering
+            _channel->requestResync();
+        }
+    }
+
+    void EntityComponentBrowser::setEntityRemovingEnabled(bool on)
+    {
+        _entityList->setEntityRemovingEnabled(on);
+    }
+
+    void EntityComponentBrowser::addEntityAction(const EntityAction& action)
+    {
+        _entityActions.append(action);
+        _entityList->setContextActions(_entityActions);
+    }
+
+    void EntityComponentBrowser::addComponentAction(const ComponentAction& action)
+    {
+        _componentActions.append(action);
+        // Wrap each host action so the widget-level callback (key, rawId) forwards the
+        // CURRENTLY selected entity id, read at click time.
+        QVector<ComponentListWidget::MenuAction> wrapped;
+        wrapped.reserve(_componentActions.size());
+        for (const ComponentAction& a : _componentActions)
+        {
+            const auto cb = a.callback;
+            wrapped.append({ a.label, a.icon, [this, cb](const QString& key, qulonglong rawId) {
+                                const qulonglong id = _mirrorEntity != 0
+                                    ? _mirrorEntity
+                                    : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
+                                if (cb)
+                                    cb(id, key, rawId);
+                            } });
+        }
+        _componentList->setContextActions(wrapped);
+    }
+
+    void EntityComponentBrowser::setEntityMenuHook(std::function<void(qulonglong, QMenu&)> hook)
+    {
+        _entityList->setContextMenuHook(std::move(hook));
+    }
+
+    void EntityComponentBrowser::setComponentMenuHook(
+        std::function<void(qulonglong, const QString&, qulonglong, QMenu&)> hook)
+    {
+        _componentList->setContextMenuHook([this, hook](const QString& key, qulonglong rawId, QMenu& menu) {
+            const qulonglong id = _mirrorEntity != 0
+                ? _mirrorEntity
+                : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
+            if (hook)
+                hook(id, key, rawId, menu);
+        });
+    }
+
+    void EntityComponentBrowser::_onRemoveEntity(qulonglong entityId)
+    {
+        if (entityId == 0)
+        {
+            return;
+        }
+        if (_channel)
+        {
+            _channel->queueDestroyEntity(entityId);
+            _channel->requestResync();
+        }
+        else if (_world)
+        {
+            withGuard(_guard, [&] {
+                flecs::entity e = _world->entity(static_cast<flecs::entity_t>(entityId));
+                if (e.is_alive())
+                {
+                    e.destruct();
+                }
+            });
+        }
+    }
+
+    void EntityComponentBrowser::_onSpawnPrefab(qulonglong prefabId)
+    {
+        if (prefabId == 0)
+        {
+            return;
+        }
+        if (_channel)
+        {
+            // Mirror mode: the sim thread instantiates via is_a and runs the host's
+            // configurator (EcsMirror::setSpawnConfigurator).
+            _channel->queueSpawnPrefab(prefabId);
+            _channel->requestResync();
+        }
+        else if (_world)
+        {
+            // Direct mode: the GUI owns the world — spawn under the guard, and give
+            // the instance a real name from the prefab (minus " Prefab"), uniquified
+            // since flecs aborts on duplicate names. Mirror mode does the same on the
+            // sim thread (EcsMirror).
+            withGuard(_guard, [&] {
+                flecs::entity prefab = _world->entity(static_cast<flecs::entity_t>(prefabId));
+                flecs::entity ne = _world->entity().is_a(static_cast<flecs::entity_t>(prefabId));
+                const char* pn = prefab.name();
+                QString base = pn ? QString::fromUtf8(pn) : QString();
+                base = base.trimmed();
+                if (base.size() > 7 && base.right(7).compare(QStringLiteral(" prefab"), Qt::CaseInsensitive) == 0)
+                {
+                    base.chop(7);
+                    base = base.trimmed();
+                }
+                if (!base.isEmpty())
+                {
+                    std::string name = base.toStdString();
+                    for (int i = 1; _world->lookup(name.c_str()).is_valid(); ++i)
+                    {
+                        name = base.toStdString() + " (" + std::to_string(i) + ")";
+                    }
+                    ne.set_name(name.c_str());
+                }
+            });
+        }
+    }
+
     void EntityComponentBrowser::setSettings(const Settings& s)
     {
         _settings = s;
@@ -254,8 +401,23 @@ namespace rpe
     {
         _liveTimer->stop();
         _selectedEntity = {};
+        // Forget the mirror-mode selection too, otherwise _pushInterest keeps feeding
+        // the now-gone entity and the next poll would refill the component panel with
+        // its (stale) components — e.g. an entity that a required-component filter has
+        // just excluded.
+        _mirrorEntity = 0;
+        _mirrorComponent.clear();
+        _currentComps.clear();
+        _currentTags.clear();
+        _pairTypeName.clear();
+        _pairRawId.clear();
         _componentList->clearEntity();
         _propertyEditor->unbind();
+        if (_channel)
+        {
+            _pushInterest(); // interest for entity 0 → producer stops sending components
+        }
+        _refreshPinnedTint(); // the pin set is per entity+component
         emit entityDeselected();
     }
 
@@ -382,9 +544,13 @@ namespace rpe
             });
             w->setChannel(_channel);
             connect(_propertyEditor, &PropertyEditor::pinRequested, this, [this](const QString& path) {
+                // Data-carrying pairs pin too: they have no resolvable flecs name, so
+                // the pin carries the pair id (from the row) and the producer resolves
+                // it by id + ecs_get_typeid. Plain components pass rawId 0 (by-name).
                 if (_pinWidget && _mirrorEntity != 0 && !_mirrorComponent.isEmpty())
                 {
-                    _pinWidget->pin(_mirrorEntity, _entityList->currentLabel(), _mirrorComponent, path);
+                    _pinWidget->pin(_mirrorEntity, _entityList->currentLabel(), _mirrorComponent,
+                                    path, _pairRawId.value(_mirrorComponent, 0));
                 }
             });
             connect(_propertyEditor, &PropertyEditor::unpinRequested, this, [this](const QString& path) {
@@ -437,24 +603,68 @@ namespace rpe
             _entityList->setEntries(rows);
         }
 
-        QStringList comps;
-        if (_channel->pollComponents(comps))
+        QVector<MirrorChannel::ComponentRow> compRows;
+        if (_channel->pollComponentRows(compRows))
         {
-            _componentList->setComponentNames(comps);
-            _currentComps = comps;
+            _currentComps.clear();
+            _currentTags.clear();
+            _pairTypeName.clear();
+            _pairRawId.clear();
+            // With no entity selected (e.g. a required-component filter emptied the
+            // list), ignore any component feed still in flight for the old entity so
+            // the panel doesn't show a non-matching entity's components. (The producer
+            // clears the feed when the SELECTED entity becomes invalid — see EcsMirror's
+            // gone/failsFilter block — but on a plain deselect it just stops publishing,
+            // so this consumer-side gate covers the one-pump window before it does.)
+            if (_mirrorEntity != 0)
+            {
+                _componentList->setComponentRows(compRows);
+                for (const auto& r : compRows)
+                {
+                    if (r.kind == MirrorChannel::RowKind::Data)
+                    {
+                        _currentComps.append(r.name);
+                    }
+                    else if (r.kind == MirrorChannel::RowKind::Tag)
+                    {
+                        _currentTags.insert(r.name);
+                    }
+                    else if (r.kind == MirrorChannel::RowKind::PairData)
+                    {
+                        _pairTypeName.insert(r.key(), r.typeName);
+                        _pairRawId.insert(r.key(), r.rawId);
+                    }
+                }
+            }
             _updateAddable();
         }
 
-        QStringList catalog;
-        if (_channel->pollCatalog(catalog))
+        QVector<MirrorChannel::CatalogEntry> catalog;
+        if (_channel->pollCatalogEntries(catalog))
         {
             _catalog = catalog;
             _updateAddable();
         }
 
-        for (auto& u : _channel->pollValues())
+        QVector<MirrorChannel::PrefabEntry> prefabs;
+        if (_channel->pollPrefabs(prefabs))
         {
-            _propertyEditor->setPropertyValue(u.path, u.value);
+            _entityList->setAddablePrefabs(prefabs);
+        }
+
+        // With no entity selected (e.g. a required-component filter emptied the list),
+        // drain the value feed still in flight for the old entity instead of applying
+        // it, so it can't land on the next selection.
+        if (_mirrorEntity != 0)
+        {
+            for (auto& u : _channel->pollValues())
+            {
+                _propertyEditor->setPropertyValue(u.path, u.value);
+            }
+        }
+        else
+        {
+            _channel->pollValues(); // drain
         }
 
         // Re-send interest each tick so newly expanded fields start mirroring.
@@ -464,17 +674,19 @@ namespace rpe
     void EntityComponentBrowser::_updateAddable()
     {
         // Offer every catalogued component the entity does not already have. Both
-        // the catalog and the entity's current components are full scoped paths now,
-        // so compare directly.
-        QStringList addable;
-        for (const QString& full : _catalog)
+        // the catalog and the entity's current components are full scoped paths, so
+        // compare directly (tags check the tag rows, data the data rows).
+        QVector<MirrorChannel::CatalogEntry> addable;
+        for (const MirrorChannel::CatalogEntry& entry : _catalog)
         {
-            if (!_currentComps.contains(full))
+            const bool present = entry.tag ? _currentTags.contains(entry.path)
+                                           : _currentComps.contains(entry.path);
+            if (!present)
             {
-                addable.append(full);
+                addable.append(entry);
             }
         }
-        _componentList->setAddableComponents(addable);
+        _componentList->setAddableEntries(addable);
     }
 
     void EntityComponentBrowser::_onAddComponent(const QString& name)
@@ -498,6 +710,28 @@ namespace rpe
                 {
                     _selectedEntity.add(comp);
                 }
+            });
+            _componentList->setEntity(_world, _selectedEntity);
+        }
+    }
+
+    void EntityComponentBrowser::_onRemoveComponentId(qulonglong rawId)
+    {
+        // Tag/pair rows carry a flecs id — the only correct removal identity for a
+        // pair, and unambiguous for tags.
+        if (rawId == 0)
+        {
+            return;
+        }
+        if (_channel && _mirrorEntity != 0)
+        {
+            _channel->queueStructuralById(MirrorChannel::StructuralKind::RemoveComponent, _mirrorEntity, rawId);
+            _channel->requestResync();
+        }
+        else if (_world && _selectedEntity.is_alive())
+        {
+            withGuard(_guard, [&] {
+                _selectedEntity.remove(static_cast<flecs::id_t>(rawId));
             });
             _componentList->setEntity(_world, _selectedEntity);
         }
@@ -567,10 +801,11 @@ namespace rpe
             return; // direct mode uses _onComponentSelected
         }
         _mirrorComponent = name;
-        // `name` is the component's full flecs path (the list displays only the
-        // leaf). resolveByName matches it exactly against the RTTR type — even when
-        // two components share a leaf name — so the schema binds to the right type.
-        const rttr::type t = TypeBridge::resolveByName(name.toUtf8().constData());
+        // `name` is the row's selection key: the component's full flecs path, or for
+        // a data-carrying pair the "Rel (Target)" identity — in that case the schema
+        // binds the TYPE THE PAIR CARRIES (mapped via _pairTypeName).
+        const QString typeName = _pairTypeName.value(name, name);
+        const rttr::type t = TypeBridge::resolveByName(typeName.toUtf8().constData());
         if (t.is_valid())
         {
             _propertyEditor->bindType(t); // schema only — no instance/world touch
