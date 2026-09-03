@@ -138,6 +138,7 @@ if(RPE_WITH_FLECS)
         resources/rpe_resources.qrc
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
+        include/rpe/ecs/ComponentRegistry.h
         include/rpe/ecs/EntityComponentBrowser.h
         include/rpe/ecs/PinnedPropertiesWidget.h)
 endif()
@@ -324,6 +325,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_flecs_naming_test test/flecs_naming_test.cpp)
     target_link_libraries(rpe_flecs_naming_test PRIVATE rpe_gui)
+
+    add_executable(rpe_flecs_rttr_namespace_mismatch_test test/flecs_rttr_namespace_mismatch_test.cpp)
+    target_link_libraries(rpe_flecs_rttr_namespace_mismatch_test PRIVATE rpe_gui)
 
     add_executable(rpe_same_rttr_name_test test/same_rttr_name_test.cpp)
     target_link_libraries(rpe_same_rttr_name_test PRIVATE rpe_gui)
