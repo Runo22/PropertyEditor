@@ -80,6 +80,43 @@ int main()
     check("re-binding keeps resolution correct",
           rpe::TypeBridge::resolveByName(gamePath.c_str()) == rttr::type::get<game::Stats>());
 
+    // ── Binding BEFORE flecs knows the type must not register or rename it ──────
+    // Registering T under a default name here and letting the caller name it later is
+    // exactly what makes flecs raise a component-redefinition error.
+    {
+        struct Late
+        {
+            int v = 0;
+        };
+        flecs::world w2;
+        const flecs::entity notYet = rpe::bindComponent<Late>(w2);
+        check("binding an unregistered type is a no-op (no flecs registration)",
+              !notYet.is_valid());
+        check("...so flecs still doesn't know it", !flecs::_::type<Late>::registered(w2.c_ptr()));
+
+        // The caller's own naming therefore still succeeds, and binding after it works.
+        w2.component<Late>("custom.Late");
+        const flecs::entity bound = rpe::bindComponent<Late>(w2);
+        check("naming it afterwards still works, and binding then succeeds", bound.is_valid());
+        const auto latePath = w2.component<Late>().path(".", "");
+        check("the caller's name is what resolves",
+              rpe::TypeBridge::resolveByName(latePath.c_str()) == rttr::type::get<Late>());
+    }
+
+    // ── One unregistered type must not abort binding of the rest ────────────────
+    {
+        struct Unknown
+        {
+            int v = 0;
+        };
+        flecs::world w3;
+        w3.component<game::Stats>("only.Stats");
+        rpe::bindComponents<Unknown, game::Stats>(w3); // Unknown first, deliberately
+        const auto p = w3.component<game::Stats>().path(".", "");
+        check("a skipped type doesn't prevent later ones from binding",
+              rpe::TypeBridge::resolveByName(p.c_str()) == rttr::type::get<game::Stats>());
+    }
+
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;
 }
