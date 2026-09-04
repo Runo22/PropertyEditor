@@ -61,6 +61,35 @@ namespace rpe
             }
             return s;
         }
+
+        // Render a string_view-like (pointer, length) pair defensively.
+        //
+        // A view does not own its bytes, so its pointer and length are only as
+        // trustworthy as the object they were read from. An inspector reads FOREIGN
+        // memory by design, and if a component is ever decoded through the wrong type
+        // — a mis-resolved component, a stale layout after a reload — the bytes where
+        // that type expects a view are arbitrary: a garbage pointer with a garbage
+        // length. Handing that straight to fromUtf8 walks off into unmapped memory and
+        // takes the whole inspector down.
+        //
+        // So: reject a null pointer, and reject a length no real string would have.
+        // A wrong length is the reliable tell (a bogus pointer usually comes with
+        // one), and a cell can't show 64K of text anyway. Degrading to "<invalid>"
+        // keeps the inspector alive and makes the bad decode visible instead of fatal.
+        template <class CharT, class Fn>
+        QString viewToDisplay(const CharT* data, size_t size, Fn make)
+        {
+            constexpr size_t kMaxViewChars = 64 * 1024;
+            if (!data)
+            {
+                return QString();
+            }
+            if (size > kMaxViewChars)
+            {
+                return QStringLiteral("<invalid>");
+            }
+            return make(data, static_cast<int>(size));
+        }
     } // namespace
 
     void TypeRenderer::setFloatDecimals(int decimals)
@@ -428,13 +457,17 @@ namespace rpe
             // Read-only display: a view points into memory the OBJECT owns — showing
             // it is safe, editing it is not (and it is deliberately not editable).
             const std::string_view sv = v.get_value<std::string_view>();
-            return sv.data() ? QString::fromUtf8(sv.data(), static_cast<int>(sv.size())) : QString();
+            return viewToDisplay(sv.data(), sv.size(), [](const char* p, int n) {
+                return QString::fromUtf8(p, n);
+            });
         }
         if (t == rttr::type::get<std::wstring_view>())
         {
             // Same read-only rule as string_view.
             const std::wstring_view wv = v.get_value<std::wstring_view>();
-            return wv.data() ? QString::fromWCharArray(wv.data(), static_cast<int>(wv.size())) : QString();
+            return viewToDisplay(wv.data(), wv.size(), [](const wchar_t* p, int n) {
+                return QString::fromWCharArray(p, n);
+            });
         }
         if (t == rttr::type::get<std::filesystem::path>())
         {

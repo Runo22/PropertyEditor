@@ -91,6 +91,25 @@ int main(int argc, char** argv)
 
     // ── display strings ────────────────────────────────────────────────────────
     {
+        // Views: a normal one renders, a null one is empty, and an implausible length
+        // (what a component decoded through the WRONG type produces) degrades to
+        // "<invalid>" rather than reading off the end of memory.
+        check("string_view renders",
+              TypeRenderer::toDisplayString(rttr::variant(std::string_view("hello"))) == QStringLiteral("hello"));
+        check("null string_view renders empty",
+              TypeRenderer::toDisplayString(rttr::variant(std::string_view())).isEmpty());
+        {
+            const char* small = "abc";
+            // Deliberately bogus length, as a garbage decode would yield.
+            const std::string_view bogus(small, static_cast<size_t>(1) << 40);
+            check("string_view with an implausible length degrades to <invalid>",
+                  TypeRenderer::toDisplayString(rttr::variant(bogus)) == QStringLiteral("<invalid>"));
+            const wchar_t* wsmall = L"abc";
+            const std::wstring_view wbogus(wsmall, static_cast<size_t>(1) << 40);
+            check("wstring_view with an implausible length degrades to <invalid>",
+                  TypeRenderer::toDisplayString(rttr::variant(wbogus)) == QStringLiteral("<invalid>"));
+        }
+
         check("u16string renders", TypeRenderer::toDisplayString(rttr::variant(std::u16string(u"selam"))) == QStringLiteral("selam"));
         check("u32string renders", TypeRenderer::toDisplayString(rttr::variant(std::u32string(U"selam"))) == QStringLiteral("selam"));
         check("QDateTime renders",
