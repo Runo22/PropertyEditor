@@ -86,6 +86,43 @@ int main(int argc, char** argv)
     check("explicit alias is separator-insensitive",
           rpe::TypeBridge::resolveByName("weird::Legacy::Name") == rttr::type::get<Other>());
 
+    // ── An alias given as a NAMESPACE prefix completes with the type's own leaf ──
+    // registerType<T>("render::") reads as "T lives under render" — it must mean
+    // "render::<leaf of T>", not the literal string "render::" (which could never
+    // match a component path, silently doing nothing).
+    {
+        struct Pos
+        {
+            int x = 0;
+        };
+        struct Vel
+        {
+            int y = 0;
+        };
+        rpe::TypeBridge::registerType<Pos>("render::");
+        rpe::TypeBridge::registerType<Vel>("logic.");
+        check("namespace prefix \"render::\" resolves render.Pos",
+              rpe::TypeBridge::resolveByName("render.Pos") == rttr::type::get<Pos>());
+        check("...and the \"::\" spelling too",
+              rpe::TypeBridge::resolveByName("render::Pos") == rttr::type::get<Pos>());
+        check("dotted namespace prefix \"logic.\" resolves logic.Vel",
+              rpe::TypeBridge::resolveByName("logic.Vel") == rttr::type::get<Vel>());
+        check("the bare prefix itself is not what resolves",
+              !rpe::TypeBridge::resolveByName("render::").is_valid()
+                  || rpe::TypeBridge::resolveByName("render::") != rttr::type::get<Pos>());
+    }
+
+    // Same thing where it actually matters: two same-leaf types under different
+    // flecs namespaces, registered the way the prefix form invites.
+    {
+        rpe::TypeBridge::registerType<game::Stats>("render::");
+        rpe::TypeBridge::registerType<ai::Stats>("logic::");
+        check("prefix form keeps two same-leaf types apart (render.Stats)",
+              rpe::TypeBridge::resolveByName("render.Stats") == rttr::type::get<game::Stats>());
+        check("prefix form keeps two same-leaf types apart (logic.Stats)",
+              rpe::TypeBridge::resolveByName("logic.Stats") == rttr::type::get<ai::Stats>());
+    }
+
     // ── Degenerate input: an empty name is a no-op, never a stored empty key ────
     rpe::TypeBridge::registerAlias(rttr::type::get<game::Stats>(), "");
     check("empty alias name is ignored", !rpe::TypeBridge::resolveByName("").is_valid());

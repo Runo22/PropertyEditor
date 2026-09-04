@@ -77,6 +77,40 @@ namespace rpe
         {
             return extractTypeName(prettyTypeSignature<T>());
         }
+
+        // Last scope segment of a qualified name ("a::b::Leaf" / "a.b.Leaf" → "Leaf").
+        inline std::string leafOf(const std::string& s)
+        {
+            const auto dc = s.rfind("::");
+            const auto dot = s.rfind('.');
+            size_t pos = std::string::npos;
+            size_t skip = 0;
+            if (dc != std::string::npos)
+            {
+                pos = dc;
+                skip = 2;
+            }
+            if (dot != std::string::npos && (pos == std::string::npos || dot > pos))
+            {
+                pos = dot;
+                skip = 1;
+            }
+            return pos == std::string::npos ? s : s.substr(pos + skip);
+        }
+
+        // Complete an alias that was given as a NAMESPACE rather than a full name.
+        // A trailing scope separator is the tell: registerType<T>("render::") reads as
+        // "put T under render", so it means "render::<T's own leaf name>". Without
+        // this, such a string is registered verbatim and can never match any component
+        // path — the alias silently does nothing. A full name is passed through.
+        template <class T>
+        inline std::string qualifyAlias(std::string_view alias)
+        {
+            std::string a(alias);
+            const bool isNamespacePrefix =
+                (a.size() >= 2 && a.compare(a.size() - 2, 2, "::") == 0) || (!a.empty() && a.back() == '.');
+            return isNamespacePrefix ? a + leafOf(cppTypeName<T>()) : a;
+        }
     } // namespace detail
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -146,16 +180,27 @@ namespace rpe
             registerAlias(rttr::type::get<T>(), detail::cppTypeName<T>());
         }
 
-        // Same, but also register an explicit flecs component name to resolve to T.
-        // Use when your RTTR type name and the flecs component name don't share a
-        // short name (e.g. you registered RTTR as "game::Transform" but the flecs
-        // component is "TfXform"): resolveByName("TfXform") then finds T. The exact
-        // and short-name matching of the no-arg overload still applies on top.
+        // Same, but also map a flecs component name onto T. Use when the RTTR type name
+        // and the flecs component name don't line up (e.g. RTTR "game::Transform" but
+        // the flecs component is "TfXform"): resolveByName("TfXform") then finds T.
+        //
+        // `flecsName` may be either:
+        //   • the component's FULL flecs name — "render::Stats" / "render.Stats";
+        //   • or just a NAMESPACE, written with a trailing separator — "render::" or
+        //     "render." — which means "T under that namespace" and is completed with
+        //     T's own leaf name, giving "render::Stats". This is the natural way to
+        //     express "the flecs side uses a different namespace" without repeating
+        //     every component's name.
+        // Either spelling ("::" or ".") matches a flecs path written the other way.
+        //
+        // When the world is at hand, prefer rpe::bindComponent<T>(world) (see
+        // rpe/ecs/ComponentRegistry.h): it reads the component's ACTUAL path from
+        // flecs, so the two can never drift apart.
         template <class T>
         static void registerType(std::string_view flecsName)
         {
             registerType<T>();
-            registerAlias(rttr::type::get<T>(), flecsName);
+            registerAlias(rttr::type::get<T>(), detail::qualifyAlias<T>(flecsName));
         }
 
         template <class... Ts>
