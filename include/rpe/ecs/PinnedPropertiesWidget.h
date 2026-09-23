@@ -57,7 +57,7 @@ namespace rpe
         void setTitleVisible(bool visible);
 
     public slots:
-        void pin(qulonglong entity, const QString& entityLabel, const QString& component, const QString& path);
+        void pin(qulonglong entity, const QString& entityLabel, const QString& component, const QString& path, qulonglong rawId = 0);
         void unpin(qulonglong entity, const QString& component, const QString& path);
         void clearPins();
         // One poll cycle (also runs on the internal ~30 Hz timer). Public so tests
@@ -68,12 +68,14 @@ namespace rpe
         void pinsChanged();
 
     private slots:
-        void _onItemChanged(QTreeWidgetItem* item, int column);
         void _onContextMenu(const QPoint& pos);
 
     private:
         void _setupUi();
         void _pushPins(); // send the current pin set to the channel
+        // Route a value committed by the inline editor (row → top-level item) to the
+        // display and the sim thread as a pin edit.
+        void _commitValueEdit(int row, const rttr::variant& v);
         QTreeWidgetItem* _findItem(const MirrorChannel::PinKey& key) const;
         static MirrorChannel::PinKey _itemKey(const QTreeWidgetItem* item);
 
@@ -82,6 +84,11 @@ namespace rpe
         QTreeWidget* _tree = nullptr;
         QTimer* _timer = nullptr;
         bool _updating = false; // guards itemChanged during programmatic updates
+        // The row with an inline editor open, if any. Live polling must not touch it
+        // (overwriting the cell would close/destroy the editor) — tracked explicitly
+        // rather than inferred from focus, which leaves the tree while a modal picker
+        // (file/color dialog) is up.
+        QTreeWidgetItem* _editingItem = nullptr;
     };
 
 } // namespace rpe

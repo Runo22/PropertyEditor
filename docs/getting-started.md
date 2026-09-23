@@ -1,5 +1,13 @@
 # Getting started
 
+## Contents
+
+- [Build & integrate](#build--integrate)
+- [Register your types](#register-your-types)
+- [The property editor in 10 lines](#the-property-editor-in-10-lines)
+- [Edit policies](#edit-policies)
+- [Trimmings](#trimmings)
+
 ## Build & integrate
 
 The project builds two targets (see the root `CMakeLists.txt` / `README.md`
@@ -60,6 +68,51 @@ Available hints (`rpe/core/EditorHints.h`): `Min`, `Max`, `Step`, `Decimals`,
 `Editor` (`rpe::editor::FilePath` / `SaveFile` / `Directory` / `Color` /
 `Multiline`), `Label`, `Tooltip`, `ReadOnly`.
 
+A few type-specific behaviours:
+
+- **`std::string_view` / `std::wstring_view`** properties display their text
+  but are deliberately read-only (the view points into memory the object owns
+  — editing it through the grid would be unsafe).
+- **`std::wstring`** is fully supported alongside `std::string` and `QString`:
+  it displays and edits with the same line-edit / multiline / color / path
+  editors.
+- **`std::pair<A, B>`** just needs its `first`/`second` registered like any
+  struct — plain RTTR registration is enough, nothing rpe-specific is
+  required. `rpe::registerPair<int, double>();` (from `rpe/core/PairSupport.h`)
+  is a one-line shorthand for exactly that (an `RPE_REGISTER_PAIR` macro form
+  also exists). The pair then behaves like a two-field struct everywhere,
+  including inside containers.
+- **Small structs (≤ 4 fields)** show a compact `[x, y, z]` summary in the
+  value column while their row is collapsed; expanding the row hides the
+  summary and the fields edit individually. Wider structs show nothing when
+  collapsed; arrays always show their element count `[N]`.
+- **All standard strings** edit inline: `std::string`, `std::wstring`,
+  `std::u16string`, `std::u32string`, `QString`.
+- **`std::optional<T>`** displays `(none)` when empty and edits/engages its
+  inner value — add `RPE_REGISTER_OPTIONAL(T);` next to your registrations
+  (see `rpe/core/OptionalSupport.h`).
+- **`std::map` / `std::unordered_map`** expand into one row per key (rows are
+  sorted by key so `unordered_map` doesn't reshuffle between refreshes); the
+  values edit like array elements, addressed as `scores.[alice]` in dot-paths.
+  Keys themselves are not editable from the grid, and string keys containing
+  `.` or `]` are not addressable.
+- **`std::shared_ptr<T>`** expands to the pointee's fields and edits mutate
+  the pointed-to object in place; a null pointer shows blank fields (safely).
+- **`std::chrono` durations** (the six standard aliases, `nanoseconds` through
+  `hours`) display and edit as their tick count with the unit as suffix
+  (`250 ms`).
+- **`QDateTime`** gets a calendar-popup date/time editor, displayed as
+  `yyyy-MM-dd HH:mm:ss`.
+- **Bitmask / flags enums** — mark the property with
+  `rttr::metadata(rpe::hint::Flags, true)` to show the value decomposed
+  (`Fire | Poison`, with `0xNN` for any un-named leftover bits) and edit it
+  through a multi-check dropdown. Enums are never auto-detected as flags (a
+  plain enum whose values happen to be powers of two would be misread) — the
+  hint is the opt-in. **Editing** a combined value additionally needs the enum
+  registered once with `RPE_REGISTER_FLAGS(Damage);` (see
+  `rpe/core/FlagsSupport.h`): RTTR 0.9.6 cannot build an enum from an integer
+  without the compile-time type. Display works with the hint alone.
+
 For anything that types a **raw pointer** (the ECS browser, mirror mode,
 `VariantEditor::setLinked`), additionally register the bridge next to the RTTR
 registration:
@@ -103,3 +156,12 @@ editor->setToolbarVisible(false);              // hide the filter/reset row
 editor->setReadOnly(true);
 qApp->setStyleSheet(rpe::darkStyleSheet());    // built-in dark theme (optional to apply)
 ```
+
+**Right-click a property row** for **Copy value**, **Copy name**, and
+**Copy "name = value"** (all work in read-only mode), plus Local edit / Reset
+and — when enabled — Pin to watch list.
+
+The toolbar **filter** matches a row's **value** as well as its name, so typing
+`7.5`, `true`, or a struct's `[1, 2]` summary narrows the tree (matched rows keep
+their ancestors visible). It only re-runs on filter-text change, so live values
+cost nothing at steady state.

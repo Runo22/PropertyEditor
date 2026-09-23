@@ -42,7 +42,31 @@ namespace rpe
     void MirrorChannel::queueStructural(StructuralKind kind, qulonglong entity, const QString& component)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _structurals.push_back(StructuralEdit { kind, entity, component });
+        _structurals.push_back(StructuralEdit { kind, entity, component, 0 });
+    }
+
+    void MirrorChannel::queueStructuralById(StructuralKind kind, qulonglong entity, qulonglong rawId)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _structurals.push_back(StructuralEdit { kind, entity, QString(), rawId });
+    }
+
+    void MirrorChannel::queueSpawnPrefab(qulonglong prefabId)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _structurals.push_back(StructuralEdit { StructuralKind::SpawnPrefab, 0, QString(), prefabId });
+    }
+
+    void MirrorChannel::queueDestroyEntity(qulonglong entity)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _structurals.push_back(StructuralEdit { StructuralKind::DestroyEntity, entity, QString(), 0 });
+    }
+
+    void MirrorChannel::setPrefabGroupTags(const QStringList& tags)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _prefabGroups = tags;
     }
 
     // ── GUI thread: pinned watches ──────────────────────────────────────────────
@@ -72,6 +96,19 @@ namespace rpe
         return v;
     }
 
+    QVector<MirrorChannel::PinKey> MirrorChannel::pollDeadPins()
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        QVector<PinKey> v;
+        v.reserve(_outDeadPins.size());
+        for (auto it = _outDeadPins.cbegin(); it != _outDeadPins.cend(); ++it)
+        {
+            v.push_back(it.value());
+        }
+        _outDeadPins.clear();
+        return v;
+    }
+
     // ── GUI thread: results ─────────────────────────────────────────────────────
 
     bool MirrorChannel::pollEntities(QVector<EntityEntry>& out)
@@ -93,6 +130,25 @@ namespace rpe
         {
             return false;
         }
+        out.clear();
+        for (const ComponentRow& r : _outComponents)
+        {
+            if (r.kind == RowKind::Data)
+            {
+                out.append(r.name);
+            }
+        }
+        _outComponentsDirty = false;
+        return true;
+    }
+
+    bool MirrorChannel::pollComponentRows(QVector<ComponentRow>& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outComponentsDirty)
+        {
+            return false;
+        }
         out = _outComponents;
         _outComponentsDirty = false;
         return true;
@@ -105,8 +161,36 @@ namespace rpe
         {
             return false;
         }
+        out.clear();
+        for (const CatalogEntry& e : _outCatalog)
+        {
+            out.append(e.path);
+        }
+        _outCatalogDirty = false;
+        return true;
+    }
+
+    bool MirrorChannel::pollCatalogEntries(QVector<CatalogEntry>& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outCatalogDirty)
+        {
+            return false;
+        }
         out = _outCatalog;
         _outCatalogDirty = false;
+        return true;
+    }
+
+    bool MirrorChannel::pollPrefabs(QVector<PrefabEntry>& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outPrefabsDirty)
+        {
+            return false;
+        }
+        out = _outPrefabs;
+        _outPrefabsDirty = false;
         return true;
     }
 
@@ -133,6 +217,7 @@ namespace rpe
         in.component = _inComponent;
         in.required = _required;
         in.paths = _inPaths;
+        in.prefabGroups = _prefabGroups;
         in.edits.swap(_edits);
         in.structurals.swap(_structurals);
         in.pins = _pins;
@@ -151,16 +236,45 @@ namespace rpe
 
     void MirrorChannel::publishComponents(const QStringList& components)
     {
+        QVector<ComponentRow> rows;
+        rows.reserve(components.size());
+        for (const QString& c : components)
+        {
+            rows.append(ComponentRow { c, QString(), RowKind::Data, 0, QString() });
+        }
+        publishComponentRows(rows);
+    }
+
+    void MirrorChannel::publishComponentRows(const QVector<ComponentRow>& rows)
+    {
         std::lock_guard<std::mutex> lk(_m);
-        _outComponents = components;
+        _outComponents = rows;
         _outComponentsDirty = true;
     }
 
     void MirrorChannel::publishCatalog(const QStringList& catalog)
     {
+        QVector<CatalogEntry> entries;
+        entries.reserve(catalog.size());
+        for (const QString& c : catalog)
+        {
+            entries.append(CatalogEntry { c, false });
+        }
+        publishCatalogEntries(entries);
+    }
+
+    void MirrorChannel::publishCatalogEntries(const QVector<CatalogEntry>& entries)
+    {
         std::lock_guard<std::mutex> lk(_m);
-        _outCatalog = catalog;
+        _outCatalog = entries;
         _outCatalogDirty = true;
+    }
+
+    void MirrorChannel::publishPrefabs(const QVector<PrefabEntry>& prefabs)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _outPrefabs = prefabs;
+        _outPrefabsDirty = true;
     }
 
     void MirrorChannel::publishValues(std::vector<ValueUpdate>&& values)
@@ -180,6 +294,19 @@ namespace rpe
             // Coalesce: keep only the latest value per pin.
             const QString k = QStringLiteral("%1|%2|%3").arg(v.key.entity).arg(v.key.component, v.key.path);
             _outPinValues.insert(k, std::move(v));
+        }
+    }
+
+    void MirrorChannel::publishDeadPins(const QVector<PinKey>& keys)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        for (const PinKey& k : keys)
+        {
+            const QString kk = QStringLiteral("%1|%2|%3").arg(k.entity).arg(k.component, k.path);
+            _outDeadPins.insert(kk, k);
+            // A pin can't be both "changed value" and "dead" in the same drain — drop
+            // any pending value so the consumer doesn't resurrect the row it removes.
+            _outPinValues.remove(kk);
         }
     }
 

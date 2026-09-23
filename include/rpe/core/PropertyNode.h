@@ -123,11 +123,20 @@ namespace rpe
         }
 
         void setLiveValue(const rttr::variant& v);
+        // Update the underlying live value WITHOUT marking the node dirty — used to
+        // keep a locally-edited (frozen) leaf's live value current beneath its shown
+        // draft, so a later reset snaps straight to the real live value instead of a
+        // stale one. Does not touch the displayed value or the cached display.
+        void setLiveValueQuiet(const rttr::variant& v)
+        {
+            _liveValue = v;
+        }
         void setLocalEditValue(const rttr::variant& v);
         void setLocalEdit(bool v)
         {
             _hasLocalEdit = v;
             _isDirty = true;
+            _cachedDisplay = QString(); // display source flips (live ↔ draft) → recompute
         }
         void clearDirty()
         {

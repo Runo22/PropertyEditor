@@ -7,12 +7,20 @@
 #include <QWidget>
 
 #include "rpe/core/AccessGuard.h"
+#include "rpe/ecs/MirrorChannel.h"
 #include "rpe/ecs/flecs_prelude.h"
 
+#include <QIcon>
+
+#include <functional>
+
 class QListWidget;
+class QLineEdit;
 class QToolButton;
 class QStyledItemDelegate;
 class QEvent;
+class QPoint;
+class QMenu;
 
 namespace rpe
 {
@@ -46,8 +54,14 @@ namespace rpe
         void setWorldAccess(AccessGuard guard);
 
         // Externally provided component names (mirror mode); selection is reported
-        // via componentNameSelected.
+        // via componentNameSelected. Convenience wrapper over setComponentRows with
+        // every entry as a DATA row.
         void setComponentNames(const QStringList& names);
+
+        // Full composition (mirror mode): data components plus TAG / PAIR badge
+        // rows. Tag/pair rows are not selectable (nothing to inspect) but carry the
+        // flecs id so the per-row remove works on them too.
+        void setComponentRows(const QVector<MirrorChannel::ComponentRow>& rows);
 
         // Currently-selected component name, or empty if none. Used to re-bind the
         // property tree to the same component after an entity switch (the list keeps
@@ -63,8 +77,23 @@ namespace rpe
         }
 
         // Component names offered by the "+" picker (typically the world catalog
-        // minus the components already on the entity).
+        // minus the components already on the entity). Entries flagged as tags are
+        // rendered dimmed/italic in the picker.
         void setAddableComponents(const QStringList& names);
+        void setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries);
+
+        // Extra right-click menu entries. The callback receives the clicked row's
+        // selection key and its flecs id; the browser wraps them to add the entity.
+        struct MenuAction
+        {
+            QString label;
+            QIcon icon;
+            std::function<void(const QString& key, qulonglong rawId)> callback;
+        };
+        void setContextActions(const QVector<MenuAction>& actions);
+        // Dynamic hook: called when the component right-click menu is built, with the
+        // clicked row's key + flecs id and the live QMenu (host adds its own entries).
+        void setContextMenuHook(std::function<void(const QString& key, qulonglong rawId, QMenu& menu)> hook);
 
     signals:
         void componentSelected(ComponentInfo info);      // direct mode (world available)
@@ -74,6 +103,8 @@ namespace rpe
         // Structural-edit requests (only emitted when editing is enabled).
         void addComponentRequested(const QString& name);
         void removeComponentRequested(const QString& name);
+        // By flecs id — emitted for rows that carry one (tags, pairs; mirror rows).
+        void removeComponentIdRequested(qulonglong rawId);
 
     protected:
         // Reverts a pending delete-confirm when the list loses focus.
@@ -82,16 +113,24 @@ namespace rpe
     private slots:
         void _onSelectionChanged();
         void _onAddClicked();
+        void _onContextMenu(const QPoint& pos);
 
     private:
         void _setupUi();
+        void _applyFilter(); // hide list rows not matching the filter text
+        // Keep the selection on a row the user can SEE: re-home it to the first visible
+        // selectable when the filter hides it, then scroll it into view.
+        void _ensureSelectionVisible();
 
         QListWidget* _list = nullptr;
+        QLineEdit* _filterEdit = nullptr;
         QToolButton* _addBtn = nullptr;
         QStyledItemDelegate* _rowDelegate = nullptr; // actually a RemoveButtonDelegate
         QVector<ComponentInfo> _components;
-        QStringList _mirrorNames;  // last externally-fed name set (dedup)
-        QStringList _addable;      // names offered by the "+" picker
+        QVector<MirrorChannel::ComponentRow> _mirrorRows; // last externally-fed set (dedup)
+        QVector<MirrorChannel::CatalogEntry> _addable;    // "+" picker entries
+        QVector<MenuAction> _contextActions;
+        std::function<void(const QString&, qulonglong, QMenu&)> _menuHook;
         bool _editingEnabled = false;
         AccessGuard _guard;
     };

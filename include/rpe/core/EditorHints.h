@@ -47,6 +47,15 @@ namespace rpe::hint
     // Mark a property read-only even in an editable view (value: bool).
     inline constexpr const char* ReadOnly = "rpe.readOnly";
 
+    // Treat an enumeration property as a BITMASK (value: bool). The value is shown
+    // decomposed ("Fire | Poison", plus "0xNN" for any un-named leftover bits) and
+    // edited through a multi-check editor instead of a single-choice combo. Enums
+    // are NOT auto-detected as flags (a plain enum whose values happen to be powers
+    // of two would be misread) — this opt-in is the signal. Editing combined values
+    // additionally needs RPE_REGISTER_FLAGS(T) (see rpe/core/FlagsSupport.h): RTTR
+    // 0.9.6 cannot build an enum from an integer without the compile-time type.
+    inline constexpr const char* Flags = "rpe.flags";
+
 } // namespace rpe::hint
 
 namespace rpe::editor

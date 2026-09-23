@@ -2,6 +2,7 @@
 // PNGs so the add/remove design can be reviewed. Offscreen; no display needed.
 //   usage: rpe_screenshot <out-prefix>   → <prefix>_normal.png, _confirm.png, _add.png
 #include <rpe/core/EditorHints.h>
+#include <rpe/core/OptionalSupport.h>
 #include <rpe/core/TypeBridge.h>
 #include <rpe/ecs/ComponentListWidget.h>
 #include <rpe/ecs/EcsMirror.h>
@@ -12,6 +13,7 @@
 
 #include <QApplication>
 #include <filesystem>
+#include <optional>
 #include <QCoreApplication>
 #include <QListWidget>
 #include <QMouseEvent>
@@ -35,6 +37,7 @@ struct Health
     bool invulnerable = false;
     std::vector<int> resistances = { 10, 5, 0 };
     std::filesystem::path deathSound = "sfx/die.wav";
+    std::optional<int> shieldCharges; // empty -> shows "(none)"
 };
 namespace physics
 {
@@ -69,7 +72,8 @@ RTTR_REGISTRATION
         .property("armor", &Health::armor)
         .property("invulnerable", &Health::invulnerable)
         .property("resistances", &Health::resistances)
-        .property("deathSound", &Health::deathSound);
+        .property("deathSound", &Health::deathSound)
+        .property("shieldCharges", &Health::shieldCharges);
     registration::class_<physics::RigidBody>("physics::RigidBody").property("mass", &physics::RigidBody::mass);
     registration::class_<physics::Collider>("physics::Collider").property("radius", &physics::Collider::radius);
     registration::class_<render::Mesh>("render::Mesh").property("lod", &render::Mesh::lod);
@@ -83,6 +87,7 @@ int main(int argc, char* argv[])
     const QString prefix = argc > 1 ? QString::fromUtf8(argv[1]) : QStringLiteral("browser");
 
     rpe::TypeBridge::registerTypes<Transform, Health, physics::RigidBody, physics::Collider, render::Mesh, render::Material>();
+    RPE_REGISTER_OPTIONAL(int);
 
     flecs::world world;
     world.component<Transform>();

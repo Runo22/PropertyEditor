@@ -8,6 +8,9 @@
 #include <QColor>
 #include <QMetaObject>
 
+#include <algorithm>
+
+#include <rttr/variant_associative_view.h>
 #include <rttr/variant_sequential_view.h>
 
 namespace rpe
@@ -99,6 +102,7 @@ namespace rpe
         beginResetModel();
         _resetRoot();
         _boundType = type;
+        _expandedPaths.clear();
         if (type.is_valid())
         {
             _buildTree(_root.get(), type, QString());
@@ -112,6 +116,7 @@ namespace rpe
         beginResetModel();
         _resetRoot();
         _boundType = rttr::type::get<void>();
+        _expandedPaths.clear();
         endResetModel();
     }
 
@@ -155,6 +160,15 @@ namespace rpe
         }
     }
 
+    void PropertyModel::_forgetNodes(PropertyNode* node)
+    {
+        for (auto* child : node->children())
+        {
+            _forgetNodes(child);
+        }
+        _nodeByPath.remove(node->path());
+    }
+
     // ── refresh (hot path) ───────────────────────────────────────────────────────────
 
     void PropertyModel::refresh(const rttr::instance& obj)
@@ -184,6 +198,10 @@ namespace rpe
         if (TypeRenderer::isSequential(t))
         {
             _refreshSequential(node, val);
+        }
+        else if (TypeRenderer::isAssociative(t))
+        {
+            _refreshAssociative(node, val);
         }
         else if (TypeRenderer::isExpandable(t))
         {
@@ -246,6 +264,113 @@ namespace rpe
         }
     }
 
+    // Sync an associative node's rows to a map value: one child row per key,
+    // named "[key]" (displayed as the bare key), value refreshed/edited exactly
+    // like an array element. Rows are sorted by key display string so
+    // unordered_map doesn't reshuffle the UI between refreshes. Key-only
+    // containers (std::set) show just their count. Same local-edit guard and
+    // rebuild-vs-in-place split as _refreshSequential.
+    void PropertyModel::_refreshAssociative(PropertyNode* node, const rttr::variant& val)
+    {
+        node->setLiveValue(val);
+        if (!val.is_valid() || !val.is_associative_container())
+        {
+            return;
+        }
+        auto view = val.create_associative_view();
+        if (view.is_key_only_type())
+        {
+            node->setArraySize(static_cast<int>(view.get_size()));
+            return;
+        }
+
+        QVector<QPair<QString, rttr::variant>> entries; // (key display, value)
+        for (auto it = view.begin(); it != view.end(); ++it)
+        {
+            entries.append({ TypeRenderer::toDisplayString(TypeRenderer::unwrap(it.get_key())),
+                             TypeRenderer::unwrap(it.get_value()) });
+        }
+        std::sort(entries.begin(), entries.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        bool sameKeys = entries.size() == node->children().size();
+        for (int i = 0; sameKeys && i < entries.size(); ++i)
+        {
+            sameKeys = node->children()[i]->name() == QLatin1Char('[') + entries[i].first + QLatin1Char(']');
+        }
+
+        if (!sameKeys)
+        {
+            // Same deferral rule as arrays: never tear down rows under an open editor.
+            if (_anyDescendantLocallyEdited(node))
+            {
+                return;
+            }
+            _rebuildAssocChildren(node, entries, view.get_value_type());
+        }
+        else
+        {
+            for (int i = 0; i < entries.size(); ++i)
+            {
+                auto* child = node->children()[i];
+                if (!child->hasLocalEdit())
+                {
+                    _refreshNode(child, entries[i].second);
+                }
+            }
+        }
+    }
+
+    void PropertyModel::_rebuildAssocChildren(PropertyNode* node,
+                                              const QVector<QPair<QString, rttr::variant>>& entries,
+                                              rttr::type valueType)
+    {
+        const QModelIndex nodeIdx = _indexFromNode(node);
+
+        if (!node->children().isEmpty())
+        {
+            beginRemoveRows(nodeIdx, 0, node->children().size() - 1);
+            for (auto* ch : node->children())
+            {
+                _forgetNodes(ch); // the element AND its struct sub-fields
+            }
+            qDeleteAll(node->children());
+            node->children().clear();
+            endRemoveRows();
+        }
+
+        const int newSz = entries.size();
+        if (newSz > 0)
+        {
+            beginInsertRows(nodeIdx, 0, newSz - 1);
+            const bool expand = TypeRenderer::isExpandable(valueType);
+            for (int i = 0; i < newSz; ++i)
+            {
+                const QString elemName = QLatin1Char('[') + entries[i].first + QLatin1Char(']');
+                const QString elemPath = node->path() + QLatin1Char('.') + elemName;
+                auto* elem = new PropertyNode(elemName, elemPath, valueType, invalidProperty(), node);
+                elem->setArrayElement(true);
+                elem->setExpandable(expand);
+                elem->setDisplayName(entries[i].first); // bare key in the name column
+                node->children().append(elem);
+                _nodeByPath.insert(elemPath, elem);
+                if (expand && !TypeRenderer::isSequential(valueType))
+                {
+                    _buildTree(elem, valueType, elemPath);
+                    _collectNodes(elem, _nodeByPath); // register sub-fields by path (see arrays)
+                }
+            }
+            endInsertRows();
+        }
+        node->setArraySize(newSz);
+
+        // Populate values only after the insert window has closed (model protocol).
+        for (int i = 0; i < newSz; ++i)
+        {
+            _refreshNode(node->children()[i], entries[i].second);
+        }
+    }
+
     bool PropertyModel::_anyDescendantLocallyEdited(const PropertyNode* node)
     {
         for (const auto* child : node->children())
@@ -271,7 +396,7 @@ namespace rpe
             beginRemoveRows(nodeIdx, 0, oldSz - 1);
             for (auto* ch : node->children())
             {
-                _nodeByPath.remove(ch->path());
+                _forgetNodes(ch); // the element AND its struct sub-fields (see rebuild)
             }
             qDeleteAll(node->children());
             node->children().clear();
@@ -299,6 +424,11 @@ namespace rpe
                 if (expand && !TypeRenderer::isSequential(elemType))
                 {
                     _buildTree(elem, elemType, elemPath);
+                    // Register the struct's sub-fields by path too — otherwise a leaf
+                    // like "items.[0].v" is unreachable by _findNode, so a mirrored
+                    // per-leaf update (setPropertyValue) for it is silently dropped and
+                    // the row only refreshes on a full-vector resend (e.g. re-select).
+                    _collectNodes(elem, _nodeByPath);
                 }
             }
             endInsertRows();
@@ -342,8 +472,22 @@ namespace rpe
         for (auto it = batch.cbegin(); it != batch.cend(); ++it)
         {
             auto* node = _findNode(it.key());
-            if (!node || node->hasLocalEdit())
+            if (!node)
             {
+                continue;
+            }
+            if (node->hasLocalEdit())
+            {
+                // Frozen leaf: don't disturb the shown draft, but keep the underlying
+                // live value current so a later reset snaps to the REAL live value.
+                // Mirror mode dedups, so it may never resend an unchanged value — and
+                // in direct mode the 50 Hz refresh would keep it fresh, which is why
+                // this staleness only bit mirror mode. (Expandable frozen nodes are
+                // left as-is; their structure isn't rebuilt on this path.)
+                if (!node->isExpandable())
+                {
+                    node->setLiveValueQuiet(TypeRenderer::unwrap(it.value()));
+                }
                 continue;
             }
             // Route mirror injections through the same dispatch refresh() uses, so an
@@ -355,10 +499,11 @@ namespace rpe
         _emitDirtyRanges(_root.get());
     }
 
-    void PropertyModel::_emitDirtyRanges(PropertyNode* parent)
+    bool PropertyModel::_emitDirtyRanges(PropertyNode* parent)
     {
         auto& ch = parent->children();
         int rangeStart = -1;
+        bool subtreeDirty = false;
 
         auto flush = [&](int endExclusive) {
             if (rangeStart < 0)
@@ -376,6 +521,7 @@ namespace rpe
             if (node->isDirty())
             {
                 node->clearDirty();
+                subtreeDirty = true;
                 if (rangeStart < 0)
                 {
                     rangeStart = i;
@@ -387,10 +533,21 @@ namespace rpe
             }
             if (!node->children().isEmpty())
             {
-                _emitDirtyRanges(node);
+                subtreeDirty |= _emitDirtyRanges(node);
             }
         }
         flush(static_cast<int>(ch.size()));
+
+        // A collapsed struct row summarises its children in its own value cell —
+        // when any descendant changed, that cell is stale too, even though the
+        // parent node itself carries no dirty flag. Repaint just that cell.
+        if (subtreeDirty && parent != _root.get() && parent->isExpandable()
+            && parent->arraySize() < 0 && !_expandedPaths.contains(parent->path()))
+        {
+            const QModelIndex idx = _indexFromNode(parent, 1);
+            emit dataChanged(idx, idx, { Qt::DisplayRole });
+        }
+        return subtreeDirty;
     }
 
     // ── local edit / reset ────────────────────────────────────────────────────────────
@@ -406,6 +563,7 @@ namespace rpe
         node->setLocalEditValue(node->liveValue());
         const auto idx = _indexFromNode(node);
         emit dataChanged(idx, idx.siblingAtColumn(columnCount() - 1));
+        emit localEditsChanged();
     }
 
     void PropertyModel::resetNode(const QString& path)
@@ -418,6 +576,7 @@ namespace rpe
         node->setLocalEdit(false);
         const auto idx = _indexFromNode(node);
         emit dataChanged(idx, idx.siblingAtColumn(columnCount() - 1));
+        emit localEditsChanged();
     }
 
     void PropertyModel::resetAll()
@@ -435,6 +594,7 @@ namespace rpe
         if (any && !_root->children().isEmpty())
         {
             emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1));
+            emit localEditsChanged();
         }
     }
 
@@ -494,6 +654,67 @@ namespace rpe
         }
     }
 
+    void PropertyModel::setPathExpanded(const QString& path, bool expanded)
+    {
+        if (expanded == _expandedPaths.contains(path))
+        {
+            return;
+        }
+        if (expanded)
+        {
+            _expandedPaths.insert(path);
+        }
+        else
+        {
+            _expandedPaths.remove(path);
+        }
+        // Only a non-array expandable row renders differently (summary ↔ blank).
+        auto* node = _findNode(path);
+        if (node && node->isExpandable() && node->arraySize() < 0)
+        {
+            const QModelIndex idx = _indexFromNode(node, 1);
+            emit dataChanged(idx, idx, { Qt::DisplayRole });
+        }
+    }
+
+    // Compact one-line summary of a small struct's fields: "[3, 1.5]". Nested
+    // non-leaf fields show as "…". Empty when the struct is too wide (>4 fields —
+    // a summary that long stops being scannable) or when nothing has a value yet
+    // (e.g. mirror mode before the first snapshot arrives): blank, as before.
+    QString PropertyModel::_structSummary(PropertyNode* node) const
+    {
+        const auto& ch = node->children();
+        if (ch.isEmpty() || ch.size() > 4)
+        {
+            return {};
+        }
+        QStringList parts;
+        bool anyValue = false;
+        for (auto* c : ch)
+        {
+            const rttr::variant v = c->effectiveValue();
+            if (c->isLeaf() && v.is_valid())
+            {
+                parts << TypeRenderer::toDisplayString(v);
+                anyValue = true;
+            }
+            else
+            {
+                parts << QStringLiteral("…");
+            }
+        }
+        if (!anyValue)
+        {
+            return {};
+        }
+        QString s = QLatin1Char('[') + parts.join(QStringLiteral(", ")) + QLatin1Char(']');
+        if (s.size() > 44)
+        {
+            s = s.left(42) + QStringLiteral("…]");
+        }
+        return s;
+    }
+
     QStringList PropertyModel::allLeafPaths() const
     {
         QStringList out;
@@ -517,6 +738,7 @@ namespace rpe
             node->setLiveValue(newVal);
             _editSink(node->path(), newVal);
             emit propertyEdited(node->path(), newVal);
+            emit localEditsChanged();
             return true;
         }
 
@@ -541,6 +763,7 @@ namespace rpe
                 node->setLocalEdit(false);
                 node->setLiveValue(actual.is_valid() ? actual : newVal);
                 emit propertyEdited(node->path(), node->liveValue());
+                emit localEditsChanged();
                 return true;
             }
             // Write failed — fall through to a local draft so the edit is not lost.
@@ -549,6 +772,7 @@ namespace rpe
         node->setLocalEditValue(newVal);
         node->setLocalEdit(true);
         emit propertyEdited(node->path(), newVal);
+        emit localEditsChanged();
         return true;
     }
 
@@ -615,13 +839,19 @@ namespace rpe
             }
             if (index.column() == 1)
             {
-                // Expandable rows (structs, arrays) show no scalar value of their own
-                // — the children carry the values. Show an element count for sized
-                // arrays, else nothing. Avoids a bare "<invalid>" on the parent,
-                // especially in mirror mode where only leaf values are mirrored.
+                // Expandable rows carry no scalar value of their own — the children
+                // do. Arrays show their element count. A COLLAPSED small struct
+                // shows a compact "[a, b]" summary of its fields; expanding it
+                // blanks the cell (the children now display the values), so the
+                // same data is never on screen twice. Wide structs stay blank —
+                // never a bare "<invalid>".
                 if (node->isExpandable())
                 {
-                    return node->arraySize() >= 0 ? QStringLiteral("[%1]").arg(node->arraySize()) : QString();
+                    if (node->arraySize() >= 0)
+                    {
+                        return QStringLiteral("[%1]").arg(node->arraySize());
+                    }
+                    return _expandedPaths.contains(node->path()) ? QString() : _structSummary(node);
                 }
                 // Leaf with no value yet (e.g. not mirrored): blank, not "<invalid>".
                 const rttr::variant v = node->effectiveValue();
@@ -631,7 +861,10 @@ namespace rpe
                 }
                 if (node->cachedDisplay().isEmpty())
                 {
-                    node->setCachedDisplay(TypeRenderer::toDisplayString(v));
+                    const bool asFlags = v.get_type().is_enumeration()
+                        && metaBool(node->prop(), hint::Flags, false);
+                    node->setCachedDisplay(asFlags ? TypeRenderer::flagsToDisplayString(v)
+                                                   : TypeRenderer::toDisplayString(v));
                 }
                 return node->cachedDisplay();
             }
@@ -703,6 +936,36 @@ namespace rpe
         }
         case IsArrayRole:
             return node->arraySize() >= 0;
+        case FlagsRole:
+            return metaBool(node->prop(), hint::Flags, false);
+        case FilterValueRole:
+        {
+            // Value text for the property filter — the SAME string the value cell
+            // would show when collapsed, but computed regardless of the row's current
+            // expansion (so a struct's "[a, b]" summary or an array's "[N]" stays
+            // matchable even while the tree is force-expanded during filtering).
+            // Cheap: leaves reuse the cached display; struct summaries scan ≤4 fields.
+            if (node->isExpandable())
+            {
+                if (node->arraySize() >= 0)
+                {
+                    return QStringLiteral("[%1]").arg(node->arraySize());
+                }
+                return _structSummary(node);
+            }
+            const rttr::variant v = node->effectiveValue();
+            if (!v.is_valid())
+            {
+                return QString();
+            }
+            if (node->cachedDisplay().isEmpty())
+            {
+                const bool asFlags = v.get_type().is_enumeration() && metaBool(node->prop(), hint::Flags, false);
+                node->setCachedDisplay(asFlags ? TypeRenderer::flagsToDisplayString(v)
+                                               : TypeRenderer::toDisplayString(v));
+            }
+            return node->cachedDisplay();
+        }
         case DeclaredTypeRole:
             // The node's schema type, always valid — unlike the live value, which may
             // be absent (not yet mirrored) or a transient editor type mid-edit. The
@@ -736,7 +999,10 @@ namespace rpe
             return false;
         }
 
-        node->setCachedDisplay(TypeRenderer::toDisplayString(node->effectiveValue()));
+        // Invalidate the display cache; the DisplayRole read triggered by the
+        // dataChanged below recomputes it with the correct formatter (e.g. the
+        // flags decomposition, which plain toDisplayString would not apply).
+        node->setCachedDisplay(QString());
         node->clearDirty();
         emit dataChanged(index.siblingAtColumn(0), index.siblingAtColumn(columnCount() - 1));
         return true;

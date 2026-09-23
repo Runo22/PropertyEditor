@@ -2,14 +2,27 @@
 
 #include "rpe/core/TypeBridge.h"
 
+#include <QAction>
+#include <QApplication>
+#include <QFrame>
+#include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QScreen>
+#include <QStyledItemDelegate>
 #include <QTimer>
+#include <QToolButton>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 
 namespace rpe
 {
@@ -21,6 +34,21 @@ namespace rpe
         {
             const int pos = s.lastIndexOf(QStringLiteral("::"));
             return pos >= 0 ? s.mid(pos + 2) : s;
+        }
+
+        // Trim a trailing whitespace-delimited "prefab" (any case) — matches
+        // EcsMirror so direct and mirror instance labels read identically.
+        QString trimPrefabSuffix(QString s)
+        {
+            s = s.trimmed();
+            static const QString suffix = QStringLiteral(" prefab");
+            if (s.size() > suffix.size()
+                && s.right(suffix.size()).compare(suffix, Qt::CaseInsensitive) == 0)
+            {
+                s.chop(suffix.size());
+                s = s.trimmed();
+            }
+            return s;
         }
 
         // Display label for an entity: its name, else its prefab's name + id, else
@@ -38,11 +66,91 @@ namespace rpe
                 const char* pn = prefab.name();
                 if (pn && pn[0] != '\0')
                 {
-                    return QStringLiteral("%1  #%2").arg(QString::fromUtf8(pn)).arg(e.id());
+                    return QStringLiteral("%1  #%2").arg(trimPrefabSuffix(QString::fromUtf8(pn))).arg(e.id());
                 }
             }
             return QStringLiteral("#%1").arg(e.id());
         }
+
+        // Per-row trash affordance for the entity list, with the same two-step
+        // confirm as the component list: first click on the trailing glyph arms the
+        // row (warning-coloured check), a second click deletes; clicking elsewhere or
+        // losing focus reverts. Keyed on the row's entity id (Qt::UserRole).
+        class EntityTrashDelegate : public QStyledItemDelegate
+        {
+        public:
+            using QStyledItemDelegate::QStyledItemDelegate;
+
+            bool enabled = false;
+            qulonglong confirmId = 0; // entity currently armed for delete (0 = none)
+            QListWidget* list = nullptr;
+            std::function<void(qulonglong)> onRemove;
+
+            static QRect glyphRect(const QStyleOptionViewItem& opt)
+            {
+                const int s = opt.rect.height();
+                return QRect(opt.rect.right() - s, opt.rect.top(), s, s);
+            }
+            void repaint() const
+            {
+                if (list)
+                    list->viewport()->update();
+            }
+            void clearConfirm()
+            {
+                if (confirmId != 0)
+                {
+                    confirmId = 0;
+                    repaint();
+                }
+            }
+
+            void paint(QPainter* p, const QStyleOptionViewItem& opt, const QModelIndex& index) const override
+            {
+                QStyleOptionViewItem o(opt);
+                if (enabled)
+                    o.rect.adjust(0, 0, -o.rect.height(), 0); // reserve the glyph square
+                QStyledItemDelegate::paint(p, o, index);
+                if (!enabled)
+                    return;
+
+                const QRect cell = glyphRect(opt);
+                const int isz = cell.height() * 70 / 100;
+                const QRect btn(cell.x() + (cell.width() - isz) / 2, cell.y() + (cell.height() - isz) / 2, isz, isz);
+                const qulonglong id = index.data(Qt::UserRole).toULongLong();
+                p->save();
+                p->setRenderHint(QPainter::Antialiasing, true);
+                p->setRenderHint(QPainter::SmoothPixmapTransform, true);
+                static const QPixmap trashPm(QStringLiteral(":/rpe/icons/remove.png"));
+                static const QPixmap confirmPm(QStringLiteral(":/rpe/icons/confirm.png"));
+                if (id != 0 && id == confirmId)
+                {
+                    p->setPen(Qt::NoPen);
+                    p->setBrush(QColor(0xD9, 0x53, 0x4F));
+                    p->drawRoundedRect(btn, 3, 3);
+                    p->drawPixmap(btn, confirmPm);
+                }
+                else
+                {
+                    const bool hover = opt.state & QStyle::State_MouseOver;
+                    if (hover)
+                    {
+                        QColor bg = opt.palette.color(QPalette::Text);
+                        bg.setAlpha(32);
+                        p->setPen(Qt::NoPen);
+                        p->setBrush(bg);
+                        p->drawRoundedRect(btn, 3, 3);
+                    }
+                    p->setOpacity(hover ? 1.0 : 0.7);
+                    p->drawPixmap(btn, trashPm);
+                }
+                p->restore();
+            }
+
+            // Paint-only: the two-step click is handled by EntityListWidget's viewport
+            // event filter (on mouse press, so the row is never selected). glyphRect()
+            // and the confirm state are shared with it.
+        };
     } // namespace
 
     EntityListWidget::EntityListWidget(QWidget* parent)
@@ -60,9 +168,24 @@ namespace rpe
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(2);
 
+        // Header row: "Entities" + a labelled "Add" spawn button (shown on demand).
+        auto* headerRow = new QHBoxLayout();
+        headerRow->setContentsMargins(0, 0, 0, 0);
         auto* header = new QLabel(tr("Entities"), this);
         header->setStyleSheet(QStringLiteral("font-weight: bold; padding: 2px 4px;"));
-        layout->addWidget(header);
+        headerRow->addWidget(header, 1);
+
+        _addBtn = new QToolButton(this);
+        _addBtn->setText(tr("Add"));
+        _addBtn->setIcon(QIcon(QStringLiteral(":/rpe/icons/add.png")));
+        _addBtn->setIconSize(QSize(14, 14));
+        _addBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        _addBtn->setStyleSheet(QStringLiteral("QToolButton { padding: 2px 6px; }"));
+        _addBtn->setToolTip(tr("Spawn a new entity from a prefab"));
+        _addBtn->setAutoRaise(true);
+        _addBtn->setVisible(false); // shown only when entity-adding is enabled
+        headerRow->addWidget(_addBtn, 0);
+        layout->addLayout(headerRow);
 
         _filterEdit = new QLineEdit(this);
         _filterEdit->setPlaceholderText(tr("Filter entities…"));
@@ -70,10 +193,277 @@ namespace rpe
         layout->addWidget(_filterEdit);
 
         _list = new QListWidget(this);
+        _list->setMouseTracking(true); // so the trash glyph highlights on hover
+        auto* del = new EntityTrashDelegate(_list);
+        del->list = _list;
+        del->onRemove = [this](qulonglong id) {
+            if (id != 0)
+                emit removeEntityRequested(id);
+        };
+        _list->setItemDelegate(del);
+        _rowDelegate = del;
+        // Intercept presses on the trash glyph before the view selects the row (see
+        // eventFilter): deleting an entity must not steal the current selection.
+        _list->viewport()->installEventFilter(this);
+        _list->setContextMenuPolicy(Qt::CustomContextMenu);
         layout->addWidget(_list, 1);
 
         connect(_list, &QListWidget::currentItemChanged, this, &EntityListWidget::_onSelectionChanged);
+        connect(_list, &QListWidget::customContextMenuRequested, this, &EntityListWidget::_onContextMenu);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
+        connect(_addBtn, &QToolButton::clicked, this, &EntityListWidget::_onAddEntityClicked);
+    }
+
+    void EntityListWidget::setEntityRemovingEnabled(bool on)
+    {
+        if (auto* del = static_cast<EntityTrashDelegate*>(_rowDelegate))
+        {
+            del->enabled = on;
+            del->clearConfirm();
+            _list->viewport()->update();
+        }
+    }
+
+    bool EntityListWidget::eventFilter(QObject* obj, QEvent* ev)
+    {
+        // The view selects a row on mouse PRESS. So the trash glyph's two-step confirm
+        // is driven HERE, from the press, and the press is consumed — the row is never
+        // selected, and clicking an unselected entity's trash deletes it without
+        // disturbing the current selection. (Consuming the press stops the release from
+        // reaching the delegate, so the delegate is paint-only; the action lives here.)
+        if (obj == _list->viewport()
+            && (ev->type() == QEvent::MouseButtonPress || ev->type() == QEvent::MouseButtonDblClick))
+        {
+            auto* del = static_cast<EntityTrashDelegate*>(_rowDelegate);
+            auto* me = static_cast<QMouseEvent*>(ev);
+            if (del && del->enabled && me->button() == Qt::LeftButton)
+            {
+                const QModelIndex idx = _list->indexAt(me->pos());
+                if (idx.isValid())
+                {
+                    const QRect vr = _list->visualRect(idx);
+                    const QRect glyph(vr.right() - vr.height(), vr.top(), vr.height(), vr.height());
+                    if (glyph.contains(me->pos()))
+                    {
+                        const qulonglong id = idx.data(Qt::UserRole).toULongLong();
+                        if (id != 0)
+                        {
+                            if (id == del->confirmId)
+                            {
+                                del->confirmId = 0; // second click → delete
+                                if (del->onRemove)
+                                    del->onRemove(id);
+                            }
+                            else
+                            {
+                                del->confirmId = id; // first click → arm
+                            }
+                            del->repaint();
+                        }
+                        return true; // consume → no selection change
+                    }
+                }
+                del->clearConfirm(); // pressed a row but not its glyph → revert any arm
+            }
+        }
+        return QWidget::eventFilter(obj, ev);
+    }
+
+    void EntityListWidget::setContextActions(const QVector<EntityAction>& actions)
+    {
+        _contextActions = actions;
+    }
+
+    void EntityListWidget::setContextMenuHook(std::function<void(qulonglong, QMenu&)> hook)
+    {
+        _menuHook = std::move(hook);
+    }
+
+    void EntityListWidget::_onContextMenu(const QPoint& pos)
+    {
+        QListWidgetItem* item = _list->itemAt(pos);
+        if (!item)
+        {
+            return;
+        }
+        const qulonglong id = item->data(Qt::UserRole).toULongLong();
+        if (id == 0)
+        {
+            return;
+        }
+        static_cast<EntityTrashDelegate*>(_rowDelegate)->clearConfirm();
+
+        QMenu menu(this);
+        const bool removable = static_cast<EntityTrashDelegate*>(_rowDelegate)->enabled;
+        if (removable)
+        {
+            QAction* del = menu.addAction(QIcon(QStringLiteral(":/rpe/icons/remove.png")), tr("Delete entity"));
+            connect(del, &QAction::triggered, this, [this, id] { emit removeEntityRequested(id); });
+        }
+        if (!_contextActions.isEmpty())
+        {
+            if (removable)
+                menu.addSeparator();
+            for (const EntityAction& a : _contextActions)
+            {
+                if (a.label.isEmpty() || !a.callback)
+                    continue;
+                QAction* act = a.icon.isNull() ? menu.addAction(a.label) : menu.addAction(a.icon, a.label);
+                const auto cb = a.callback;
+                connect(act, &QAction::triggered, this, [cb, id] { cb(id); });
+            }
+        }
+        // Dynamic host hook: build entity-specific entries at open time.
+        if (_menuHook)
+        {
+            _menuHook(id, menu);
+        }
+        if (!menu.isEmpty())
+        {
+            menu.exec(_list->viewport()->mapToGlobal(pos));
+        }
+    }
+
+    void EntityListWidget::setEntityAddingEnabled(bool on)
+    {
+        _addBtn->setVisible(on);
+    }
+
+    void EntityListWidget::setAddablePrefabs(const QVector<MirrorChannel::PrefabEntry>& prefabs)
+    {
+        _prefabs = prefabs;
+    }
+
+    void EntityListWidget::setPrefabGroupIcons(const QHash<QString, QIcon>& icons)
+    {
+        _groupIcons = icons;
+    }
+
+    void EntityListWidget::_onAddEntityClicked()
+    {
+        // A small popup: a filter box over a tree of spawnable prefabs, grouped by
+        // their group tag (with the host's optional icon on each group header).
+        // Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.
+        auto* popup = new QFrame(this, Qt::Popup);
+        popup->setObjectName(QStringLiteral("rpeAddPopup"));
+        popup->setAttribute(Qt::WA_DeleteOnClose);
+        popup->setFrameShape(QFrame::StyledPanel);
+        auto* lay = new QVBoxLayout(popup);
+        lay->setContentsMargins(4, 4, 4, 4);
+        lay->setSpacing(4);
+
+        auto* search = new QLineEdit(popup);
+        search->setPlaceholderText(tr("Filter prefabs…"));
+        search->setClearButtonEnabled(true);
+        lay->addWidget(search);
+
+        auto* tree = new QTreeWidget(popup);
+        tree->setHeaderHidden(true);
+        tree->setRootIsDecorated(true);
+        lay->addWidget(tree);
+
+        if (_prefabs.isEmpty())
+        {
+            auto* none = new QTreeWidgetItem(tree, { tr("(no prefabs available)") });
+            none->setFlags(Qt::NoItemFlags);
+        }
+        else if (std::none_of(_prefabs.cbegin(), _prefabs.cend(),
+                              [](const MirrorChannel::PrefabEntry& p) { return !p.group.isEmpty(); }))
+        {
+            // No grouping configured → a FLAT alphabetical list (the producer already
+            // sorts by name), no "(ungrouped)" header cluttering things.
+            tree->setRootIsDecorated(false);
+            for (const MirrorChannel::PrefabEntry& p : _prefabs)
+            {
+                auto* item = new QTreeWidgetItem(tree, { p.name });
+                item->setData(0, Qt::UserRole, p.id); // the spawn handle
+            }
+        }
+        else
+        {
+            QHash<QString, QTreeWidgetItem*> groups;
+            for (const MirrorChannel::PrefabEntry& p : _prefabs)
+            {
+                const QString g = p.group.isEmpty() ? tr("(ungrouped)") : p.group;
+                QTreeWidgetItem*& node = groups[g];
+                if (!node)
+                {
+                    node = new QTreeWidgetItem(tree, { g });
+                    node->setFlags(Qt::ItemIsEnabled);
+                    node->setExpanded(true);
+                    if (const auto it = _groupIcons.constFind(p.group); it != _groupIcons.constEnd())
+                    {
+                        node->setIcon(0, it.value());
+                    }
+                }
+                auto* item = new QTreeWidgetItem(node, { p.name });
+                item->setData(0, Qt::UserRole, p.id); // the spawn handle
+            }
+        }
+
+        auto activate = [this, popup](QTreeWidgetItem* item) {
+            if (!item)
+                return;
+            const qulonglong id = item->data(0, Qt::UserRole).toULongLong();
+            if (id != 0)
+            {
+                emit spawnPrefabRequested(id);
+                popup->close();
+            }
+        };
+        connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
+        connect(tree, &QTreeWidget::itemActivated, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
+
+        connect(search, &QLineEdit::textChanged, tree, [tree](const QString& q) {
+            const QString s = q.trimmed();
+            for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            {
+                QTreeWidgetItem* top = tree->topLevelItem(i);
+                if (top->childCount() == 0)
+                {
+                    // Flat prefab leaf (grouping off) — filter it directly. A leaf
+                    // carries a spawn id; the "(no prefabs)" placeholder does not.
+                    if (top->data(0, Qt::UserRole).toULongLong() != 0)
+                        top->setHidden(!(s.isEmpty() || top->text(0).contains(s, Qt::CaseInsensitive)));
+                    continue;
+                }
+                int shown = 0;
+                for (int j = 0; j < top->childCount(); ++j)
+                {
+                    QTreeWidgetItem* c = top->child(j);
+                    const bool match = s.isEmpty() || c->text(0).contains(s, Qt::CaseInsensitive);
+                    c->setHidden(!match);
+                    shown += match ? 1 : 0;
+                }
+                top->setHidden(shown == 0); // hide an empty group header
+            }
+        });
+
+        // Position it under the button, then clamp fully inside the screen so it
+        // never overflows the window edge (the button is right-aligned in the
+        // header). Same behaviour as the add-component picker: grow leftward from
+        // the button's right edge, flip above if there's no room below.
+        popup->resize(240, 300);
+        const QPoint anchorBR = _addBtn->mapToGlobal(_addBtn->rect().bottomRight());
+        const QScreen* scr = QGuiApplication::screenAt(anchorBR);
+        const QRect avail = (scr ? scr : QGuiApplication::primaryScreen())->availableGeometry();
+        popup->setMaximumHeight(qMax(140, avail.height() - 40));
+        popup->adjustSize();
+        const QSize sz = popup->size();
+
+        int x = anchorBR.x() - sz.width();
+        int y = anchorBR.y();
+        if (y + sz.height() > avail.bottom())
+        {
+            const int aboveY = _addBtn->mapToGlobal(_addBtn->rect().topRight()).y() - sz.height();
+            if (aboveY >= avail.top())
+                y = aboveY;
+        }
+        x = qBound(avail.left(), x, avail.right() - sz.width() + 1);
+        y = qBound(avail.top(), y, avail.bottom() - sz.height() + 1);
+        popup->move(x, y);
+        popup->show();
+        search->setFocus();
     }
 
     void EntityListWidget::setWorld(flecs::world* world)
@@ -233,70 +623,136 @@ namespace rpe
         // Show entities sorted alphabetically by label (case-insensitive), id as a
         // stable tiebreaker for same-named entities.
         QVector<QPair<qulonglong, QString>> entries = entriesIn;
-        std::sort(entries.begin(), entries.end(), [](const QPair<qulonglong, QString>& a, const QPair<qulonglong, QString>& b) {
+        const auto less = [](const QPair<qulonglong, QString>& a, const QPair<qulonglong, QString>& b) {
             const int c = a.second.compare(b.second, Qt::CaseInsensitive);
             return c != 0 ? c < 0 : a.first < b.first;
-        });
+        };
+        std::sort(entries.begin(), entries.end(), less);
 
-        // Skip the rebuild when the visible set is unchanged — avoids flicker.
+        // Skip entirely when the visible set is unchanged — avoids flicker.
         if (entries == _lastEntries)
         {
             return;
         }
-        _lastEntries = entries;
 
-        // Remember current selection so it survives the rebuild.
-        qulonglong selectedId = 0;
-        if (auto* cur = _list->currentItem())
+        // Snapshot, before the diff overwrites _lastEntries, where the current
+        // selection sat — so if it gets removed we can pick its neighbour, not the top.
+        int prevSelRow = -1;
+        if (_selectedId != 0)
         {
-            selectedId = cur->data(Qt::UserRole).toULongLong();
+            for (int k = 0; k < _lastEntries.size(); ++k)
+            {
+                if (_lastEntries[k].first == _selectedId)
+                {
+                    prevSelRow = k;
+                    break;
+                }
+            }
         }
 
+        // DIFF update instead of clear+rebuild: both lists are sorted by the same
+        // comparator, so a single merge pass finds exactly the added/removed rows.
+        // A dynamic world then costs a handful of row operations per publish, not
+        // thousands — a full rebuild of a big list (item churn on the GUI thread,
+        // serialized process-wide by the Windows debug heap) was a periodic stall.
+        // Surviving items are KEPT (not recreated), so an existing selection's item
+        // is never disturbed by an add/remove.
         _list->blockSignals(true);
-        _list->clear();
-
-        QListWidgetItem* reselect = nullptr;
-        QListWidgetItem* requested = nullptr;
-        for (const auto& entry : entries)
-        { // .first/.second: Qt 5.12 has no QPair bindings
-            auto* item = new QListWidgetItem(entry.second, _list);
-            item->setData(Qt::UserRole, entry.first);
-            if (entry.first == selectedId)
+        _list->setUpdatesEnabled(false);
+        int row = 0; // widget row cursor (= kept + inserted so far)
+        int i = 0;   // index into _lastEntries (mirrors the widget's current rows)
+        int j = 0;   // index into the new entries
+        while (i < _lastEntries.size() || j < entries.size())
+        {
+            const bool haveOld = i < _lastEntries.size();
+            const bool haveNew = j < entries.size();
+            if (haveOld && haveNew && _lastEntries[i] == entries[j])
             {
-                _list->setCurrentItem(item);
-                reselect = item;
+                ++i;
+                ++j;
+                ++row; // unchanged row — item (and any selection on it) untouched
             }
-            if (_requestedId != 0 && entry.first == _requestedId)
+            else if (haveOld && (!haveNew || less(_lastEntries[i], entries[j])))
             {
-                requested = item;
+                delete _list->takeItem(row); // removed entity
+                ++i;
+            }
+            else
+            {
+                auto* item = new QListWidgetItem(entries[j].second);
+                item->setData(Qt::UserRole, entries[j].first);
+                _list->insertItem(row, item); // added entity
+                ++j;
+                ++row;
             }
         }
-
+        _lastEntries = entries;
+        _list->setUpdatesEnabled(true);
         _list->blockSignals(false);
 
-        // A pending selectById() request wins — the entity it asked for has now
-        // appeared. Select it (with signals live so listeners hear about it).
+        // Locate the survivor of the current selection (by the authoritative
+        // _selectedId, not the list's transient currentItem) and any pending
+        // selectById() target.
+        QListWidgetItem* reselect = nullptr;
+        QListWidgetItem* requested = nullptr;
+        for (int r = 0; r < _list->count(); ++r)
+        {
+            auto* it = _list->item(r);
+            const qulonglong id = it->data(Qt::UserRole).toULongLong();
+            if (_selectedId != 0 && id == _selectedId)
+            {
+                reselect = it;
+            }
+            if (_requestedId != 0 && id == _requestedId)
+            {
+                requested = it;
+            }
+        }
+
+        // 1) An explicit selectById() target that just appeared wins — this is the
+        //    ONLY way an add changes the selection, so a host can opt in per entity
+        //    (e.g. select an entity it just spawned) without every world-spawned
+        //    entity ever stealing the current selection.
         if (requested)
         {
             _requestedId = 0;
             _list->setCurrentItem(requested);
             return;
         }
-
+        // 2) KEEP the current selection when it survived — silently, so adding entities
+        //    (world spawns) or removing some OTHER entity never disturbs a host that
+        //    drives selection (setCurrentItem on the already-current item does not
+        //    re-emit).
         if (reselect)
         {
-            return; // the user's selection survived — leave it (and don't re-emit)
+            _list->setCurrentItem(reselect);
+            return;
         }
-
-        // Nothing was reselected: if any entity exists, select the top one so the
-        // panel is never left blank on first populate (or after the selected entity
-        // disappeared). Signals are unblocked here, so listeners are notified.
+        // 3) The selected entity itself was removed → pick its NEIGHBOUR (the row that
+        //    shifted into its slot), not the top, so a delete doesn't yank the view to
+        //    the first entity. Clamped to the last row if it was the last.
+        if (_selectedId != 0 && prevSelRow >= 0 && _list->count() > 0)
+        {
+            // Removing the current row may have left Qt's "current" already on the
+            // neighbour (silently — the removal ran under blockSignals), which would
+            // make setCurrentRow a no-op. Clear it first so a fresh selection signal
+            // always fires for the new selection.
+            _list->blockSignals(true);
+            _list->setCurrentItem(nullptr);
+            _list->blockSignals(false);
+            _list->setCurrentRow(qMin(prevSelRow, _list->count() - 1));
+            return;
+        }
+        // 4) No prior selection (first populate) → default to the first row.
         if (_list->count() > 0)
         {
             _list->setCurrentRow(0);
+            return;
         }
-        else if (selectedId != 0)
+        // 5) Empty list → nothing to select.
+        if (_selectedId != 0)
         {
+            _selectedId = 0;
             emit entityDeselected();
         }
     }
@@ -306,10 +762,12 @@ namespace rpe
         auto* item = _list->currentItem();
         if (!item)
         {
+            _selectedId = 0; // keep the authoritative tracker consistent on any deselect
             emit entityDeselected();
             return;
         }
         const auto id = item->data(Qt::UserRole).toULongLong();
+        _selectedId = id; // authoritative selection — survives the next list rebuild
         emit entityIdSelected(id); // world-free; used by mirror mode
         if (_world)
         {

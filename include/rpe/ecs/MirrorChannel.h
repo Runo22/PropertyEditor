@@ -50,6 +50,79 @@ namespace rpe
             rttr::variant value;
         };
 
+        // One row of the selected entity's composition. Besides bridged DATA
+        // components (inspectable/editable), the list carries zero-size TAGS and
+        // PAIRS — pure presence state with nothing to edit, shown as badge rows.
+        enum class RowKind : quint8
+        {
+            Data = 0,
+            Tag = 1,
+            Pair = 2,     // DATALESS pair: presence only, badge row
+            PairData = 3, // pair that CARRIES data (ecs_get_typeid) — selectable/editable
+        };
+        struct ComponentRow
+        {
+            QString name;       // full scoped path (pairs: the RELATION's path)
+            QString pairTarget; // pairs only: target's display name
+            RowKind kind = RowKind::Data;
+            qulonglong rawId = 0; // flecs id (pair-encoded for pairs) — removal identity
+            // PairData only: the RTTR-resolvable name of the type the pair carries
+            // (usually the relation's type). Empty for other kinds.
+            QString typeName;
+
+            // Unique selection/interest identity. A relation can pair with several
+            // targets carrying the same type ((Damage,Fire), (Damage,Ice)), so the
+            // name alone is ambiguous for pairs.
+            QString key() const
+            {
+                return (kind == RowKind::Pair || kind == RowKind::PairData)
+                    ? name + QStringLiteral(" (") + pairTarget + QLatin1Char(')')
+                    : name;
+            }
+            bool operator==(const ComponentRow& o) const
+            {
+                return name == o.name && pairTarget == o.pairTarget && kind == o.kind
+                    && rawId == o.rawId && typeName == o.typeName;
+            }
+            bool operator!=(const ComponentRow& o) const
+            {
+                return !(*this == o);
+            }
+        };
+
+        // Add-component catalog entry (tag == zero-size component: addable, no data).
+        struct CatalogEntry
+        {
+            QString path;
+            bool tag = false;
+            bool operator==(const CatalogEntry& o) const
+            {
+                return path == o.path && tag == o.tag;
+            }
+            bool operator!=(const CatalogEntry& o) const
+            {
+                return !(*this == o);
+            }
+        };
+
+        // A spawnable prefab for the "add entity" picker: its id (the spawn handle),
+        // display name, and the group tag it matched (empty = ungrouped). The group is
+        // computed producer-side from the host-provided group tags (setPrefabGroupTags).
+        struct PrefabEntry
+        {
+            qulonglong id = 0;
+            QString name;
+            QString group;
+            bool operator==(const PrefabEntry& o) const
+            {
+                return id == o.id && name == o.name && group == o.group;
+            }
+            bool operator!=(const PrefabEntry& o) const
+            {
+                return !(*this == o);
+            }
+        };
+
         // A pinned (watched) property, independent of the current selection: any
         // entity + component + leaf path. Pins are mirrored every pump alongside the
         // selected component, so a watch widget can show values from several
@@ -57,10 +130,16 @@ namespace rpe
         struct PinKey
         {
             qulonglong entity = 0;
-            QString component; // full scoped flecs name ("game.Transform")
+            QString component; // full scoped flecs name, or a pair's "Rel (Target)" key
             QString path;      // property dot-path inside the component
+            // Data-carrying pairs have no resolvable flecs name; when set, the producer
+            // resolves the component by this exact id (pair-encoded) + ecs_get_typeid,
+            // instead of by name. 0 for ordinary components (resolved by `component`).
+            qulonglong rawId = 0;
             bool operator==(const PinKey& o) const
             {
+                // Identity is (entity, component, path) — `component` is already unique
+                // per pair ("Rel (Target)"), so rawId is a resolution aid, not identity.
                 return entity == o.entity && component == o.component && path == o.path;
             }
         };
@@ -87,15 +166,29 @@ namespace rpe
         enum class StructuralKind
         {
             AddComponent,
-            RemoveComponent
+            RemoveComponent,
+            SpawnPrefab,  // instantiate a new entity from a prefab (rawId = prefab id)
+            DestroyEntity // delete an entity outright (entity = the one to destroy)
         };
         struct StructuralEdit
         {
             StructuralKind kind;
             qulonglong entity = 0;
-            QString component;
+            QString component;    // by-name form (empty when rawId is used)
+            qulonglong rawId = 0; // by-id form — required for pairs, exact for tags
         };
         void queueStructural(StructuralKind kind, qulonglong entity, const QString& component);
+        // By flecs id — the only way to address a PAIR, and unambiguous for tags.
+        void queueStructuralById(StructuralKind kind, qulonglong entity, qulonglong rawId);
+        // Spawn a new entity from prefab `prefabId` (producer runs is_a + configurator).
+        void queueSpawnPrefab(qulonglong prefabId);
+        // Destroy `entity` on the simulation thread.
+        void queueDestroyEntity(qulonglong entity);
+
+        // Tag names the producer groups spawnable prefabs by (a prefab is filed under
+        // the first of these it carries). Also drives which prefabs the "add entity"
+        // picker offers, alongside the existing required-component filter.
+        void setPrefabGroupTags(const QStringList& tags);
 
         // ── GUI thread: pinned watches ───────────────────────────────────────────
         // Replace the full pin set (atomic swap; the producer reads it next pump).
@@ -106,14 +199,24 @@ namespace rpe
         // Latest changed pin values (drained; keyed producer-side so a hidden
         // consumer can't make this grow unbounded).
         std::vector<PinValue> pollPinValues();
+        // Pins whose target is GONE — the entity was destroyed, or the component was
+        // removed from it. Drained; the watch widget removes these rows so a pin can't
+        // linger showing a stale value after the thing it watched is deleted. (A pin
+        // that is merely temporarily unresolvable — e.g. its bridge hasn't registered
+        // yet — is NOT reported here.)
+        QVector<PinKey> pollDeadPins();
 
         // ── GUI thread: results ──────────────────────────────────────────────────
         bool pollEntities(QVector<EntityEntry>& out);
-        bool pollComponents(QStringList& out);
+        bool pollComponents(QStringList& out); // legacy: DATA row names only
+        bool pollComponentRows(QVector<ComponentRow>& out); // full composition
         std::vector<ValueUpdate> pollValues();
-        // Catalog of all bridged component names present in the world (for the "add
-        // component" picker). True if changed since the last poll.
-        bool pollCatalog(QStringList& out);
+        // Catalog of addable components (bridged data types + zero-size tags) for
+        // the "add component" picker. True if changed since the last poll.
+        bool pollCatalog(QStringList& out); // legacy: paths only
+        bool pollCatalogEntries(QVector<CatalogEntry>& out);
+        // Spawnable prefabs for the "add entity" picker. True if changed since last poll.
+        bool pollPrefabs(QVector<PrefabEntry>& out);
 
         // True until the producing EcsMirror is destroyed.
         bool producerAlive() const
@@ -128,6 +231,7 @@ namespace rpe
             QString component;
             QString required;
             QStringList paths;
+            QStringList prefabGroups;                             // prefab grouping tags
             std::vector<std::pair<QString, rttr::variant>> edits; // drained
             std::vector<StructuralEdit> structurals;              // drained
             QVector<PinKey> pins;                                 // current pin set
@@ -136,10 +240,16 @@ namespace rpe
         };
         Intent takeIntent();
         void publishEntities(const QVector<EntityEntry>& entities);
-        void publishComponents(const QStringList& components);
+        void publishComponents(const QStringList& components); // legacy → data rows
+        void publishComponentRows(const QVector<ComponentRow>& rows);
         void publishValues(std::vector<ValueUpdate>&& values);
         void publishPinValues(std::vector<PinValue>&& values);
-        void publishCatalog(const QStringList& catalog);
+        // Report pins whose target no longer exists (entity destroyed / component
+        // removed). Coalesced producer-side by pin identity.
+        void publishDeadPins(const QVector<PinKey>& keys);
+        void publishCatalog(const QStringList& catalog); // legacy → non-tag entries
+        void publishCatalogEntries(const QVector<CatalogEntry>& entries);
+        void publishPrefabs(const QVector<PrefabEntry>& prefabs);
         void markProducerGone()
         {
             _producerAlive.store(false, std::memory_order_release);
@@ -153,6 +263,7 @@ namespace rpe
         QString _inComponent;
         QStringList _inPaths;
         QString _required;
+        QStringList _prefabGroups;
         std::vector<std::pair<QString, rttr::variant>> _edits;
         std::vector<StructuralEdit> _structurals;
         QVector<PinKey> _pins;
@@ -162,15 +273,19 @@ namespace rpe
         // sim -> GUI
         QVector<EntityEntry> _outEntities;
         bool _outEntitiesDirty = false;
-        QStringList _outComponents;
+        QVector<ComponentRow> _outComponents;
         bool _outComponentsDirty = false;
-        QStringList _outCatalog;
+        QVector<CatalogEntry> _outCatalog;
         bool _outCatalogDirty = false;
+        QVector<PrefabEntry> _outPrefabs;
+        bool _outPrefabsDirty = false;
         // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
         // consumer can't make this grow unbounded.
         QHash<QString, rttr::variant> _outValues;
         // Same idea for pins, keyed by "entity|component|path".
         QHash<QString, PinValue> _outPinValues;
+        // Pins whose target vanished, coalesced by the same key (drained by the GUI).
+        QHash<QString, PinKey> _outDeadPins;
 
         std::atomic<bool> _producerAlive { true };
     };

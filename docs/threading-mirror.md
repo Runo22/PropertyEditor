@@ -35,6 +35,10 @@ mirror.setMaxPumpRateHz(60);            // 0 = every frame (default). SET THIS o
 mirror.setScanIntervalsMs(500, 2000);   // wall-clock throttle for the two
                                         // FULL-WORLD scans (entity list, add-
                                         // component catalog). Defaults shown.
+mirror.setScanBudgetMsPerPump(1.0);     // the entity scan is INCREMENTAL: at most
+                                        // this much labelling work per pump, the
+                                        // list publishes when the cycle completes.
+                                        // Default 1 ms; 0 = old single-shot scan.
 ```
 
 What runs when:
@@ -42,7 +46,7 @@ What runs when:
 | Work | Cadence | Cost drivers |
 |---|---|---|
 | Pump (watched-leaf reads + dedup) | every frame, capped by `setMaxPumpRateHz` | number of visible/pinned leaves |
-| Entity-list scan | `setScanIntervalsMs` first arg (forced by filter/structural changes) | world size; the `requiredComponent` filter narrows the query |
+| Entity-list scan | `setScanIntervalsMs` first arg (forced by filter/structural changes) | world size; the `requiredComponent` filter narrows the query. Work is sliced by `setScanBudgetMsPerPump` (default 1 ms), so a big world costs a flat ~1 ms/pump instead of one spike; `pumpStats().lastScanMs` reports the whole cycle's total. |
 | Catalog scan | second arg | number of component types |
 
 Everything else is cached and change-gated: the selected entity's component
