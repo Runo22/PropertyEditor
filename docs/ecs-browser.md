@@ -90,6 +90,38 @@ All three panels have a **filter box**: the entity and component lists narrow by
 typed text, and the property grid's filter matches a row's value too (see
 [getting-started](getting-started.md#trimmings)).
 
+## Keyboard
+
+Every search-then-pick surface in the browser behaves the same way: **you type,
+the best match is already highlighted, and focus never leaves the box** — so you
+can keep typing at any point in the walk.
+
+In the entity and component **filter boxes**:
+
+| Key | |
+|---|---|
+| `Down` / `Up` | walk the visible rows (which selects them) |
+| `PageDown` / `PageUp` | jump a screenful |
+| `Enter` | hand focus to the list, to carry on there |
+| `Esc` | clear the filter |
+| `Tab` | leave for the list (panel order: **Add → filter → list**) |
+
+In the **"Add" pickers** (spawn a prefab, add a component) the same keys drive
+the option tree, plus:
+
+| Key | |
+|---|---|
+| `Enter` | take the highlighted option — with nothing walked to yet, that is the **topmost match**, so filter-then-`Enter` picks the obvious one |
+| `Tab` / `Shift+Tab` | walk the options too, wrapping around (a popup has nowhere else to tab to) |
+| `Esc` | close without picking |
+
+Hidden rows are never walked, group headers and the "(nothing available)"
+placeholder are never highlighted, and `Enter` with no match does nothing rather
+than picking something else. `Home` / `End` stay with the text caret.
+
+Across the browser, `Tab` runs **write-back checkbox → entities → components →
+property grid**.
+
 ## Tags & pairs
 
 The component list shows the entity's full composition. Zero-size **tags** and
@@ -103,16 +135,17 @@ Zero-size tags are also offered by the "+ Add" picker under a *(tags)* group.
 ## Add / remove components
 
 With `allowComponentEditing = true` the component panel gains a **"+ Add"**
-button (popup grouped by namespace, filter box with arrow/Enter navigation)
-and a per-row trash glyph with a two-step confirm. Structural changes are
-applied on the simulation thread in mirror mode.
+button (popup grouped by namespace, filter box with [arrow/Enter
+navigation](#keyboard)) and a per-row trash glyph with a two-step confirm.
+Structural changes are applied on the simulation thread in mirror mode.
 
 ## Add entities (spawn from prefabs)
 
 `browser.setEntityAddingEnabled(true)` shows an **"Add"** button over the entity
-list. It opens a picker of spawnable **prefabs**, grouped by tag. The list is
-narrowed by the same required-component filter as the entity list — only prefabs
-that carry the required component are offered.
+list. It opens a picker of spawnable **prefabs**, grouped by tag, driven by the
+same [keyboard](#keyboard) as the component picker. The list is narrowed by the
+same required-component filter as the entity list — only prefabs that carry the
+required component are offered.
 
 ```cpp
 browser.setEntityAddingEnabled(true);

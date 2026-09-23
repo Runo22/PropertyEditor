@@ -127,6 +127,14 @@ namespace rpe
         }
         _mainLayout->addWidget(root, 1);
         _layoutRoot = root;
+
+        // Re-parenting into a fresh splitter tree rebuilds the focus chain in
+        // whatever order the widgets landed, so restate it: Tab walks the browser
+        // the way it reads, top-level control first, then the three panels in the
+        // order you work through them.
+        setTabOrder(_writeCheck, _entityList);
+        setTabOrder(_entityList, _componentList);
+        setTabOrder(_componentList, _propertyEditor);
     }
 
     void EntityComponentBrowser::setBrowserLayout(Layout layout)

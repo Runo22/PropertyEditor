@@ -329,6 +329,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_flecs_rttr_namespace_mismatch_test test/flecs_rttr_namespace_mismatch_test.cpp)
     target_link_libraries(rpe_flecs_rttr_namespace_mismatch_test PRIVATE rpe_gui)
 
+    add_executable(rpe_picker_keys_test test/picker_keys_test.cpp)
+    target_link_libraries(rpe_picker_keys_test PRIVATE rpe_gui)
+
     add_executable(rpe_same_rttr_name_test test/same_rttr_name_test.cpp)
     target_link_libraries(rpe_same_rttr_name_test PRIVATE rpe_gui)
 

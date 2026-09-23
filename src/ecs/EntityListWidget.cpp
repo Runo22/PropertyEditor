@@ -1,5 +1,6 @@
 #include "rpe/ecs/EntityListWidget.h"
 
+#include "PickerKeys.h"
 #include "rpe/core/TypeBridge.h"
 
 #include <QAction>
@@ -212,6 +213,15 @@ namespace rpe
         connect(_list, &QListWidget::customContextMenuRequested, this, &EntityListWidget::_onContextMenu);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
         connect(_addBtn, &QToolButton::clicked, this, &EntityListWidget::_onAddEntityClicked);
+
+        // Filter, then walk the results without leaving the box (arrows select,
+        // Enter hands focus to the list, Esc clears the filter). Installed after
+        // the textChanged refresh above so it walks the rebuilt list.
+        picker::driveList(_filterEdit, _list);
+
+        // Tab walks the panel the way it reads: Add → filter → list.
+        setTabOrder(_addBtn, _filterEdit);
+        setTabOrder(_filterEdit, _list);
     }
 
     void EntityListWidget::setEntityRemovingEnabled(bool on)
@@ -436,8 +446,16 @@ namespace rpe
                     shown += match ? 1 : 0;
                 }
                 top->setHidden(shown == 0); // hide an empty group header
+                if (shown)
+                    top->setExpanded(true);
             }
         });
+
+        // Type, then drive the list from the filter box: arrows walk the matches,
+        // Enter spawns the highlighted prefab (the topmost match by default), Esc
+        // closes. Connected AFTER the filter above so the re-highlight it installs
+        // sees the freshly filtered tree.
+        picker::driveTree(search, tree, popup, activate);
 
         // Position it under the button, then clamp fully inside the screen so it
         // never overflows the window edge (the button is right-aligned in the
