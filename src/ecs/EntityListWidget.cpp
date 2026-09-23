@@ -37,6 +37,21 @@ namespace rpe
             return pos >= 0 ? s.mid(pos + 2) : s;
         }
 
+        // Last scope segment, for either spelling of the separator ("a::b::c" and
+        // "a.b.c" both → "c"). Unlike shortName() above — which stays "::"-only
+        // because it matches component names against flecs paths — this is purely
+        // a DISPLAY shortening, so it may cut at whichever separator the host used.
+        QString scopeLeaf(const QString& s)
+        {
+            const int dc = s.lastIndexOf(QStringLiteral("::"));
+            const int dot = s.lastIndexOf(QLatin1Char('.'));
+            if (dot > dc)
+            {
+                return s.mid(dot + 1);
+            }
+            return dc >= 0 ? s.mid(dc + 2) : s;
+        }
+
         // Trim a trailing whitespace-delimited "prefab" (any case) — matches
         // EcsMirror so direct and mirror instance labels read identically.
         QString trimPrefabSuffix(QString s)
@@ -395,13 +410,23 @@ namespace rpe
             QHash<QString, QTreeWidgetItem*> groups;
             for (const MirrorChannel::PrefabEntry& p : _prefabs)
             {
+                // The group's IDENTITY stays the full tag name the host registered
+                // ("a::b::c") — it is what the world knows the tag by, and what the
+                // icon map is keyed on. Only the header LABEL is shortened to the
+                // leaf ("c"); the full name goes in the tooltip so the scope is
+                // still there when you want it. Two groups sharing a leaf therefore
+                // stay two groups.
                 const QString g = p.group.isEmpty() ? tr("(ungrouped)") : p.group;
                 QTreeWidgetItem*& node = groups[g];
                 if (!node)
                 {
-                    node = new QTreeWidgetItem(tree, { g });
+                    node = new QTreeWidgetItem(tree, { scopeLeaf(g) });
                     node->setFlags(Qt::ItemIsEnabled);
                     node->setExpanded(true);
+                    if (g != scopeLeaf(g))
+                    {
+                        node->setToolTip(0, g);
+                    }
                     if (const auto it = _groupIcons.constFind(p.group); it != _groupIcons.constEnd())
                     {
                         node->setIcon(0, it.value());

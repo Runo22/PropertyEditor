@@ -14,9 +14,11 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QFrame>
+#include <QIcon>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPixmap>
 #include <QToolButton>
 #include <QTreeWidget>
 
@@ -172,6 +174,68 @@ static void testPrefabPicker()
         key(p.search, Qt::Key_Down);
         key(p.search, Qt::Key_Return);
         check("flat picker: arrow + Enter spawns the second option", picked == 21ull);
+    }
+
+    // Scoped group tags ("a::b::c") are shown by their LEAF ("c") — the scope is
+    // how the world knows the tag, not something to read in the header.
+    {
+        rpe::EntityListWidget scoped;
+        scoped.setEntityAddingEnabled(true);
+        scoped.setAddablePrefabs(QVector<Prefab> {
+            { 30, QStringLiteral("Goblin"), QStringLiteral("game::npc::Enemy") },
+            { 31, QStringLiteral("Crate"), QStringLiteral("game.world.Prop") }, // dotted spelling
+            { 32, QStringLiteral("Torch"), QStringLiteral("Loose") },           // unscoped
+        });
+        QPixmap px(8, 8);
+        px.fill(Qt::red);
+        // The icon map is keyed on the FULL tag name the host registered.
+        scoped.setPrefabGroupIcons({ { QStringLiteral("game::npc::Enemy"), QIcon(px) } });
+
+        qulonglong picked = 0;
+        QObject::connect(&scoped, &rpe::EntityListWidget::spawnPrefabRequested, &scoped,
+                         [&](qulonglong id) { picked = id; });
+
+        Picker p = openPicker(&scoped);
+        QStringList headers;
+        for (int i = 0; i < p.tree->topLevelItemCount(); ++i)
+            headers << p.tree->topLevelItem(i)->text(0);
+        check("a '::'-scoped group header shows only its leaf",
+              headers.contains(QStringLiteral("Enemy")) && !headers.contains(QStringLiteral("game::npc::Enemy")));
+        check("a '.'-scoped group header shows only its leaf too",
+              headers.contains(QStringLiteral("Prop")) && !headers.contains(QStringLiteral("game.world.Prop")));
+        check("an unscoped group is shown unchanged", headers.contains(QStringLiteral("Loose")));
+
+        QTreeWidgetItem* enemy = nullptr;
+        for (int i = 0; i < p.tree->topLevelItemCount(); ++i)
+            if (p.tree->topLevelItem(i)->text(0) == QStringLiteral("Enemy"))
+                enemy = p.tree->topLevelItem(i);
+        check("the full scoped name is still there as a tooltip",
+              enemy && enemy->toolTip(0) == QStringLiteral("game::npc::Enemy"));
+        check("the icon still resolves through the FULL tag name",
+              enemy && !enemy->icon(0).isNull());
+
+        // Shortening is display-only: spawning still works, and the leaf is not the
+        // key anything is looked up by.
+        key(p.search, Qt::Key_Return);
+        check("spawning from a scoped group still carries the prefab's own id", picked == 30ull);
+    }
+
+    // Two groups that share a leaf stay two groups — the identity is the full name.
+    {
+        rpe::EntityListWidget clash;
+        clash.setEntityAddingEnabled(true);
+        clash.setAddablePrefabs(QVector<Prefab> {
+            { 40, QStringLiteral("Goblin"), QStringLiteral("game::Enemy") },
+            { 41, QStringLiteral("Turret"), QStringLiteral("sim::Enemy") },
+        });
+        Picker p = openPicker(&clash);
+        check("same-leaf groups are not merged", p.tree->topLevelItemCount() == 2);
+        check("...and both headers read as the leaf",
+              p.tree->topLevelItem(0)->text(0) == QStringLiteral("Enemy")
+                  && p.tree->topLevelItem(1)->text(0) == QStringLiteral("Enemy"));
+        check("...told apart by their tooltips",
+              p.tree->topLevelItem(0)->toolTip(0) != p.tree->topLevelItem(1)->toolTip(0));
+        key(p.search, Qt::Key_Escape);
     }
 
     // No prefabs at all: the placeholder row is not an option, so Enter does nothing.

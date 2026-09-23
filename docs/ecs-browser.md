@@ -160,8 +160,14 @@ required component are offered.
 ```cpp
 browser.setEntityAddingEnabled(true);
 // group prefabs by these tags (optional icon per group header):
-browser.setPrefabGroups({ { "Enemy", enemyIcon }, { "Prop", QIcon() } });
+browser.setPrefabGroups({ { "game::npc::Enemy", enemyIcon }, { "Prop", QIcon() } });
 ```
+
+Give the tag exactly as the world knows it — the full scoped name is what the
+producer looks the tag entity up by, and what the icon is keyed on. The picker
+**displays only its leaf** (`game::npc::Enemy` → **Enemy**, dotted paths too),
+with the full name on the header's tooltip. The scope is only ever shortened for
+display, so two groups sharing a leaf stay two separate groups.
 
 Grouping is optional: with **no** `setPrefabGroups`, the picker is a flat,
 alphabetical list (no group headers). Add groups only when you want the prefabs
