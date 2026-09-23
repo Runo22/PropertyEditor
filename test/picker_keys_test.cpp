@@ -8,6 +8,7 @@
 //
 // Both pickers must behave identically — that parity is what this pins down.
 #include <rpe/ecs/ComponentListWidget.h>
+#include <rpe/ecs/EntityComponentBrowser.h>
 #include <rpe/ecs/EntityListWidget.h>
 
 #include <QApplication>
@@ -289,6 +290,35 @@ static void testPanelFilters()
 
         key(filter, Qt::Key_Return);
         check("Enter hands focus to the list", w.focusWidget() == list);
+
+        // …and Tab out of the rows goes straight back to the filter, so the panel
+        // is a loop: type → Enter/arrows → browse → Tab → refine.
+        const QString selected = list->currentItem()->text();
+        key(list, Qt::Key_Tab);
+        check("Tab from the list returns focus to the filter box", w.focusWidget() == filter);
+        check("...without disturbing the selection", list->currentItem()->text() == selected);
+
+        key(filter, Qt::Key_Return);
+        key(list, Qt::Key_Backtab);
+        check("Shift+Tab from the list does the same", w.focusWidget() == filter);
+
+        // The filter text survives the trip with the caret at its end — you come
+        // back here to REFINE, so the next keystroke must not wipe what you typed.
+        filter->setText(QStringLiteral("a"));
+        QCoreApplication::processEvents();
+        key(filter, Qt::Key_Return);
+        key(list, Qt::Key_Tab);
+        check("the filter text is kept, not selected-for-overwrite",
+              filter->text() == QStringLiteral("a") && !filter->hasSelectedText()
+                  && filter->cursorPosition() == 1);
+        filter->clear();
+
+        // The list is out of the TAB CHAIN, so Tab from the filter leaves the panel
+        // instead of dropping back into the rows — the loop can always be escaped.
+        filter->setFocus();
+        check("the list is focusable by click, not by Tab", list->focusPolicy() == Qt::ClickFocus);
+        key(filter, Qt::Key_Tab);
+        check("Tab from the filter does not drop back into the rows", w.focusWidget() != list);
     }
 
     // Entity panel (mirror mode): the filter REBUILDS the list rather than hiding
@@ -325,7 +355,33 @@ static void testPanelFilters()
         key(filter, Qt::Key_Escape);
         QCoreApplication::processEvents();
         check("Esc clears the filter and the list comes back", list->count() == 3);
+
+        key(filter, Qt::Key_Return);
+        check("Enter hands focus to the list", w.focusWidget() == list);
+        key(list, Qt::Key_Tab);
+        check("Tab from the entity list returns focus to its filter box", w.focusWidget() == filter);
     }
+}
+
+// ── Tab still crosses the panels, so the per-panel loop is never a trap ──────
+static void testBrowserTabChain()
+{
+    printf("\n-- browser tab chain --\n");
+    rpe::EntityComponentBrowser browser;
+    browser.resize(420, 640);
+    browser.show();
+    QCoreApplication::processEvents();
+
+    auto* entityFilter = browser.entityList()->findChild<QLineEdit*>();
+    auto* entityRows = browser.entityList()->findChild<QListWidget*>();
+    auto* compFilter = browser.componentList()->findChild<QLineEdit*>();
+    check("both panels expose a filter box", entityFilter && compFilter);
+
+    entityFilter->setFocus();
+    key(entityFilter, Qt::Key_Tab);
+    check("Tab leaves the entity panel for the component panel",
+          browser.focusWidget() == compFilter);
+    check("...rather than dropping into the entity rows", browser.focusWidget() != entityRows);
 }
 
 int main(int argc, char** argv)
@@ -336,6 +392,7 @@ int main(int argc, char** argv)
     testPrefabPicker();
     testComponentPicker();
     testPanelFilters();
+    testBrowserTabChain();
 
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;

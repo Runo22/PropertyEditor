@@ -104,7 +104,17 @@ In the entity and component **filter boxes**:
 | `PageDown` / `PageUp` | jump a screenful |
 | `Enter` | hand focus to the list, to carry on there |
 | `Esc` | clear the filter |
-| `Tab` | leave for the list (panel order: **Add → filter → list**) |
+| `Tab` | leave for the **next panel** |
+
+…and from the **list** itself, `Tab` (or `Shift+Tab`) hands focus straight back
+to that panel's filter box, with your filter text intact and the caret at its
+end — so a panel is a loop: type, `Enter` or `↓` into the rows, browse, `Tab`
+back to refine.
+
+The rows are deliberately **not** in the Tab chain (they are reached by click,
+`Enter` or the arrows). That is what keeps the loop escapable: `Tab` from a
+filter box carries on to the next panel instead of dropping straight back into
+the rows it just came from.
 
 In the **"Add" pickers** (spawn a prefab, add a component) the same keys drive
 the option tree, plus:
@@ -119,8 +129,8 @@ Hidden rows are never walked, group headers and the "(nothing available)"
 placeholder are never highlighted, and `Enter` with no match does nothing rather
 than picking something else. `Home` / `End` stay with the text caret.
 
-Across the browser, `Tab` runs **write-back checkbox → entities → components →
-property grid**.
+Across the browser, `Tab` runs **write-back checkbox → entity filter →
+component filter → property grid**.
 
 ## Tags & pairs
 

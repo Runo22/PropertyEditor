@@ -337,10 +337,11 @@ namespace rpe
         // Enter hands focus to the list, Esc clears the filter). Installed after
         // the textChanged filter above so it walks the freshly filtered rows.
         picker::driveList(_filterEdit, _list);
+        picker::returnToSearchOnTab(_list, _filterEdit); // Tab out of the rows = refine
 
-        // Tab walks the panel the way it reads: Add → filter → list.
+        // Tab walks the panel the way it reads — Add → filter — and then leaves for
+        // the next panel; the rows are entered with Enter or the arrows instead.
         setTabOrder(_addBtn, _filterEdit);
-        setTabOrder(_filterEdit, _list);
     }
 
     void ComponentListWidget::setContextActions(const QVector<MenuAction>& actions)

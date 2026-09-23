@@ -187,8 +187,8 @@ namespace rpe
         //   Enter            move focus into the list, to carry on there
         //   Esc              clear the filter
         //
-        // Tab is left alone: in a panel it has somewhere to go (the list itself, per
-        // the tab order), unlike in a picker popup.
+        // Tab is left alone here: unlike in a picker popup it has somewhere to go —
+        // on to the next panel. Coming back the other way is returnToSearchOnTab().
         inline void driveList(QLineEdit* search, QListWidget* list)
         {
             auto* keys = new KeyRouter(search);
@@ -245,6 +245,38 @@ namespace rpe
                 }
             };
             search->installEventFilter(keys);
+        }
+
+        // The way back up: Tab (and Shift+Tab) from the list returns focus to its
+        // own filter box, so a panel is a two-step loop — type, Enter or ↓ into the
+        // rows, Tab back to refine.
+        //
+        // For that to be unambiguous the list is taken out of the Tab CHAIN: Tab
+        // from the filter box then carries on to the NEXT panel instead of dropping
+        // straight back into the rows it just came from, and focus is never trapped
+        // in the loop. The list is still reachable — by click, by Enter, by the
+        // arrows — because ClickFocus keeps it focusable, it only stops Tab from
+        // landing there.
+        //
+        // The filter text is left intact with the caret at its end, rather than
+        // selected as a tab-focused QLineEdit normally would be: you come back here
+        // to REFINE a filter, so the next keystroke must not wipe it.
+        inline void returnToSearchOnTab(QListWidget* list, QLineEdit* search)
+        {
+            list->setFocusPolicy(Qt::ClickFocus);
+
+            auto* keys = new KeyRouter(list);
+            keys->onKey = [search](QKeyEvent* ke) -> bool {
+                if (ke->key() != Qt::Key_Tab && ke->key() != Qt::Key_Backtab)
+                {
+                    return false;
+                }
+                search->setFocus(Qt::OtherFocusReason);
+                search->deselect();
+                search->end(false); // caret after the text you already typed
+                return true;
+            };
+            list->installEventFilter(keys);
         }
 
     } // namespace picker
