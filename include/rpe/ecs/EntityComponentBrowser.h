@@ -148,6 +148,14 @@ namespace rpe
         // The tags the prefab picker groups by (+ optional icons). The tag names are
         // forwarded to the producer (which computes each prefab's group and filters
         // the list by the required component); the icons stay GUI-side.
+        //
+        // Name each tag the way the WORLD knows it — its full path
+        // ("game::npc::Enemy") or an alias registered with world.use(). The producer
+        // resolves it with world.lookup(), whose separator is "::", so a dotted
+        // spelling ("game.npc.Enemy") will NOT be found.
+        //
+        // Order-independent: call it before or after setMirror(), the groups are
+        // remembered either way.
         void setPrefabGroups(const QVector<PrefabGroup>& groups);
 
         // ── Deletion + custom context-menu actions ───────────────────────────────
@@ -263,6 +271,9 @@ namespace rpe
         // Apply the required-component filter (from _settings) to the entity list and,
         // in mirror mode, to the producer.
         void _applyEntityFilter();
+        // Push the configured prefab groups: icons to the widget, tag names to the
+        // producer. Re-run whenever the channel changes.
+        void _applyPrefabGroups();
 
         flecs::world* _world = nullptr;
         EntityListWidget* _entityList = nullptr;
@@ -298,6 +309,9 @@ namespace rpe
         QHash<QString, QString> _pairTypeName;
         QHash<QString, qulonglong> _pairRawId; // pair key → flecs pair id (for pinning)
         bool _entityAddingEnabled = false;
+        // Remembered so setMirror() can (re)push the tags to a channel that did not
+        // exist yet when the host configured them — see _applyPrefabGroups().
+        QVector<PrefabGroup> _prefabGroups;
         QVector<EntityAction> _entityActions;
         QVector<ComponentAction> _componentActions;
         Settings _settings;

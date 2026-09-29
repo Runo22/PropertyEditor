@@ -216,10 +216,19 @@ namespace rpe
 
     void EntityComponentBrowser::setPrefabGroups(const QVector<PrefabGroup>& groups)
     {
+        // Remember them: the tag names only reach the producer through a channel,
+        // and the host may well configure the browser before handing it the mirror.
+        // Dropping them then would leave the picker silently ungrouped.
+        _prefabGroups = groups;
+        _applyPrefabGroups();
+    }
+
+    void EntityComponentBrowser::_applyPrefabGroups()
+    {
         QStringList tags;
         QHash<QString, QIcon> icons;
-        tags.reserve(groups.size());
-        for (const PrefabGroup& g : groups)
+        tags.reserve(_prefabGroups.size());
+        for (const PrefabGroup& g : _prefabGroups)
         {
             tags.append(g.tag);
             if (!g.icon.isNull())
@@ -509,7 +518,8 @@ namespace rpe
             // always go through the channel's edit queue), so hide it.
             _writeCheck->setVisible(false);
             _mirrorTimer->start();
-            _applyEntityFilter(); // push the configured filter to the producer
+            _applyEntityFilter();  // push the configured filter to the producer
+            _applyPrefabGroups();  // …and the prefab group tags, configured or not yet
         }
         else
         {

@@ -163,8 +163,12 @@ browser.setEntityAddingEnabled(true);
 browser.setPrefabGroups({ { "game::npc::Enemy", enemyIcon }, { "Prop", QIcon() } });
 ```
 
-Give the tag exactly as the world knows it — the full scoped name is what the
-producer looks the tag entity up by, and what the icon is keyed on. The picker
+Give the tag exactly as the world knows it: its **full path**
+(`game::npc::Enemy`) or an **alias** you registered with `world.use(tag,
+"Enemy")` — the producer resolves it with `world.lookup()`, and that is also
+what the icon is keyed on. `lookup()`'s separator is `::`, so a **dotted**
+spelling (`game.npc.Enemy`) is *not* found and the picker silently ends up
+ungrouped. Call order does not matter — before or after `setMirror()`. The picker
 **displays only its leaf** (`game::npc::Enemy` → **Enemy**, dotted paths too),
 with the full name on the header's tooltip. The scope is only ever shortened for
 display, so two groups sharing a leaf stay two separate groups.
