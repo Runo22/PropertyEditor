@@ -155,6 +155,33 @@ int main(int argc, char** argv)
     check("alias, groups set BEFORE setMirror",
           groupHeaderFor("Enemy", true) == leaf);
 
+    // ── A tag the world doesn't know must SAY so, once ─────────────────────────
+    // This is what made the bug expensive: every prefab just came back ungrouped,
+    // which reads as "grouping is broken" rather than "that name is wrong".
+    {
+        static int warnings = 0;
+        static QString lastMsg;
+        QtMessageHandler prev = qInstallMessageHandler(
+            [](QtMsgType t, const QMessageLogContext&, const QString& msg) {
+                if (t == QtWarningMsg && msg.contains(QStringLiteral("prefab group tag")))
+                {
+                    ++warnings;
+                    lastMsg = msg;
+                }
+            });
+
+        // The dotted spelling — resolvable-looking, but lookup() never finds it.
+        const QString header = groupHeaderFor("game.npc.Enemy", false);
+        qInstallMessageHandler(prev);
+
+        check("an unresolvable group tag leaves the picker flat (as before)",
+              header == QStringLiteral("<flat>"));
+        check("...but now warns about it", warnings >= 1);
+        check("...exactly once, not once per scan", warnings == 1);
+        check("...naming the tag it could not find",
+              lastMsg.contains(QStringLiteral("game.npc.Enemy")));
+    }
+
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;
 }

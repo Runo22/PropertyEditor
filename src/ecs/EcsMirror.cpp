@@ -819,6 +819,19 @@ namespace rpe
                 if (te.is_valid())
                 {
                     groupTags.emplace_back(g, te.raw_id());
+                    _unresolvedGroups.remove(g); // resolved now (late plugin, say)
+                }
+                else if (!_unresolvedGroups.contains(g))
+                {
+                    // Say it ONCE per name. A tag that can't be found used to fail
+                    // silently: every prefab simply came back ungrouped, which reads
+                    // as "grouping is broken" rather than "this name is wrong".
+                    // lookup()'s separator is "::" — a dotted spelling never matches.
+                    _unresolvedGroups.insert(g);
+                    qWarning("rpe: prefab group tag \"%s\" not found in the world — those prefabs "
+                             "stay ungrouped. Pass the tag's full path (\"game::npc::Enemy\") or a "
+                             "world.use() alias; a dotted path is not resolved.",
+                             qPrintable(g));
                 }
             }
             QVector<MirrorChannel::PrefabEntry> prefabs;

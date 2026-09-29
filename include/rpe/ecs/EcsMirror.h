@@ -3,6 +3,7 @@
 #include "rpe/core/rttr_prelude.h"
 
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -228,6 +229,9 @@ namespace rpe
         std::mutex _spawnMutex;                       // guards _spawnConfig (GUI set / sim read)
         std::function<void(flecs::entity)> _spawnConfig;
         QVector<MirrorChannel::PrefabEntry> _lastPrefabs; // publish dedup (sim thread)
+        // Group tags the host configured that the world does not (yet) know, so the
+        // warning is emitted once per name instead of on every scan (sim thread).
+        QSet<QString> _unresolvedGroups;
 
         // Liveness/synchronisation token shared with the system callback and any
         // deferred install, so they no-op safely if this EcsMirror is destroyed
