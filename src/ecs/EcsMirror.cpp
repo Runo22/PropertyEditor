@@ -146,6 +146,7 @@ namespace rpe
         _catalogScanned = false; // the new world's component set is unknown
         _warnedNoPrefabMatch = false;
         _pinRt.clear(); // component ids/types belong to the old world
+        _pinMissing.clear();
         _pinGen = 0;
         _lastPinStr.clear();
         _lastPins.clear();
@@ -1198,6 +1199,15 @@ namespace rpe
             const auto dedupKey = [](const MirrorChannel::PinKey& k) {
                 return QStringLiteral("%1|%2|%3").arg(k.entity).arg(k.component, k.path);
             };
+            // A component NAME that findComponentEntity couldn't find stays unfindable
+            // until the component set or the bridge registry changes. The lookup builds
+            // a query and walks every component type, so without this a pin whose
+            // type isn't loaded (plugin load order) paid it on every pump.
+            const QPair<int, uint64_t> pinWorldState { _haveQuery ? _componentQuery.count() : -1, pinGen };
+            const auto knownMissing = [&](const QString& name) {
+                const auto it = _pinMissing.constFind(name);
+                return it != _pinMissing.constEnd() && it.value() == pinWorldState;
+            };
             // Entity + component-pointer + type resolution for one pin. Component id
             // AND RTTR type are cached by name — resolveByName takes a registry
             // mutex + string work, far too heavy per pin per pump. A stale id
@@ -1244,11 +1254,17 @@ namespace rpe
                 PinResolve pr = _pinRt.value(k.component);
                 if (pr.compId == 0 || !world.entity(pr.compId).is_alive())
                 {
-                    const flecs::entity comp = findComponentEntity(world, k.component);
-                    if (!comp.is_valid())
+                    if (knownMissing(k.component))
                     {
                         return false;
                     }
+                    const flecs::entity comp = findComponentEntity(world, k.component);
+                    if (!comp.is_valid())
+                    {
+                        _pinMissing.insert(k.component, pinWorldState);
+                        return false;
+                    }
+                    _pinMissing.remove(k.component);
                     // Data components only — get_mut on a tag/plain-entity id asserts
                     // in debug flecs builds (see the selected-component listing).
                     const flecs::Component* cd = comp.try_get<flecs::Component>();
@@ -1336,7 +1352,7 @@ namespace rpe
                     {
                         dead = !ecs_has_id(world.c_ptr(), k.entity, k.rawId); // pair removed
                     }
-                    else if (!dead)
+                    else if (!dead && !knownMissing(k.component))
                     {
                         const flecs::entity comp = findComponentEntity(world, k.component);
                         // comp still exists globally but the entity no longer has it →

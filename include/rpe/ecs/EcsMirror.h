@@ -314,6 +314,9 @@ namespace rpe
         uint64_t _queryReqId = 0;    // required id the entity query is narrowed to
         bool _queryBuilt = false;    // _entityQuery reflects _queryReqId
         QString _warnedRequired;     // last required name a warning was emitted for
+        // Pin component names findComponentEntity couldn't find, with the world state
+        // (component count, bridge generation) at the time — see the pins block.
+        QHash<QString, QPair<int, uint64_t>> _pinMissing;
         double _scanWorkMs = 0.0;
         QString _scanReqShort; // required-filter leaf, frozen for the cycle
 
