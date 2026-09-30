@@ -335,6 +335,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_prefab_group_order_test test/prefab_group_order_test.cpp)
     target_link_libraries(rpe_prefab_group_order_test PRIVATE rpe_gui)
 
+    add_executable(rpe_component_add_tree_test test/component_add_tree_test.cpp)
+    target_link_libraries(rpe_component_add_tree_test PRIVATE rpe_gui)
+
     add_executable(rpe_same_rttr_name_test test/same_rttr_name_test.cpp)
     target_link_libraries(rpe_same_rttr_name_test PRIVATE rpe_gui)
 

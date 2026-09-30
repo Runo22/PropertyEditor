@@ -140,7 +140,7 @@ not selectable. A pair that **carries data** (flecs' `ecs_get_typeid` rule: the
 relation's type first, else the target's) is a normal selectable row displayed
 as `Damage → Fire` with a `pair` badge: clicking it opens the regular property
 editor for the carried type, and edits write back to that pair instance.
-Zero-size tags are also offered by the "+ Add" picker under a *(tags)* group.
+Zero-size tags are also offered by the "+ Add" picker, under a **Tags** group.
 
 ## Add / remove components
 
@@ -148,6 +148,20 @@ With `allowComponentEditing = true` the component panel gains a **"+ Add"**
 button (popup grouped by namespace, filter box with [arrow/Enter
 navigation](#keyboard)) and a per-row trash glyph with a two-step confirm.
 Structural changes are applied on the simulation thread in mirror mode.
+
+The picker is a **namespace tree**: every scope segment is its own level, for
+either separator, so `plugins.output.hud.Speed` and `plugins.output.ig.Radar`
+file under **plugins ▸ output ▸ hud / ig**. Unscoped components sit under
+*(global)*; tags get their own **Tags** root, last, nested the same way. The
+filter matches a component's full path, so typing a namespace (`hud`) narrows
+to that branch.
+
+Top-level namespaces in `Settings::hiddenAddNamespaces` are not offered at all —
+by default `settings` (case-insensitive), for world-wide configuration
+components that are never added to an entity. Change it with
+`setHiddenAddNamespaces({...})` or via `setSettings()`; an empty list offers
+everything. This only affects the Add picker — an entity that already carries
+such a component still lists it.
 
 ## Add entities (spawn from prefabs)
 

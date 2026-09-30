@@ -50,6 +50,43 @@ namespace rpe
             return pm;
         }
 
+        // Scope segments of a component path, for either separator:
+        // "plugins.output.hud.Speed" / "plugins::output::hud::Speed" →
+        // [plugins, output, hud, Speed]. flecs escapes a literal dot inside a name
+        // as "\." — that is part of the segment, not a split point.
+        QStringList scopeSegments(const QString& path)
+        {
+            QStringList out;
+            QString cur;
+            for (int i = 0; i < path.size(); ++i)
+            {
+                const QChar c = path.at(i);
+                if (c == QLatin1Char('\\') && i + 1 < path.size() && path.at(i + 1) == QLatin1Char('.'))
+                {
+                    cur += QLatin1Char('.');
+                    ++i;
+                }
+                else if (c == QLatin1Char('.'))
+                {
+                    out << cur;
+                    cur.clear();
+                }
+                else if (c == QLatin1Char(':') && i + 1 < path.size() && path.at(i + 1) == QLatin1Char(':'))
+                {
+                    out << cur;
+                    cur.clear();
+                    ++i;
+                }
+                else
+                {
+                    cur += c;
+                }
+            }
+            out << cur;
+            out.removeAll(QString()); // a leading "::" (root) yields an empty segment
+            return out;
+        }
+
         // Leaf (unscoped) name for display, from a full path "game.Transform" /
         // "game::Transform" → "Transform".
         QString componentLeaf(const QString& path)
@@ -466,29 +503,51 @@ namespace rpe
         }
         else
         {
-            // Group by namespace (everything before the last "::" or "."); the leaf
-            // is shown, and the full catalogued name is carried for the add request.
-            QHash<QString, QTreeWidgetItem*> groups;
+            // A namespace TREE: every scope segment is its own level, so
+            // "plugins.output.hud.Speed" files under plugins ▸ output ▸ hud. The
+            // leaf is shown; the full catalogued path is carried for the add request.
+            // Tags get their own "Tags" root (presence markers, not data), nested
+            // the same way beneath it; unscoped data components go under "(global)".
+            QHash<QString, QTreeWidgetItem*> groups; // key: root label + "\n" + scope prefix
+            auto groupFor = [&](const QString& rootLabel, const QStringList& scope) {
+                QTreeWidgetItem* parent = nullptr;
+                QString key = rootLabel;
+                auto node = [&](const QString& label) {
+                    QTreeWidgetItem*& g = groups[key];
+                    if (!g)
+                    {
+                        g = parent ? new QTreeWidgetItem(parent, { label }) : new QTreeWidgetItem(tree, { label });
+                        g->setFlags(Qt::ItemIsEnabled);
+                        g->setExpanded(true);
+                    }
+                    parent = g;
+                };
+                if (!rootLabel.isEmpty())
+                {
+                    node(rootLabel);
+                }
+                for (const QString& seg : scope)
+                {
+                    key += QLatin1Char('\n') + seg;
+                    node(seg);
+                }
+                return parent;
+            };
+            QTreeWidgetItem* tagsRoot = nullptr;
             for (const MirrorChannel::CatalogEntry& entry : _addable)
             {
                 const QString& full = entry.path;
-                int cut = full.lastIndexOf(QStringLiteral("::"));
-                int sep = 2;
-                if (cut < 0)
+                QStringList scope = scopeSegments(full);
+                const QString leaf = scope.isEmpty() ? full : scope.takeLast();
+                QTreeWidgetItem* g = nullptr;
+                if (entry.tag)
                 {
-                    cut = full.lastIndexOf(QLatin1Char('.'));
-                    sep = 1;
+                    g = groupFor(tr("Tags"), scope);
+                    tagsRoot = groups.value(tr("Tags"));
                 }
-                // Tags group under one "(tags)" node — they are presence markers,
-                // not namespaced data components.
-                const QString ns = entry.tag ? tr("(tags)") : (cut >= 0 ? full.left(cut) : tr("(global)"));
-                const QString leaf = cut >= 0 ? full.mid(cut + sep) : full;
-                QTreeWidgetItem*& g = groups[ns];
-                if (!g)
+                else
                 {
-                    g = new QTreeWidgetItem(tree, { ns });
-                    g->setFlags(Qt::ItemIsEnabled);
-                    g->setExpanded(true);
+                    g = groupFor(scope.isEmpty() ? tr("(global)") : QString(), scope);
                 }
                 auto* item = new QTreeWidgetItem(g, { leaf });
                 item->setData(0, Qt::UserRole, full);
@@ -498,6 +557,13 @@ namespace rpe
                     f.setItalic(true);
                     item->setFont(0, f);
                 }
+            }
+            // Tags last: they are the odd ones out next to the data namespaces.
+            if (tagsRoot)
+            {
+                tree->takeTopLevelItem(tree->indexOfTopLevelItem(tagsRoot));
+                tree->addTopLevelItem(tagsRoot);
+                tagsRoot->setExpanded(true);
             }
         }
 
@@ -516,21 +582,34 @@ namespace rpe
 
         connect(search, &QLineEdit::textChanged, tree, [tree](const QString& q) {
             const QString s = q.trimmed();
+            // An option matches on its FULL path, so typing a namespace ("hud")
+            // narrows to that branch; a group stays visible while any descendant
+            // does. Returns whether `item` ended up visible.
+            std::function<bool(QTreeWidgetItem*)> apply = [&](QTreeWidgetItem* item) -> bool {
+                const QVariant full = item->data(0, Qt::UserRole);
+                if (!full.isNull())
+                {
+                    const bool match = s.isEmpty() || full.toString().contains(s, Qt::CaseInsensitive);
+                    item->setHidden(!match);
+                    return match;
+                }
+                if (item->childCount() == 0)
+                {
+                    return !item->isHidden(); // placeholder row
+                }
+                bool any = false;
+                for (int j = 0; j < item->childCount(); ++j)
+                {
+                    any = apply(item->child(j)) || any;
+                }
+                item->setHidden(!any);
+                if (any)
+                    item->setExpanded(true);
+                return any;
+            };
             for (int i = 0; i < tree->topLevelItemCount(); ++i)
             {
-                QTreeWidgetItem* g = tree->topLevelItem(i);
-                int shown = 0;
-                for (int j = 0; j < g->childCount(); ++j)
-                {
-                    QTreeWidgetItem* c = g->child(j);
-                    const bool match = s.isEmpty() || c->text(0).contains(s, Qt::CaseInsensitive);
-                    c->setHidden(!match);
-                    shown += match ? 1 : 0;
-                }
-                // Hide a group header only if it has children and none are showing.
-                g->setHidden(g->childCount() > 0 && shown == 0);
-                if (shown)
-                    g->setExpanded(true);
+                apply(tree->topLevelItem(i));
             }
         });
 

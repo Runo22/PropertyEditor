@@ -70,6 +70,12 @@ namespace rpe
             EditPolicy editPolicy = EditPolicy::LocalEdit;
             // Show the add/remove-component controls ("+" and per-row "×").
             bool allowComponentEditing = false;
+            // Top-level namespaces whose components the "Add component" picker does
+            // NOT offer (matched case-insensitively against the first scope segment,
+            // so "settings" hides settings.Graphics, settings::audio::Mix, …). Meant
+            // for world-wide configuration components that are never added per
+            // entity. Clear the list to offer everything.
+            QStringList hiddenAddNamespaces { QStringLiteral("settings") };
             // Panel arrangement.
             Layout layout = Layout::Wide;
             // GUI poll cadence (ms) for the mirror and the direct-mode live refresh.
@@ -182,6 +188,10 @@ namespace rpe
         // (filter, snapshot policy, edit policy, component-editing, layout, timers);
         // settings() returns the current configuration.
         void setSettings(const Settings& s);
+        // Top-level namespaces hidden from the "Add component" picker — see
+        // Settings::hiddenAddNamespaces (default: "settings").
+        void setHiddenAddNamespaces(const QStringList& namespaces);
+
         Settings settings() const
         {
             return _settings;
@@ -274,6 +284,8 @@ namespace rpe
         // Push the configured prefab groups: icons to the widget, tag names to the
         // producer. Re-run whenever the channel changes.
         void _applyPrefabGroups();
+        // True when `path`'s top-level namespace is in Settings::hiddenAddNamespaces.
+        bool _isHiddenFromAdd(const QString& path) const;
 
         flecs::world* _world = nullptr;
         EntityListWidget* _entityList = nullptr;

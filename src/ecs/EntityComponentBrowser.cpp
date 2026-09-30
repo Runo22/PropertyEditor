@@ -372,6 +372,13 @@ namespace rpe
         setEditPolicy(s.editPolicy);
         setComponentEditingEnabled(s.allowComponentEditing);
         _applyEntityFilter();
+        _updateAddable(); // hiddenAddNamespaces may have changed
+    }
+
+    void EntityComponentBrowser::setHiddenAddNamespaces(const QStringList& namespaces)
+    {
+        _settings.hiddenAddNamespaces = namespaces;
+        _updateAddable();
     }
 
     void EntityComponentBrowser::_onWriteToggled(bool on)
@@ -689,6 +696,44 @@ namespace rpe
         _pushInterest();
     }
 
+    bool EntityComponentBrowser::_isHiddenFromAdd(const QString& path) const
+    {
+        if (_settings.hiddenAddNamespaces.isEmpty())
+        {
+            return false;
+        }
+        // First scope segment, for either separator; a leading "::" (root) is skipped.
+        QString p = path;
+        while (p.startsWith(QStringLiteral("::")))
+        {
+            p.remove(0, 2);
+        }
+        int cut = p.size();
+        const int dc = p.indexOf(QStringLiteral("::"));
+        const int dot = p.indexOf(QLatin1Char('.'));
+        if (dc >= 0)
+        {
+            cut = dc;
+        }
+        if (dot >= 0 && dot < cut)
+        {
+            cut = dot;
+        }
+        if (cut == p.size())
+        {
+            return false; // unscoped: no namespace to hide
+        }
+        const QString top = p.left(cut);
+        for (const QString& ns : _settings.hiddenAddNamespaces)
+        {
+            if (top.compare(ns, Qt::CaseInsensitive) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void EntityComponentBrowser::_updateAddable()
     {
         // Offer every catalogued component the entity does not already have. Both
@@ -697,6 +742,10 @@ namespace rpe
         QVector<MirrorChannel::CatalogEntry> addable;
         for (const MirrorChannel::CatalogEntry& entry : _catalog)
         {
+            if (_isHiddenFromAdd(entry.path))
+            {
+                continue;
+            }
             const bool present = entry.tag ? _currentTags.contains(entry.path)
                                            : _currentComps.contains(entry.path);
             if (!present)
