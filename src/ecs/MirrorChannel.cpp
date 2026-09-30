@@ -30,7 +30,14 @@ namespace rpe
     void MirrorChannel::queueEdit(const QString& path, rttr::variant value)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _edits.emplace_back(path, std::move(value));
+        _edits.push_back(EditRequest { _inEntity, _inComponent, path, std::move(value) });
+    }
+
+    void MirrorChannel::queueEdit(qulonglong entity, const QString& component, const QString& path,
+                                  rttr::variant value)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _edits.push_back(EditRequest { entity, component, path, std::move(value) });
     }
 
     void MirrorChannel::requestResync()
@@ -201,7 +208,7 @@ namespace rpe
         v.reserve(static_cast<size_t>(_outValues.size()));
         for (auto it = _outValues.cbegin(); it != _outValues.cend(); ++it)
         {
-            v.push_back({ it.key(), it.value() });
+            v.push_back(it.value());
         }
         _outValues.clear();
         return v;
@@ -282,7 +289,8 @@ namespace rpe
         std::lock_guard<std::mutex> lk(_m);
         for (auto& v : values)
         {
-            _outValues.insert(v.path, std::move(v.value)); // coalesce: latest per path
+            const QString key = v.path; // copy first: `v` is moved into the hash
+            _outValues.insert(key, std::move(v)); // coalesce: latest per path
         }
     }
 

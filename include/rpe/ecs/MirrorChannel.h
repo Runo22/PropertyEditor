@@ -48,6 +48,24 @@ namespace rpe
         {
             QString path;
             rttr::variant value;
+            // Which entity + component the value was READ from. A consumer that has
+            // switched selection since must drop it: the producer may have read the
+            // old target in a pump that raced the switch, and the same leaf path
+            // exists on the new one. 0 / empty = unknown (accept).
+            qulonglong entity = 0;
+            QString component;
+        };
+
+        // A value edit, addressed to the entity + component it was MADE on. The target
+        // is fixed when the edit is queued, never at apply time: an inline editor
+        // commits on focus-out, i.e. in the very click that selects another entity, so
+        // "whatever is selected when the sim gets round to it" is often the wrong one.
+        struct EditRequest
+        {
+            qulonglong entity = 0;
+            QString component; // the selection key (full path, or "Rel (Target)")
+            QString path;
+            rttr::variant value;
         };
 
         // One row of the selected entity's composition. Besides bridged DATA
@@ -153,7 +171,11 @@ namespace rpe
         void setRequiredComponent(const QString& componentName);
         void setInterest(qulonglong entity, const QString& componentName, const QStringList& leafPaths);
         void clearInterest();
+        // Edit the leaf `path` of the current interest (entity + component as set by the
+        // last setInterest) — captured NOW, so a later selection change can't redirect it.
         void queueEdit(const QString& path, rttr::variant value);
+        // Edit the leaf `path` of an explicit entity + component.
+        void queueEdit(qulonglong entity, const QString& component, const QString& path, rttr::variant value);
         // The consumer reset its view (e.g. re-selected the same entity/component,
         // or rebound the property tree). The producer dedups publishes against what
         // it last sent, so without this it would NOT resend identical data and the
@@ -232,7 +254,7 @@ namespace rpe
             QString required;
             QStringList paths;
             QStringList prefabGroups;                             // prefab grouping tags
-            std::vector<std::pair<QString, rttr::variant>> edits; // drained
+            std::vector<EditRequest> edits;                       // drained
             std::vector<StructuralEdit> structurals;              // drained
             QVector<PinKey> pins;                                 // current pin set
             std::vector<std::pair<PinKey, rttr::variant>> pinEdits; // drained
@@ -264,7 +286,7 @@ namespace rpe
         QStringList _inPaths;
         QString _required;
         QStringList _prefabGroups;
-        std::vector<std::pair<QString, rttr::variant>> _edits;
+        std::vector<EditRequest> _edits;
         std::vector<StructuralEdit> _structurals;
         QVector<PinKey> _pins;
         std::vector<std::pair<PinKey, rttr::variant>> _pinEdits;
@@ -281,7 +303,7 @@ namespace rpe
         bool _outPrefabsDirty = false;
         // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
         // consumer can't make this grow unbounded.
-        QHash<QString, rttr::variant> _outValues;
+        QHash<QString, ValueUpdate> _outValues; // coalesced by path; carries its target
         // Same idea for pins, keyed by "entity|component|path".
         QHash<QString, PinValue> _outPinValues;
         // Pins whose target vanished, coalesced by the same key (drained by the GUI).

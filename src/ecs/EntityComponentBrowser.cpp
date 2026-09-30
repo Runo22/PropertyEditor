@@ -513,9 +513,13 @@ namespace rpe
         if (_channel)
         {
             _propertyEditor->setEditPolicy(EditPolicy::LocalEdit);
-            auto ch = _channel; // capture the shared_ptr (not 'this' indirection)
-            _propertyEditor->setEditSink([ch](const QString& path, const rttr::variant& v) {
-                ch->queueEdit(path, v);
+            // Address the edit to the entity + component it was made on, NOW: an
+            // inline editor commits on focus-out, i.e. inside the very click that
+            // selects another entity — by the time the sim applies it, the
+            // selection has moved and the same leaf path exists there too.
+            auto ch = _channel; // the shared_ptr (the channel outlives the mirror)
+            _propertyEditor->setEditSink([this, ch](const QString& path, const rttr::variant& v) {
+                ch->queueEdit(_mirrorEntity, _mirrorComponent, path, v);
             });
             // Mirror mode is fed via setEntries(); make sure the list never queries a
             // (possibly stale) world, so a filter change re-filters the feed instead.
@@ -684,6 +688,13 @@ namespace rpe
         {
             for (auto& u : _channel->pollValues())
             {
+                // Drop values read from a target we've since moved away from: a pump
+                // that raced the selection change can still deliver the old entity's
+                // leaves, and they share paths with the new one.
+                if (u.entity != 0 && (u.entity != _mirrorEntity || u.component != _mirrorComponent))
+                {
+                    continue;
+                }
                 _propertyEditor->setPropertyValue(u.path, u.value);
             }
         }

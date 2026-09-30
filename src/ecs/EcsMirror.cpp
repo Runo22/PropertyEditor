@@ -404,6 +404,69 @@ namespace rpe
         _pumpImpl(w);
     }
 
+    bool EcsMirror::_resolveEditTarget(const flecs::world& world, qulonglong entity, const QString& compKey,
+                                       void*& ptr, rttr::type& type, uint64_t& compId)
+    {
+        if (entity == 0 || compKey.isEmpty())
+        {
+            return false;
+        }
+        const flecs::entity e = world.entity(static_cast<flecs::entity_t>(entity));
+        if (!e.is_alive())
+        {
+            return false;
+        }
+        // Fast path: the selected-entity listing, while it still describes THIS
+        // entity's current archetype and bridge registrations. It is the only thing
+        // that knows data-carrying pairs, which have no name to look up.
+        if (entity == _compsEntity && ecs_get_table(world.c_ptr(), e.id()) == _compsTable
+            && TypeBridge::registryGeneration() == _compsGen)
+        {
+            const int idx = _selComps.indexOf(compKey);
+            if (idx < 0)
+            {
+                return false;
+            }
+            compId = _selCompIds[idx];
+            type = _selTypes[static_cast<size_t>(idx)];
+        }
+        else
+        {
+            // Slow path — the listing belongs to another entity (the selection moved
+            // on) or the archetype changed: find the DATA component on this entity by
+            // its full path, the same key the listing uses. A pair edit that raced an
+            // archetype change is dropped rather than guessed.
+            bool found = false;
+            e.each([&](flecs::id id) {
+                if (found || !id.is_entity())
+                {
+                    return;
+                }
+                const flecs::string p = id.entity().path(".", "");
+                if (p.c_str() && compKey == QString::fromUtf8(p.c_str()))
+                {
+                    const flecs::Component* cd = id.entity().try_get<flecs::Component>();
+                    if (cd && cd->size > 0)
+                    {
+                        compId = id.raw_id();
+                        found = true;
+                    }
+                }
+            });
+            if (!found)
+            {
+                return false;
+            }
+            type = TypeBridge::resolveByName(compKey.toUtf8().constData());
+        }
+        if (!type.is_valid() || type == rttr::type::get<void>())
+        {
+            return false;
+        }
+        ptr = e.try_get_mut(compId); // nullptr, not a panic, if it's gone
+        return ptr != nullptr;
+    }
+
     void EcsMirror::_pumpImpl(const flecs::world& world)
     {
         // Time the whole pump (RAII — covers every early return) for pumpStats().
@@ -429,7 +492,6 @@ namespace rpe
         const QString& component = in.component;
         const QString& required = in.required;
         const QStringList& paths = in.paths;
-        auto& edits = in.edits;
 
         // ── Structural edits (add/remove components) ───────────────────────────────
         // Applied here on the simulation thread, where structural world changes are
@@ -546,6 +608,47 @@ namespace rpe
             _lastEntities.clear();
             _lastCatalog.clear();
             _lastPrefabs.clear();
+        }
+
+        // ── Value edits (GUI -> sim) ──────────────────────────────────────────────
+        // Each edit goes to the entity + component it was MADE on (fixed when it was
+        // queued), not to whatever is selected now: an inline editor commits on
+        // focus-out — in the same click that selects another entity — so by the time
+        // this pump runs, the selection has often moved on and the same leaf path
+        // exists on the new target too. Applying by current selection wrote the value
+        // into the wrong entity.
+        //
+        // Applied here, before any read, and announced right away: an OnSet observer
+        // may restructure the entity, and nothing below holds a pointer across it
+        // (the listing re-checks the archetype, the value read re-fetches).
+        for (const MirrorChannel::EditRequest& ed : in.edits)
+        {
+            void* ptr = nullptr;
+            rttr::type t = rttr::type::get<void>();
+            uint64_t compId = 0;
+            if (!_resolveEditTarget(world, ed.entity, ed.component, ptr, t, compId))
+            {
+                continue; // target gone (destroyed / component removed) — nothing to write
+            }
+            rttr::variant access = TypeBridge::wrap(t, ptr);
+            if (!access.is_valid())
+            {
+                continue;
+            }
+            rttr::instance inst(access);
+            if (bridge::setValueByPath(inst, ed.path, ed.value))
+            {
+                // Announce the write like a hand-written set<T>() would: OnSet observers
+                // and query change detection see inspector edits too.
+                ecs_modified_id(world.c_ptr(), static_cast<ecs_entity_t>(ed.entity), compId);
+            }
+            if (ed.entity == entity && ed.component == component)
+            {
+                // Force an echo of what was ACTUALLY stored — the GUI shows the typed
+                // value optimistically, and a clamped/rejected write must correct it
+                // even when the stored value renders the same as the last one sent.
+                _lastValueStr.remove(ed.path);
+            }
         }
 
         // The GUI reset its view (re-selected the same entity/component, or its
@@ -1319,7 +1422,7 @@ namespace rpe
         {
             return;
         }
-        void* ptr = e.get_mut(_selCompIds[selIdx]);
+        void* ptr = e.try_get_mut(_selCompIds[selIdx]); // nullptr, not a panic, if gone
         if (!ptr)
         {
             return;
@@ -1331,16 +1434,6 @@ namespace rpe
             return;
         }
         rttr::instance inst(access);
-
-        // Apply queued edits (GUI -> sim). The modified() announcement happens at
-        // the END of this function: an OnSet observer may add/remove components on
-        // `e`, which moves it to another table and DANGLES `ptr`/`inst` — so it must
-        // come after our last read through them.
-        bool wroteAny = false;
-        for (auto& [p, v] : edits)
-        {
-            wroteAny = bridge::setValueByPath(inst, p, v) || wroteAny;
-        }
 
         // Read watched leaves (sim -> GUI), de-duplicated by display string. The
         // paths are pre-split once per interest change — splitPath would otherwise
@@ -1370,20 +1463,11 @@ namespace rpe
                 continue;
             }
             _lastValueStr.insert(p, s);
-            updates.push_back({ p, std::move(val) });
+            updates.push_back({ p, std::move(val), entity, component });
         }
         if (!updates.empty())
         {
             _ch->publishValues(std::move(updates));
-        }
-
-        // Announce the edits like a hand-written set<T>() — one modified() per
-        // component per batch, so OnSet observers / query change detection see
-        // inspector edits. LAST on purpose: observers may structurally change `e`
-        // (archetype move), which invalidates the `ptr` the reads above used.
-        if (wroteAny)
-        {
-            ecs_modified_id(world.c_ptr(), e.id(), _selCompIds[selIdx]);
         }
     }
 

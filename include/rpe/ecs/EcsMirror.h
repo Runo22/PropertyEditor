@@ -222,6 +222,10 @@ namespace rpe
         // Core of pump(). Always runs on the sim thread with the world merged and
         // the workers idle (frame-end trampoline, or manual pump() after progress()).
         void _pumpImpl(const flecs::world& world);
+        // Resolve a queued edit's target (entity + component selection key) to a live
+        // component pointer, its RTTR type and flecs id. False if it no longer exists.
+        bool _resolveEditTarget(const flecs::world& world, qulonglong entity, const QString& compKey,
+                                void*& ptr, rttr::type& type, uint64_t& compId);
         static void _installTrampoline(ecs_world_t* world, void* ctx);
         // Frame-end pump (System mode): scheduled by the per-frame task via
         // ecs_run_post_frame; runs on the sim thread with the world merged.

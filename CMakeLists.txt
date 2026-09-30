@@ -341,6 +341,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_scan_cost_test test/scan_cost_test.cpp)
     target_link_libraries(rpe_scan_cost_test PRIVATE rpe_gui)
 
+    add_executable(rpe_edit_target_test test/edit_target_test.cpp)
+    target_link_libraries(rpe_edit_target_test PRIVATE rpe_gui)
+
     add_executable(rpe_same_rttr_name_test test/same_rttr_name_test.cpp)
     target_link_libraries(rpe_same_rttr_name_test PRIVATE rpe_gui)
 
