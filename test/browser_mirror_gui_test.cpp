@@ -148,7 +148,12 @@ int main(int argc, char* argv[])
     //    producer dedup that resync must defeat.
     auto ball2 = world.entity("Ball2");
     ball2.set<Physics>({ false, 42.0 });
-    pump(20); // let the entity list pick up Ball2
+    // Let the entity list pick up Ball2. The entity scan runs on a wall-clock
+    // interval (500 ms default), so wait for the CONDITION — bounded — rather than a
+    // fixed number of pumps, which made this pass or fail depending on how long the
+    // earlier steps happened to take.
+    for (int i = 0; i < 150 && entityList->count() != 2; ++i)
+        pump(1);
 
     check("entity list now has 2 entities", entityList->count() == 2);
     // Select the other entity, then come back to the original.
