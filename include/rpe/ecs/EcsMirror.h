@@ -310,6 +310,7 @@ namespace rpe
         QVector<EntityEntry> _scanStaging;
         QHash<const void*, quint8> _scanVerdict; // table → bit0 bridged, bit1 required
         bool _scanActive = false;
+        bool _scanTruncated = false; // this cycle hit the list cap
         double _scanWorkMs = 0.0;
         QString _scanReqShort; // required-filter leaf, frozen for the cycle
 

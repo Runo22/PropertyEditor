@@ -46,6 +46,13 @@ namespace rpe
             return s;
         }
 
+        // The entity list is capped: larger lists aren't usefully browsable, and every
+        // row costs a label build on the sim thread and a widget row on the GUI.
+        constexpr int kMaxListedEntities = 5000;
+        // Sorting the id snapshot keeps the capped list's MEMBERSHIP stable (see the
+        // scan); past this many ids the sort itself would become the spike.
+        constexpr size_t kMaxSortedSnapshot = 262144;
+
         // Display label for an entity: its name, else its prefab's name + id,
         // else just the id. (No leading id for named entities.)
         QString entityLabel(const flecs::entity& e)
@@ -602,13 +609,13 @@ namespace rpe
                 }
             }
         }
-        if (structuralApplied)
-        {
-            _lastCompRows.clear();
-            _lastEntities.clear();
-            _lastCatalog.clear();
-            _lastPrefabs.clear();
-        }
+        // A structural edit forces every affected list to be recomputed THIS pump (or,
+        // for the sliced entity scan, restarted) — and each is re-published only if
+        // it actually changed. The last-published caches are deliberately NOT cleared
+        // here: the resync that accompanies a structural edit re-publishes them, and a
+        // cleared cache went out as an EMPTY list. With a world big enough that the
+        // entity scan spans several pumps, the GUI then sat on an empty entity list
+        // for those pumps and lost the selection.
 
         // ── Value edits (GUI -> sim) ──────────────────────────────────────────────
         // Each edit goes to the entity + component it was MADE on (fixed when it was
@@ -774,6 +781,7 @@ namespace rpe
             _scanPos = 0;
             _scanStaging.clear();
             _scanVerdict.clear();
+            _scanTruncated = false;
             _scanReqShort = reqShort;
             constexpr size_t kMaxSnapshot = 1000000; // memory bound, far above any browsable set
             _entityQuery.run([&](flecs::iter& it) {
@@ -789,6 +797,16 @@ namespace rpe
                     }
                 }
             });
+            // When the cap will bite, walk the ids in ID order. The snapshot is taken
+            // table by table, so its order follows ARCHETYPES: adding a component to
+            // an entity moves it to another table and could push it past the cap —
+            // an unrelated structural change reshuffled which entities were listed,
+            // and the selected one could silently drop out (the GUI then treats it as
+            // deleted and selects a neighbour). Id order doesn't move with archetypes.
+            if (_scanIds.size() > static_cast<size_t>(kMaxListedEntities) && _scanIds.size() <= kMaxSortedSnapshot)
+            {
+                std::sort(_scanIds.begin(), _scanIds.end());
+            }
             _scanActive = true;
             _scanWorkMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - beginT0).count();
         }
@@ -801,55 +819,59 @@ namespace rpe
             // the label build for actual matches.
             const double budget = _scanBudgetMs.load(std::memory_order_relaxed);
             const auto sliceT0 = std::chrono::steady_clock::now();
-            constexpr int kMaxEntities = 5000; // larger lists aren't usefully browsable
             const uint64_t reqId = _reqId;
             const bool reqEmpty = _scanReqShort.isEmpty();
             size_t processed = 0;
+            // Does this entity belong in the list? Decided per TABLE (all entities of a
+            // table share their type), cached for the cycle.
+            const auto qualifies = [&](const flecs::entity& ent) -> bool {
+                if (!ent.is_alive())
+                {
+                    return false;
+                }
+                const void* tbl = ecs_get_table(world.c_ptr(), ent.id());
+                quint8 v = 0;
+                const auto itv = _scanVerdict.constFind(tbl);
+                if (itv != _scanVerdict.constEnd())
+                {
+                    v = itv.value();
+                }
+                else
+                {
+                    const ecs_type_t* type = tbl ? ecs_table_get_type(static_cast<const ecs_table_t*>(tbl)) : nullptr;
+                    if (type)
+                    {
+                        for (int32_t k = 0; k < type->count; ++k)
+                        {
+                            const uint64_t rid = type->array[k];
+                            if (_bridgedIds.count(rid))
+                            {
+                                v |= 1;
+                            }
+                            if (reqId && rid == reqId)
+                            {
+                                v |= 2;
+                            }
+                        }
+                    }
+                    _scanVerdict.insert(tbl, v);
+                }
+                return (v & 1) && (reqEmpty || (v & 2));
+            };
             while (_scanPos < _scanIds.size())
             {
-                if (_scanStaging.size() >= kMaxEntities)
+                if (_scanStaging.size() >= kMaxListedEntities)
                 {
+                    _scanTruncated = true;
                     _scanPos = _scanIds.size();
                     break;
                 }
                 const flecs::entity ent = world.entity(_scanIds[_scanPos]);
                 ++_scanPos;
                 ++processed;
-                if (ent.is_alive())
+                if (qualifies(ent))
                 {
-                    const void* tbl = ecs_get_table(world.c_ptr(), ent.id());
-                    quint8 v = 0;
-                    const auto itv = _scanVerdict.constFind(tbl);
-                    if (itv != _scanVerdict.constEnd())
-                    {
-                        v = itv.value();
-                    }
-                    else
-                    {
-                        const ecs_type_t* type = tbl
-                            ? ecs_table_get_type(static_cast<const ecs_table_t*>(tbl))
-                            : nullptr;
-                        if (type)
-                        {
-                            for (int32_t k = 0; k < type->count; ++k)
-                            {
-                                const uint64_t rid = type->array[k];
-                                if (_bridgedIds.count(rid))
-                                {
-                                    v |= 1;
-                                }
-                                if (reqId && rid == reqId)
-                                {
-                                    v |= 2;
-                                }
-                            }
-                        }
-                        _scanVerdict.insert(tbl, v);
-                    }
-                    if ((v & 1) && (reqEmpty || (v & 2)))
-                    {
-                        _scanStaging.append({ static_cast<qulonglong>(ent.id()), entityLabel(ent) });
-                    }
+                    _scanStaging.append({ static_cast<qulonglong>(ent.id()), entityLabel(ent) });
                 }
                 // Budget check every 32 entities: guarantees forward progress even
                 // with a microscopic budget, and keeps the clock reads rare.
@@ -864,6 +886,18 @@ namespace rpe
             if (_scanPos >= _scanIds.size())
             {
                 // ── Cycle complete: publish + reschedule ─────────────────────────
+                // The cap must never drop the entity the user is looking at: the GUI
+                // would take its absence as a deletion and move the selection.
+                if (_scanTruncated && entity != 0)
+                {
+                    const flecs::entity sel = world.entity(static_cast<flecs::entity_t>(entity));
+                    const bool listed = std::any_of(_scanStaging.cbegin(), _scanStaging.cend(),
+                                                    [&](const MirrorChannel::EntityEntry& x) { return x.id == entity; });
+                    if (!listed && qualifies(sel))
+                    {
+                        _scanStaging.append({ entity, entityLabel(sel) });
+                    }
+                }
                 if (_scanStaging != _lastEntities)
                 {
                     _lastEntities = _scanStaging;
