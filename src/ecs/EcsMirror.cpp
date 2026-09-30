@@ -209,6 +209,8 @@ namespace rpe
         _haveQuery = false;
         _haveSystem = false;
         _entityQuery = flecs::query<>();
+        _queryBuilt = false;
+        _queryReqId = 0;
         _componentQuery = flecs::query<>();
         _bridgedIds.clear();
         _system = flecs::system();
@@ -222,11 +224,12 @@ namespace rpe
         // world is alive during attach()/the deferred install at frame-end.
         flecs::world w(_world);
 
-        // Build the entity query ONCE here (never inside the readonly system). It
-        // matches *all* entities (flecs::Any); pump() filters to those with a
-        // bridged component (and the optional required filter), so the cached query
-        // never needs rebuilding.
+        // Build the entity query here (never inside the readonly system). It matches
+        // *all* entities (flecs::Any); pump() filters to those with a bridged
+        // component, and re-narrows it to the required component once that resolves.
         _entityQuery = w.query_builder().with(flecs::Any).build();
+        _queryReqId = 0;
+        _queryBuilt = true;
         // Cached query over all component types, used to (re)build the bridged-id set.
         _componentQuery = w.query_builder().with<flecs::Component>().build();
         _haveQuery = true;
@@ -731,6 +734,29 @@ namespace rpe
                 _bridgeGen = bridgeGen;
                 _bridgedIds.clear();
                 _reqId = 0;
+
+                // The required component, identified the way the host named it. A
+                // scoped name ("game::Stats" / "game.Stats") must pick THAT component:
+                // matching on the leaf alone let "game::Stats" select ai::Stats when
+                // both exist (whichever came last), and a dotted spelling matched
+                // nothing. In order of preference:
+                //   1. the full path;
+                //   2. a scope-aligned suffix ("npc::Enemy" → game.npc.Enemy);
+                //   3. the leaf — only when the host gave just a leaf.
+                // Several candidates at one level → the shortest path, deterministically,
+                // with a one-time warning. A scoped name never falls back to the leaf.
+                QString reqPath = required;
+                reqPath.replace(QStringLiteral("::"), QStringLiteral("."));
+                while (reqPath.startsWith(QLatin1Char('.')))
+                {
+                    reqPath.remove(0, 1);
+                }
+                const bool reqScoped = reqPath.contains(QLatin1Char('.'));
+                const QString reqSuffix = QLatin1Char('.') + reqPath;
+                uint64_t reqExact = 0;
+                QVector<QPair<QString, uint64_t>> reqSuffixHits;
+                QVector<QPair<QString, uint64_t>> reqLeafHits;
+
                 _componentQuery.each([&](flecs::entity comp) {
                     const char* cn = comp.name();
                     if (!cn || cn[0] == '\0')
@@ -751,27 +777,84 @@ namespace rpe
                     {
                         _bridgedIds.insert(comp.raw_id());
                     }
-                    if (!reqShort.isEmpty() && shortName(QString::fromUtf8(cn)) == reqShort)
+                    if (!reqPath.isEmpty())
                     {
-                        _reqId = comp.raw_id();
+                        const QString cp = QString::fromUtf8(pc);
+                        if (cp == reqPath)
+                        {
+                            reqExact = comp.raw_id();
+                        }
+                        else if (reqScoped && cp.endsWith(reqSuffix))
+                        {
+                            reqSuffixHits.append({ cp, comp.raw_id() });
+                        }
+                        else if (!reqScoped && QString::fromUtf8(cn) == reqPath)
+                        {
+                            reqLeafHits.append({ cp, comp.raw_id() });
+                        }
                     }
                 });
+
+                if (!reqPath.isEmpty())
+                {
+                    const auto pick = [&](QVector<QPair<QString, uint64_t>>& hits, const char* how) -> uint64_t {
+                        if (hits.isEmpty())
+                        {
+                            return 0;
+                        }
+                        std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+                            return a.first.size() != b.first.size() ? a.first.size() < b.first.size() : a.first < b.first;
+                        });
+                        if (hits.size() > 1 && _warnedRequired != required)
+                        {
+                            _warnedRequired = required;
+                            QStringList all;
+                            for (const auto& h : hits)
+                            {
+                                all << h.first;
+                            }
+                            qWarning("rpe: required component \"%s\" matches %d components by %s (%s) — "
+                                     "using \"%s\". Give the full path to choose.",
+                                     qPrintable(required), static_cast<int>(hits.size()), how,
+                                     qPrintable(all.join(QStringLiteral(", "))), qPrintable(hits.first().first));
+                        }
+                        return hits.first().second;
+                    };
+                    _reqId = reqExact;
+                    if (_reqId == 0)
+                    {
+                        _reqId = pick(reqSuffixHits, "scope suffix");
+                    }
+                    if (_reqId == 0)
+                    {
+                        _reqId = pick(reqLeafHits, "leaf name");
+                    }
+                    if (_reqId == 0 && _warnedRequired != required)
+                    {
+                        _warnedRequired = required;
+                        qWarning("rpe: required component \"%s\" not found in the world — the entity list "
+                                 "stays empty until it is registered.%s",
+                                 qPrintable(required),
+                                 reqScoped ? " (A scoped name only matches that scope, never another "
+                                             "namespace's same-named component.)"
+                                           : "");
+                    }
+                }
             }
 
-            // Narrow the entity query to the required component when the filter
-            // changes: flecs then visits ONLY entities that have it, instead of every
-            // entity in the world. Rebuilt only on change (cheap, rare).
-            if (requiredChanged)
+            // Narrow the entity query to the required component: flecs then visits ONLY
+            // entities that have it, instead of every entity in the world. Rebuilt
+            // whenever the RESOLVED id changes — not just the filter text: a required
+            // component registered after the filter was set (plugin load order)
+            // resolves later, and the query must follow it.
+            const uint64_t wantQueryReq = reqShort.isEmpty() ? 0 : _reqId;
+            if (requiredChanged || wantQueryReq != _queryReqId || !_queryBuilt)
             {
                 flecs::world w = world; // the (non-staged) world in immediate mode
-                if (!reqShort.isEmpty() && _reqId)
-                {
-                    _entityQuery = w.query_builder().with(_reqId).build();
-                }
-                else if (reqShort.isEmpty())
-                {
-                    _entityQuery = w.query_builder().with(flecs::Any).build();
-                }
+                _entityQuery = wantQueryReq ? w.query_builder().with(wantQueryReq).build()
+                                            : w.query_builder().with(flecs::Any).build();
+                _queryReqId = wantQueryReq;
+                _queryBuilt = true;
             }
 
             // Fast id snapshot, TABLE-wise (no labels, no per-entity component

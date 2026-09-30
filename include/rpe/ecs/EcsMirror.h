@@ -311,6 +311,9 @@ namespace rpe
         QHash<const void*, quint8> _scanVerdict; // table → bit0 bridged, bit1 required
         bool _scanActive = false;
         bool _scanTruncated = false; // this cycle hit the list cap
+        uint64_t _queryReqId = 0;    // required id the entity query is narrowed to
+        bool _queryBuilt = false;    // _entityQuery reflects _queryReqId
+        QString _warnedRequired;     // last required name a warning was emitted for
         double _scanWorkMs = 0.0;
         QString _scanReqShort; // required-filter leaf, frozen for the cycle
 
