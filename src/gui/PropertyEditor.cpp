@@ -12,6 +12,7 @@
 #include <QMenu>
 #include <QSortFilterProxyModel>
 #include <QToolButton>
+#include <QScopedValueRollback>
 #include <QTreeView>
 #include <QVBoxLayout>
 
@@ -129,17 +130,30 @@ namespace rpe
         // Keep the model's notion of expansion in sync with the view, so collapsed
         // struct rows can show a "[a, b]" summary that disappears on expand.
         // (Custom roles pass through the proxy, so no mapToSource needed here.)
+        // Outside the editor's own bulk operations (see _bulkExpanding), a per-row
+        // expand/collapse is the user's choice — remembered per bound type.
         connect(_view, &QTreeView::expanded, this, [this](const QModelIndex& idx) {
-            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), true);
+            const QString path = idx.data(PropertyPathRole).toString();
+            _model->setPathExpanded(path, true);
+            if (!_bulkExpanding && !_boundTypeName.isEmpty())
+            {
+                _collapsedByType[_boundTypeName].remove(path);
+            }
         });
         connect(_view, &QTreeView::collapsed, this, [this](const QModelIndex& idx) {
-            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), false);
+            const QString path = idx.data(PropertyPathRole).toString();
+            _model->setPathExpanded(path, false);
+            if (!_bulkExpanding && !_boundTypeName.isEmpty())
+            {
+                _collapsedByType[_boundTypeName].insert(path);
+            }
         });
     }
 
-    // Bulk expansion calls (expandAll / expandToDepth / collapseAll) do NOT emit
-    // the per-row expanded/collapsed signals, so after any of them the model's
-    // expansion set must be rebuilt by walking the view.
+    // Bulk expansion calls (expandAll / expandToDepth / collapseAll) do not
+    // reliably emit the per-row expanded/collapsed signals (it varies across Qt 5
+    // releases), so after any of them the model's expansion set is rebuilt by
+    // walking the view.
     void PropertyEditor::_pushExpansionState()
     {
         QList<QModelIndex> stack;
@@ -167,6 +181,8 @@ namespace rpe
 
     void PropertyEditor::bindType(rttr::type type)
     {
+        _boundTypeName = type.is_valid() ? QString::fromStdString(type.get_name().to_string()) : QString();
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
         _model->bindType(type);
         _view->expandToDepth(0);
         _pushExpansionState();
@@ -329,7 +345,42 @@ namespace rpe
     }
     void PropertyEditor::expandAll()
     {
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
         _view->expandAll();
+        _pushExpansionState();
+    }
+
+    void PropertyEditor::expandAllExceptCollapsed()
+    {
+        const QSet<QString> keep = _collapsedByType.value(_boundTypeName);
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
+        _view->expandAll();
+        if (!keep.isEmpty())
+        {
+            QList<QModelIndex> stack;
+            for (int r = _proxy->rowCount({}) - 1; r >= 0; --r)
+            {
+                stack.append(_proxy->index(r, 0, {}));
+            }
+            while (!stack.isEmpty())
+            {
+                const QModelIndex idx = stack.takeLast();
+                const int rows = _proxy->rowCount(idx);
+                if (rows == 0)
+                {
+                    continue;
+                }
+                if (keep.contains(idx.data(PropertyPathRole).toString()))
+                {
+                    _view->collapse(idx);
+                    continue; // nothing below a collapsed row is visible anyway
+                }
+                for (int r = rows - 1; r >= 0; --r)
+                {
+                    stack.append(_proxy->index(r, 0, idx));
+                }
+            }
+        }
         _pushExpansionState();
     }
 
@@ -337,6 +388,7 @@ namespace rpe
 
     void PropertyEditor::_onFilterChanged(const QString& text)
     {
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
         static_cast<PropertyFilterProxy*>(_proxy)->setFilterText(text);
         if (text.isEmpty())
         {

@@ -887,7 +887,11 @@ namespace rpe
         if (t.is_valid())
         {
             _propertyEditor->bindType(t); // schema only — no instance/world touch
-            _propertyEditor->expandAll();
+            // Open everything the first time; after that, rows you collapsed stay
+            // collapsed across entity switches — and a collapsed row isn't mirrored
+            // at all with snapshotOpenFieldsOnly (the default), so it costs the sim
+            // nothing.
+            _propertyEditor->expandAllExceptCollapsed();
         }
         // bindType reset the property tree to empty values; force a full resend so
         // the values repopulate even when re-selecting the same component (whose

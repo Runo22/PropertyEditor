@@ -4,6 +4,9 @@
 
 #include "rpe/gui/PropertyModel.h"
 
+#include <QHash>
+#include <QSet>
+#include <QString>
 #include <QWidget>
 
 #include <functional>
@@ -84,6 +87,12 @@ namespace rpe
         // ── Chrome ───────────────────────────────────────────────────────────────
         void setToolbarVisible(bool visible);
         void expandAll();
+        // expandAll(), except rows the user has COLLAPSED by hand while this type
+        // was bound stay collapsed. Remembered per bound RTTR type for the editor's
+        // lifetime, so switching entities (same component) or re-selecting the
+        // component keeps the tree the way you left it. Bulk operations (filtering,
+        // expandAll itself) are not remembered — only explicit per-row collapses.
+        void expandAllExceptCollapsed();
 
         PropertyModel* model() const
         {
@@ -108,6 +117,14 @@ namespace rpe
     private:
         void _setupUi();
         void _pushExpansionState();
+        // Rows the user collapsed by hand, per bound type name (see
+        // expandAllExceptCollapsed).
+        QHash<QString, QSet<QString>> _collapsedByType;
+        QString _boundTypeName;
+        // True while the editor itself expands/collapses in bulk (bind, expandAll,
+        // filtering). QTreeView emits a per-row signal even for those, and they
+        // must not be mistaken for the user's own choices.
+        bool _bulkExpanding = false;
         // Enable the Reset control only while the current component has a frozen value.
         void _updateResetEnabled();
         // Show/hide the "no reflected properties" hint for the just-bound type.
