@@ -173,6 +173,17 @@ ungrouped. Call order does not matter — before or after `setMirror()`. The pic
 with the full name on the header's tooltip. The scope is only ever shortened for
 display, so two groups sharing a leaf stay two separate groups.
 
+The tag must be on the **prefab entity itself** — the producer asks
+`prefab.has(tag)`, and instances inherit the tag through `is_a`, not the other
+way round. All three ways this goes wrong now warn once on the console instead of
+just leaving the picker flat:
+
+| symptom | cause |
+|---|---|
+| `tag "X" not found in the world` | the name isn't the tag's path or a `world.use()` alias (a **dotted** path is never resolved) |
+| `…exists but no prefab carries it … It IS on N non-prefab entities` | the tag was added to the **instances**, not the prefab |
+| `…A prefab uses it as a PAIR` | added as `prefab.add(tag, target)` — a pair id is not the tag id |
+
 Grouping is optional: with **no** `setPrefabGroups`, the picker is a flat,
 alphabetical list (no group headers). Add groups only when you want the prefabs
 split into sections. The producer scans prefab entities, files each under the

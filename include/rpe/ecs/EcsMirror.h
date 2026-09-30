@@ -235,6 +235,8 @@ namespace rpe
         // Last group-tag set seen from the intent queue: a change forces a prefab
         // rescan (the resync path only re-publishes the cached list).
         QStringList _lastPrefabGroups;
+        // "tags resolve but no prefab carries them" is diagnosed once per tag set.
+        bool _warnedNoPrefabMatch = false;
 
         // Liveness/synchronisation token shared with the system callback and any
         // deferred install, so they no-op safely if this EcsMirror is destroyed

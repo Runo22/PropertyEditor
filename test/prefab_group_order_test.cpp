@@ -226,6 +226,81 @@ int main(int argc, char** argv)
               lastMsg.contains(QStringLiteral("game.npc.Enemy")));
     }
 
+    // ── Tags that resolve but sit in the wrong place must SAY so ───────────────
+    // has(tag) is asked of the PREFAB. Putting the tag on the instances, or using
+    // it as a pair, leaves every prefab ungrouped — indistinguishable from
+    // "grouping is broken" unless rpe says which it is.
+    {
+        static int warnings = 0;
+        static QString lastMsg;
+        auto capture = [](QtMsgType t, const QMessageLogContext&, const QString& msg) {
+            if (t == QtWarningMsg && msg.contains(QStringLiteral("no prefab carries it")))
+            {
+                ++warnings;
+                lastMsg = msg;
+            }
+        };
+
+        // A world where the tag exists but is placed as `place` says.
+        enum Place
+        {
+            OnPrefab,
+            OnInstancesOnly,
+            AsPair
+        };
+        auto runWorld = [&](Place place) {
+            warnings = 0;
+            lastMsg.clear();
+            flecs::world w;
+            flecs::entity tag = w.entity("game::npc::Enemy");
+            w.use(tag, "Enemy");
+            auto gob = w.entity("Goblin").add(flecs::Prefab).set<Position>({ 1 });
+            if (place == OnPrefab)
+            {
+                gob.add(tag);
+            }
+            else if (place == OnInstancesOnly)
+            {
+                w.entity("G1").is_a(gob).add(tag);
+            }
+            else
+            {
+                gob.add(tag, w.entity("Melee"));
+            }
+
+            rpe::EcsMirror mirror;
+            mirror.attach(&w);
+            mirror.setScanIntervalsMs(0, 0);
+            rpe::EntityComponentBrowser browser;
+            browser.setEntityAddingEnabled(true);
+            browser.setMirror(&mirror);
+            browser.setPrefabGroups(QVector<rpe::EntityComponentBrowser::PrefabGroup> {
+                { QStringLiteral("Enemy"), QIcon() } });
+            QtMessageHandler prev = qInstallMessageHandler(capture);
+            for (int i = 0; i < 25; ++i)
+            {
+                w.progress(0.016f);
+                QCoreApplication::processEvents();
+                QThread::msleep(3);
+            }
+            qInstallMessageHandler(prev);
+            mirror.detach();
+        };
+
+        runWorld(OnPrefab);
+        check("a correctly tagged prefab warns about nothing", warnings == 0);
+
+        runWorld(OnInstancesOnly);
+        check("tag on the instances only is reported", warnings == 1);
+        check("...and says the tag is on non-prefab entities",
+              lastMsg.contains(QStringLiteral("non-prefab")));
+
+        runWorld(AsPair);
+        check("tag used as a pair is reported", warnings == 1);
+        check("...and says a pair id is not the tag id",
+              lastMsg.contains(QStringLiteral("PAIR")));
+    }
+
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;
 }

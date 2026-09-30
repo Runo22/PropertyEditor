@@ -133,8 +133,10 @@ namespace rpe
         _selRows.clear();
         _lastCompRows.clear();
         _lastPrefabs.clear(); // prefab ids belong to the old world
+        // Re-diagnose against the new world: its tags/prefabs are different entities.
         _lastPrefabGroups.clear();
         _unresolvedGroups.clear();
+        _warnedNoPrefabMatch = false;
         _pinRt.clear(); // component ids/types belong to the old world
         _pinGen = 0;
         _lastPinStr.clear();
@@ -785,6 +787,11 @@ namespace rpe
         // until the timer came round.
         const bool groupsChanged = (in.prefabGroups != _lastPrefabGroups);
         _lastPrefabGroups = in.prefabGroups;
+        if (groupsChanged)
+        {
+            // New tag set → the old diagnosis no longer applies.
+            _warnedNoPrefabMatch = false;
+        }
         const bool scanCatalog =
             structuralApplied || groupsChanged || (scanNow - _lastCatalogScan >= _catalogScanGap);
         if (scanCatalog)
@@ -871,6 +878,55 @@ namespace rpe
                       [](const MirrorChannel::PrefabEntry& a, const MirrorChannel::PrefabEntry& b) {
                           return a.group != b.group ? a.group < b.group : a.name < b.name;
                       });
+
+            int grouped = 0;
+            for (const MirrorChannel::PrefabEntry& p : prefabs)
+            {
+                grouped += p.group.isEmpty() ? 0 : 1;
+            }
+
+            // ── The last silent failure: every tag resolved, prefabs were found, and
+            // still nothing matched. has(tag) is asked of the PREFAB, so this means
+            // the tags simply aren't on it — which looks identical to "grouping is
+            // broken" from the GUI. Name the two near-misses that produce it, since
+            // both are easy to write by accident. Diagnosed once per tag set, and
+            // only down this path, so the steady state pays nothing.
+            if (!groupTags.empty() && !prefabs.isEmpty() && grouped == 0 && !_warnedNoPrefabMatch)
+            {
+                _warnedNoPrefabMatch = true;
+                for (const auto& [gname, gid] : groupTags)
+                {
+                    bool asRelation = false; // added as a PAIR (gid, *) — a pair id is
+                    bool asTarget = false;   // not the tag id, so has(gid) says no
+                    for (const MirrorChannel::PrefabEntry& pe : prefabs)
+                    {
+                        const flecs::entity p = world.entity(static_cast<flecs::entity_t>(pe.id));
+                        asRelation = asRelation || p.has(gid, flecs::Wildcard);
+                        asTarget = asTarget || p.has(flecs::Wildcard, gid);
+                    }
+                    // A plain query skips prefabs, so this counts ordinary entities:
+                    // the tag being on the INSTANCES rather than on the prefab.
+                    int onInstances = 0;
+                    world.query_builder().with(gid).build().each(
+                        [&](flecs::entity) { ++onInstances; });
+
+                    qWarning("rpe: prefab group tag \"%s\" exists but no prefab carries it, so all "
+                             "%d prefab(s) stay ungrouped.%s%s%s Add the tag to the PREFAB entity "
+                             "itself (instances inherit it through is_a).",
+                             qPrintable(gname), prefabs.size(),
+                             onInstances ? " It IS on " : "",
+                             onInstances ? qPrintable(QStringLiteral("%1 non-prefab entit%2 — added to the "
+                                                                    "instances instead of the prefab?")
+                                                          .arg(onInstances)
+                                                          .arg(onInstances == 1 ? "y" : "ies"))
+                                         : "",
+                             (asRelation || asTarget)
+                                 ? " A prefab uses it as a PAIR, not a plain tag — a pair id is not "
+                                   "the tag id, so it cannot match."
+                                 : "");
+                }
+            }
+
             if (prefabs != _lastPrefabs)
             {
                 _lastPrefabs = prefabs;
