@@ -140,6 +140,7 @@ namespace rpe
                                         // (spread over pumps by the scan budget)
             double maxScanMs = 0.0;     // worst completed scan cycle since attach()
             double lastCatalogMs = 0.0; // duration of the most recent catalog scan
+            quint64 catalogScans = 0;   // add-component catalog rescans since attach()
         };
         PumpStats pumpStats() const
         {
@@ -157,13 +158,18 @@ namespace rpe
             _scanBudgetMs.store(ms, std::memory_order_relaxed);
         }
 
-        // Wall-clock intervals for the two FULL-WORLD scans the pump performs on the
-        // simulation thread: the entity list (every entity + its components) and the
-        // add-component catalog (every component type). These are the expensive,
-        // bursty parts of a pump — running them per-N-pumps (the old behaviour) tied
-        // their cost to the frame rate and produced periodic frame-time spikes.
-        // Defaults: entity list 500 ms, catalog 2000 ms. 0 = scan every pump.
+        // Wall-clock intervals for the periodic scans the pump performs on the
+        // simulation thread: the entity list (every entity + its components), and the
+        // spawnable-prefab list for the add-entity picker. Running them per-N-pumps
+        // (the old behaviour) tied their cost to the frame rate and produced periodic
+        // frame-time spikes.
+        // Defaults: entity list 500 ms, prefabs 2000 ms. 0 = scan every pump.
         // Structural changes and filter changes force an immediate rescan regardless.
+        //
+        // The add-COMPONENT catalog is not on a timer at all: it is rescanned only
+        // when a component type is registered or a bridge registration lands, since
+        // nothing else can change it. (The parameter keeps its old name for source
+        // compatibility.)
         void setScanIntervalsMs(int entityListMs, int catalogMs);
 
         // ── GUI thread: intent ───────────────────────────────────────────────────
@@ -235,6 +241,10 @@ namespace rpe
         // Last group-tag set seen from the intent queue: a change forces a prefab
         // rescan (the resync path only re-publishes the cached list).
         QStringList _lastPrefabGroups;
+        // Catalog is rescanned when the component set changes, not on a timer.
+        bool _catalogScanned = false;
+        int _catalogCompCount = -1;
+        uint64_t _catalogBridgeGen = 0;
         // "tags resolve but no prefab carries them" is diagnosed once per tag set.
         bool _warnedNoPrefabMatch = false;
 

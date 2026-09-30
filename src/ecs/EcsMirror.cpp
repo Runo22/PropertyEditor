@@ -136,6 +136,7 @@ namespace rpe
         // Re-diagnose against the new world: its tags/prefabs are different entities.
         _lastPrefabGroups.clear();
         _unresolvedGroups.clear();
+        _catalogScanned = false; // the new world's component set is unknown
         _warnedNoPrefabMatch = false;
         _pinRt.clear(); // component ids/types belong to the old world
         _pinGen = 0;
@@ -614,7 +615,7 @@ namespace rpe
             const int compCount = _componentQuery.count();
             const uint64_t bridgeGen = TypeBridge::registryGeneration();
             if (compCount != _lastComponentCount || bridgeGen != _bridgeGen
-                || requiredChanged || structuralApplied || _bridgedIds.empty())
+                || requiredChanged || _bridgedIds.empty())
             {
                 _lastComponentCount = compCount;
                 _bridgeGen = bridgeGen;
@@ -778,25 +779,21 @@ namespace rpe
 
         // ── Add-component catalog ──────────────────────────────────────────────────
         // The set of bridged component names in the world, for the GUI's "add
-        // component" picker. Scanning every component is cheap but not free, so it is
-        // throttled like the entity scan (the catalog rarely changes).
-        // A change to the group tags must invalidate the prefab list NOW. It used to
-        // wait for the 2 s catalog tick: setPrefabGroups() raises a resync, and the
-        // resync path deliberately re-publishes the CACHED lists rather than
-        // rescanning — so the GUI kept being handed the ungrouped list it already had
-        // until the timer came round.
-        const bool groupsChanged = (in.prefabGroups != _lastPrefabGroups);
-        _lastPrefabGroups = in.prefabGroups;
-        if (groupsChanged)
+        // component" picker. It only changes when a component TYPE is registered (the
+        // count of component entities grows) or a bridge registration lands (the
+        // registry generation moves) — so it is rescanned exactly then, not on a
+        // timer. On a timer it used to walk every component in the world every 2 s,
+        // on the sim thread, unsliced: with a few thousand components that was a
+        // periodic multi-hundred-ms stall.
+        const int catalogCompCount = _haveQuery ? _componentQuery.count() : -1;
+        const uint64_t catalogGen = TypeBridge::registryGeneration();
+        const bool catalogStale = !_catalogScanned || catalogCompCount != _catalogCompCount
+            || catalogGen != _catalogBridgeGen;
+        if (catalogStale || structuralApplied)
         {
-            // New tag set → the old diagnosis no longer applies.
-            _warnedNoPrefabMatch = false;
-        }
-        const bool scanCatalog =
-            structuralApplied || groupsChanged || (scanNow - _lastCatalogScan >= _catalogScanGap);
-        if (scanCatalog)
-        {
-            _lastCatalogScan = scanNow;
+            _catalogScanned = true;
+            _catalogCompCount = catalogCompCount;
+            _catalogBridgeGen = catalogGen;
             const auto catT0 = std::chrono::steady_clock::now();
             // Addable = bridged data components + zero-size TAGS (presence markers
             // need no bridge — there is nothing to inspect, only add/remove).
@@ -820,6 +817,30 @@ namespace rpe
                 _ch->publishCatalogEntries(catalog);
             }
             _stats.lastCatalogMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - catT0).count();
+            ++_stats.catalogScans;
+        }
+
+        // A change to the group tags must invalidate the prefab list NOW. It used to
+        // wait for the 2 s catalog tick: setPrefabGroups() raises a resync, and the
+        // resync path deliberately re-publishes the CACHED lists rather than
+        // rescanning — so the GUI kept being handed the ungrouped list it already had
+        // until the timer came round.
+        const bool groupsChanged = (in.prefabGroups != _lastPrefabGroups);
+        _lastPrefabGroups = in.prefabGroups;
+        if (groupsChanged)
+        {
+            // New tag set → the old diagnosis no longer applies.
+            _warnedNoPrefabMatch = false;
+        }
+        // Prefabs DO come and go at runtime, and are cheap to list (one query over
+        // prefab entities), so they keep the periodic cadence (setScanIntervalsMs'
+        // second argument) — plus an immediate rescan on a structural edit or a
+        // change of group tags.
+        const bool scanPrefabs =
+            structuralApplied || groupsChanged || (scanNow - _lastCatalogScan >= _catalogScanGap);
+        if (scanPrefabs)
+        {
+            _lastCatalogScan = scanNow;
 
             // ── Spawnable prefabs (add-entity picker) ─────────────────────────────
             // On the same cadence: prefab entities, filtered by the required component

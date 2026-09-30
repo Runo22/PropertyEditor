@@ -32,9 +32,11 @@ while (running) { world.progress(dt); mirror.pump(); }
 mirror.setMaxPumpRateHz(60);            // 0 = every frame (default). SET THIS on
                                         // uncapped/debug sims: the GUI only needs
                                         // 30–60 Hz, everything else is waste.
-mirror.setScanIntervalsMs(500, 2000);   // wall-clock throttle for the two
-                                        // FULL-WORLD scans (entity list, add-
-                                        // component catalog). Defaults shown.
+mirror.setScanIntervalsMs(500, 2000);   // wall-clock throttle for the periodic
+                                        // scans (entity list, spawnable prefabs).
+                                        // Defaults shown. The add-component
+                                        // catalog is rescanned only when the
+                                        // component set changes — never on a timer.
 mirror.setScanBudgetMsPerPump(1.0);     // the entity scan is INCREMENTAL: at most
                                         // this much labelling work per pump, the
                                         // list publishes when the cycle completes.
@@ -47,7 +49,8 @@ What runs when:
 |---|---|---|
 | Pump (watched-leaf reads + dedup) | every frame, capped by `setMaxPumpRateHz` | number of visible/pinned leaves |
 | Entity-list scan | `setScanIntervalsMs` first arg (forced by filter/structural changes) | world size; the `requiredComponent` filter narrows the query. Work is sliced by `setScanBudgetMsPerPump` (default 1 ms), so a big world costs a flat ~1 ms/pump instead of one spike; `pumpStats().lastScanMs` reports the whole cycle's total. |
-| Catalog scan | second arg | number of component types |
+| Prefab list | second arg (forced by structural edits / group-tag changes) | number of prefabs |
+| Add-component catalog | only when a component type or bridge registration appears | number of component types; name resolution is memoised, so a rescan is a few ms even with thousands of components |
 
 Everything else is cached and change-gated: the selected entity's component
 list rebuilds only when its **archetype (table)** or the TypeBridge registry
