@@ -232,6 +232,9 @@ namespace rpe
         // Group tags the host configured that the world does not (yet) know, so the
         // warning is emitted once per name instead of on every scan (sim thread).
         QSet<QString> _unresolvedGroups;
+        // Last group-tag set seen from the intent queue: a change forces a prefab
+        // rescan (the resync path only re-publishes the cached list).
+        QStringList _lastPrefabGroups;
 
         // Liveness/synchronisation token shared with the system callback and any
         // deferred install, so they no-op safely if this EcsMirror is destroyed

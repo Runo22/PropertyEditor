@@ -155,6 +155,50 @@ int main(int argc, char** argv)
     check("alias, groups set BEFORE setMirror",
           groupHeaderFor("Enemy", true) == leaf);
 
+    // ── Groups must take effect PROMPTLY, at the default scan intervals ────────
+    // setPrefabGroups() raises a resync, and the resync path deliberately
+    // re-publishes the CACHED lists rather than rescanning — so the group tags
+    // used to sit unused until the 2 s catalog tick came round.
+    {
+        Fixture fx;
+        rpe::EcsMirror mirror;
+        mirror.attach(&fx.world); // default intervals: 500 ms entities, 2 s catalog
+        rpe::EntityComponentBrowser browser;
+        browser.setEntityAddingEnabled(true);
+        browser.setMirror(&mirror);
+        browser.show();
+
+        // Let the first (ungrouped) prefab publish land and be cached.
+        for (int i = 0; i < 20; ++i)
+        {
+            fx.world.progress(0.016f);
+            QCoreApplication::processEvents();
+            QThread::msleep(4);
+        }
+        browser.setPrefabGroups(QVector<rpe::EntityComponentBrowser::PrefabGroup> {
+            { QStringLiteral("Enemy"), QIcon() } });
+
+        // A handful of frames — nowhere near the 2 s catalog interval.
+        for (int i = 0; i < 15; ++i)
+        {
+            fx.world.progress(0.016f);
+            QCoreApplication::processEvents();
+            QThread::msleep(4);
+        }
+        browser.entityList()->findChild<QToolButton*>()->click();
+        QCoreApplication::processEvents();
+        auto* popup = browser.entityList()->findChild<QFrame*>(QStringLiteral("rpeAddPopup"));
+        auto* tree = popup ? popup->findChild<QTreeWidget*>() : nullptr;
+        const bool grouped = tree && tree->topLevelItemCount() > 0 && tree->topLevelItem(0)->childCount() > 0;
+        check("groups apply within a few frames, not after the catalog interval", grouped);
+        if (popup)
+        {
+            popup->close();
+        }
+        QCoreApplication::processEvents();
+        mirror.detach();
+    }
+
     // ── A tag the world doesn't know must SAY so, once ─────────────────────────
     // This is what made the bug expensive: every prefab just came back ungrouped,
     // which reads as "grouping is broken" rather than "that name is wrong".

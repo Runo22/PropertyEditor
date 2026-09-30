@@ -133,6 +133,8 @@ namespace rpe
         _selRows.clear();
         _lastCompRows.clear();
         _lastPrefabs.clear(); // prefab ids belong to the old world
+        _lastPrefabGroups.clear();
+        _unresolvedGroups.clear();
         _pinRt.clear(); // component ids/types belong to the old world
         _pinGen = 0;
         _lastPinStr.clear();
@@ -776,7 +778,15 @@ namespace rpe
         // The set of bridged component names in the world, for the GUI's "add
         // component" picker. Scanning every component is cheap but not free, so it is
         // throttled like the entity scan (the catalog rarely changes).
-        const bool scanCatalog = structuralApplied || (scanNow - _lastCatalogScan >= _catalogScanGap);
+        // A change to the group tags must invalidate the prefab list NOW. It used to
+        // wait for the 2 s catalog tick: setPrefabGroups() raises a resync, and the
+        // resync path deliberately re-publishes the CACHED lists rather than
+        // rescanning — so the GUI kept being handed the ungrouped list it already had
+        // until the timer came round.
+        const bool groupsChanged = (in.prefabGroups != _lastPrefabGroups);
+        _lastPrefabGroups = in.prefabGroups;
+        const bool scanCatalog =
+            structuralApplied || groupsChanged || (scanNow - _lastCatalogScan >= _catalogScanGap);
         if (scanCatalog)
         {
             _lastCatalogScan = scanNow;
