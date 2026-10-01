@@ -93,6 +93,9 @@ namespace rpe
         void spawnPrefabRequested(qulonglong prefabId);
         // The user asked to delete an entity (trash glyph or the menu's "Delete").
         void removeEntityRequested(qulonglong entityId);
+        // The Add picker is about to open (the pointer reached the Add button, or
+        // it was clicked): a good moment for the producer to refresh what it offers.
+        void addPickerWanted();
 
     private slots:
         void _refresh();

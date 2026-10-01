@@ -80,6 +80,17 @@ namespace rpe
         connect(_componentList, &ComponentListWidget::addComponentRequested, this, &EntityComponentBrowser::_onAddComponent);
         connect(_componentList, &ComponentListWidget::removeComponentRequested, this, &EntityComponentBrowser::_onRemoveComponent);
         connect(_componentList, &ComponentListWidget::removeComponentIdRequested, this, &EntityComponentBrowser::_onRemoveComponentId);
+        // An Add menu is about to open: have the producer rescan what it offers. The
+        // catalog is otherwise rescanned only on a detectable change or a slow
+        // safety interval, which can miss a renamed / swapped-in component.
+        const auto refreshCatalog = [this] {
+            if (_channel)
+            {
+                _channel->requestCatalogRefresh();
+            }
+        };
+        connect(_componentList, &ComponentListWidget::addPickerWanted, this, refreshCatalog);
+        connect(_entityList, &EntityListWidget::addPickerWanted, this, refreshCatalog);
         connect(_propertyEditor, &PropertyEditor::propertyEdited, this, &EntityComponentBrowser::propertyEdited);
         connect(_writeCheck, &QCheckBox::toggled, this, &EntityComponentBrowser::_onWriteToggled);
     }

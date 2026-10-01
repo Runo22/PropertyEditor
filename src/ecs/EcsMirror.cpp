@@ -144,6 +144,9 @@ namespace rpe
         _lastPrefabGroups.clear();
         _unresolvedGroups.clear();
         _catalogScanned = false; // the new world's component set is unknown
+        _lastCatalogFullScan = {};
+        _warnedUnbridged.clear();
+        _unbridgedSince.clear();
         _warnedNoPrefabMatch = false;
         _pinRt.clear(); // component ids/types belong to the old world
         _pinMissing.clear();
@@ -770,7 +773,7 @@ namespace rpe
                     {
                         return; // no path → nothing to resolve (also avoids string_view(nullptr))
                     }
-                    if (QString::fromUtf8(pc).startsWith(QStringLiteral("flecs")))
+                    if (isFlecsBuiltinPath(QString::fromUtf8(pc)))
                     {
                         return; // skip flecs' own components
                     }
@@ -1010,9 +1013,18 @@ namespace rpe
         const uint64_t catalogGen = TypeBridge::registryGeneration();
         const bool catalogStale = !_catalogScanned || catalogCompCount != _catalogCompCount
             || catalogGen != _catalogBridgeGen;
-        if (catalogStale || structuralApplied)
+        // Two things the count + generation can't see: a component RENAMED (or moved
+        // to another scope) after it was scanned, and one component unloaded while
+        // another loaded within the same pump (count unchanged). Both are caught by
+        // the GUI asking for a refresh when an Add menu opens — where it matters —
+        // and, as a backstop, a slow periodic rescan. (Not the old 2 s timer: that
+        // full walk was the periodic sim stall; memoised it is cheap, but not free.)
+        constexpr std::chrono::seconds kCatalogSafetyGap { 10 };
+        const bool catalogDue = in.catalogRefresh || scanNow - _lastCatalogFullScan >= kCatalogSafetyGap;
+        if (catalogStale || catalogDue || structuralApplied)
         {
             _catalogScanned = true;
+            _lastCatalogFullScan = scanNow;
             _catalogCompCount = catalogCompCount;
             _catalogBridgeGen = catalogGen;
             const auto catT0 = std::chrono::steady_clock::now();
@@ -1026,6 +1038,41 @@ namespace rpe
                     // Full scoped path so the GUI's add picker can group by namespace;
                     // findComponentEntity accepts either the path or the leaf name.
                     catalog.append({ c.path.isEmpty() ? c.name : c.path, c.tag });
+                    _unbridgedSince.remove(c.path);
+                }
+                else if (!_warnedUnbridged.contains(c.path))
+                {
+                    // A data component with no bridge never appears in the menu (nor
+                    // in the component list) — the inspector can't read it without
+                    // the compile-time T that TypeBridge::registerType<T>() captures.
+                    // The common cause is a plugin that registered with RTTR and
+                    // forgot the bridge, which is silent otherwise. Say so — but only
+                    // when RTTR actually knows a type by that name, so the thousands
+                    // of components that simply have no reflection stay quiet.
+                    QString rttrName = c.path;
+                    rttrName.replace(QLatin1Char('.'), QStringLiteral("::"));
+                    rttr::type rt = rttr::type::get_by_name(rttrName.toStdString());
+                    if (!rt.is_valid())
+                    {
+                        rt = rttr::type::get_by_name(c.name.toStdString());
+                    }
+                    // Registering with flecs first and the bridge a moment later is a
+                    // normal plugin order — only a gap that PERSISTS is a mistake.
+                    constexpr std::chrono::seconds kUnbridgedGrace { 3 };
+                    const auto since = _unbridgedSince.constFind(c.path);
+                    if (rt.is_valid() && since == _unbridgedSince.constEnd())
+                    {
+                        _unbridgedSince.insert(c.path, scanNow);
+                    }
+                    else if (rt.is_valid() && scanNow - since.value() >= kUnbridgedGrace)
+                    {
+                        _warnedUnbridged.insert(c.path);
+                        qWarning("rpe: component \"%s\" has an RTTR type (\"%s\") but no TypeBridge "
+                                 "registration, so it can't be inspected or added from the menu. Call "
+                                 "rpe::TypeBridge::registerType<T>() (or RPE_REGISTER_COMPONENT(T)) where "
+                                 "it is registered — in the same rpe_core the host uses.",
+                                 qPrintable(c.path), rt.get_name().to_string().c_str());
+                    }
                 }
             }
             std::sort(catalog.begin(), catalog.end(),
@@ -1057,8 +1104,8 @@ namespace rpe
         // prefab entities), so they keep the periodic cadence (setScanIntervalsMs'
         // second argument) — plus an immediate rescan on a structural edit or a
         // change of group tags.
-        const bool scanPrefabs =
-            structuralApplied || groupsChanged || (scanNow - _lastCatalogScan >= _catalogScanGap);
+        const bool scanPrefabs = structuralApplied || groupsChanged || in.catalogRefresh
+            || (scanNow - _lastCatalogScan >= _catalogScanGap);
         if (scanPrefabs)
         {
             _lastCatalogScan = scanNow;
@@ -1462,7 +1509,7 @@ namespace rpe
                     }
                     const flecs::string rp = rel.path(".", "");
                     const QString relPath = rp.c_str() ? QString::fromUtf8(rp.c_str()) : QString();
-                    if (relPath.startsWith(QStringLiteral("flecs")))
+                    if (isFlecsBuiltinPath(relPath))
                     {
                         return;
                     }
@@ -1507,7 +1554,7 @@ namespace rpe
                 }
                 const flecs::string p = id.entity().path(".", "");
                 const QString qn = QString::fromUtf8(p.c_str());
-                if (qn.startsWith(QStringLiteral("flecs")))
+                if (isFlecsBuiltinPath(qn))
                 {
                     return;
                 }

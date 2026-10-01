@@ -181,6 +181,12 @@ namespace rpe
         // it last sent, so without this it would NOT resend identical data and the
         // reset view would stay empty. Call this to force one full resend.
         void requestResync();
+        // Ask the producer to rescan the add-component catalog and the spawnable
+        // prefabs on its next pump — e.g. because an Add menu is opening. Both are
+        // otherwise rescanned only on change (component count / bridge registry) and
+        // on a slow safety interval, which can't see every change (a renamed
+        // component, or one unloaded and another loaded in the same pump).
+        void requestCatalogRefresh();
 
         // Structural component edits (add/remove a component on an entity). Applied
         // on the simulation thread by the producer — structural world changes are
@@ -259,6 +265,7 @@ namespace rpe
             QVector<PinKey> pins;                                 // current pin set
             std::vector<std::pair<PinKey, rttr::variant>> pinEdits; // drained
             bool resync = false; // consumer reset its view → resend everything
+            bool catalogRefresh = false; // rescan catalog + prefabs now
         };
         Intent takeIntent();
         void publishEntities(const QVector<EntityEntry>& entities);
@@ -291,6 +298,7 @@ namespace rpe
         QVector<PinKey> _pins;
         std::vector<std::pair<PinKey, rttr::variant>> _pinEdits;
         bool _resync = false; // set by requestResync(), drained by takeIntent()
+        bool _catalogRefresh = false;
 
         // sim -> GUI
         QVector<EntityEntry> _outEntities;

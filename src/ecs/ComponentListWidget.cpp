@@ -2,6 +2,7 @@
 
 #include "PickerKeys.h"
 #include "rpe/core/TypeBridge.h"
+#include "rpe/ecs/ComponentScan.h"
 
 #include <QAction>
 #include <QEvent>
@@ -369,6 +370,7 @@ namespace rpe
         connect(_list, &QListWidget::currentItemChanged, this, &ComponentListWidget::_onSelectionChanged);
         connect(_list, &QListWidget::customContextMenuRequested, this, &ComponentListWidget::_onContextMenu);
         connect(_addBtn, &QToolButton::clicked, this, &ComponentListWidget::_onAddClicked);
+        _addBtn->installEventFilter(this); // hover → addPickerWanted (see eventFilter)
 
         // Filter, then walk the results without leaving the box (arrows select,
         // Enter hands focus to the list, Esc clears the filter). Installed after
@@ -441,6 +443,12 @@ namespace rpe
 
     bool ComponentListWidget::eventFilter(QObject* obj, QEvent* ev)
     {
+        // Pointer on the Add button: ask for a fresh catalog now, so it has usually
+        // landed by the time the click opens the picker.
+        if (obj == _addBtn && ev->type() == QEvent::Enter)
+        {
+            emit addPickerWanted();
+        }
         if ((obj == _list || obj == _list->viewport()) && ev->type() == QEvent::FocusOut)
         {
             static_cast<RemoveButtonDelegate*>(_rowDelegate)->clearConfirm();
@@ -476,6 +484,7 @@ namespace rpe
 
     void ComponentListWidget::_onAddClicked()
     {
+        emit addPickerWanted();
         // A small popup: a filter box over a tree of addable components grouped by
         // namespace. Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.
         auto* popup = new QFrame(this, Qt::Popup);
@@ -677,7 +686,7 @@ namespace rpe
                     }
                     const flecs::string rp = rel.path(".", "");
                     const QString relPath = rp.c_str() ? QString::fromUtf8(rp.c_str()) : QString();
-                    if (relPath.startsWith(QStringLiteral("flecs")))
+                    if (isFlecsBuiltinPath(relPath))
                     {
                         return;
                     }
@@ -717,7 +726,7 @@ namespace rpe
                 }
                 const flecs::string fp = comp.path(".", "");
                 const QString fullPath = fp.c_str() ? QString::fromUtf8(fp.c_str()) : QString();
-                if (fullPath.startsWith(QStringLiteral("flecs")))
+                if (isFlecsBuiltinPath(fullPath))
                 {
                     return;
                 }

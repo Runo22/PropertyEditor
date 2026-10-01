@@ -50,7 +50,7 @@ What runs when:
 | Pump (watched-leaf reads + dedup) | every frame, capped by `setMaxPumpRateHz` | number of visible/pinned leaves |
 | Entity-list scan | `setScanIntervalsMs` first arg (forced by filter/structural changes) | world size; the `requiredComponent` filter narrows the query. Work is sliced by `setScanBudgetMsPerPump` (default 1 ms), so a big world costs a flat ~1 ms/pump instead of one spike; `pumpStats().lastScanMs` reports the whole cycle's total. |
 | Prefab list | second arg (forced by structural edits / group-tag changes) | number of prefabs |
-| Add-component catalog | only when a component type or bridge registration appears | number of component types; name resolution is memoised, so a rescan is a few ms even with thousands of components |
+| Add-component catalog | when a component type or bridge registration appears, when an Add menu is about to open (pointer on the button), and every 10 s as a backstop | number of component types; name resolution is memoised, so a rescan is a few ms even with thousands of components |
 
 Everything else is cached and change-gated: the selected entity's component
 list rebuilds only when its **archetype (table)** or the TypeBridge registry

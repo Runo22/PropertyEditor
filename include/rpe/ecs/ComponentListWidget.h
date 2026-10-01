@@ -105,6 +105,9 @@ namespace rpe
         void removeComponentRequested(const QString& name);
         // By flecs id — emitted for rows that carry one (tags, pairs; mirror rows).
         void removeComponentIdRequested(qulonglong rawId);
+        // The Add picker is about to open (the pointer reached the Add button, or
+        // it was clicked): a good moment for the producer to refresh what it offers.
+        void addPickerWanted();
 
     protected:
         // Reverts a pending delete-confirm when the list loses focus.

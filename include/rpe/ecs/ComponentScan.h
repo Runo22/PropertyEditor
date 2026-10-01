@@ -26,6 +26,16 @@ namespace rpe
         int propertyCount = 0;
     };
 
+    // True for flecs' OWN scope — "flecs", "flecs.core.Identifier", "flecs::meta…".
+    // A user namespace that merely starts with those letters ("flecsx.Foo",
+    // "FlecsTools.Bar") is NOT built-in: a plain prefix test used to hide such
+    // components from the add menu, the component list and the entity scan alike.
+    inline bool isFlecsBuiltinPath(const QString& path)
+    {
+        return path == QLatin1String("flecs") || path.startsWith(QLatin1String("flecs."))
+            || path.startsWith(QLatin1String("flecs::"));
+    }
+
     // Enumerate the registered flecs components in `world` and report, for each,
     // whether TypeBridge can resolve it to an RTTR type. Use this to debug "my
     // component isn't listed": `bridged == false` means either no RTTR registration

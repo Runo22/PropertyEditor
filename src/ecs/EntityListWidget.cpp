@@ -228,6 +228,7 @@ namespace rpe
         connect(_list, &QListWidget::customContextMenuRequested, this, &EntityListWidget::_onContextMenu);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
         connect(_addBtn, &QToolButton::clicked, this, &EntityListWidget::_onAddEntityClicked);
+        _addBtn->installEventFilter(this); // hover → addPickerWanted (see eventFilter)
 
         // Filter, then walk the results without leaving the box (arrows select,
         // Enter hands focus to the list, Esc clears the filter). Installed after
@@ -252,6 +253,12 @@ namespace rpe
 
     bool EntityListWidget::eventFilter(QObject* obj, QEvent* ev)
     {
+        // Pointer on the Add button: ask for a fresh prefab list now, so it has
+        // usually landed by the time the click opens the picker.
+        if (obj == _addBtn && ev->type() == QEvent::Enter)
+        {
+            emit addPickerWanted();
+        }
         // The view selects a row on mouse PRESS. So the trash glyph's two-step confirm
         // is driven HERE, from the press, and the press is consumed — the row is never
         // selected, and clicking an unselected entity's trash deletes it without
@@ -367,6 +374,7 @@ namespace rpe
 
     void EntityListWidget::_onAddEntityClicked()
     {
+        emit addPickerWanted();
         // A small popup: a filter box over a tree of spawnable prefabs, grouped by
         // their group tag (with the host's optional icon on each group header).
         // Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.

@@ -46,6 +46,12 @@ namespace rpe
         _resync = true;
     }
 
+    void MirrorChannel::requestCatalogRefresh()
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _catalogRefresh = true;
+    }
+
     void MirrorChannel::queueStructural(StructuralKind kind, qulonglong entity, const QString& component)
     {
         std::lock_guard<std::mutex> lk(_m);
@@ -231,6 +237,8 @@ namespace rpe
         in.pinEdits.swap(_pinEdits);
         in.resync = _resync;
         _resync = false;
+        in.catalogRefresh = _catalogRefresh;
+        _catalogRefresh = false;
         return in;
     }
 

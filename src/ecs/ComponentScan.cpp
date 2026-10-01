@@ -29,7 +29,7 @@ namespace rpe
             const flecs::string fullPath = comp.path(".", "");
             const char* pc = fullPath.c_str();
             const QString path = pc ? QString::fromUtf8(pc) : QString();
-            if (!includeBuiltins && path.startsWith(QStringLiteral("flecs")))
+            if (!includeBuiltins && isFlecsBuiltinPath(path))
             {
                 return;
             }

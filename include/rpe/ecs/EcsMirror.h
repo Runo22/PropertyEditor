@@ -249,6 +249,9 @@ namespace rpe
         bool _catalogScanned = false;
         int _catalogCompCount = -1;
         uint64_t _catalogBridgeGen = 0;
+        std::chrono::steady_clock::time_point _lastCatalogFullScan {}; // safety rescan clock
+        QSet<QString> _warnedUnbridged; // RTTR-known components reported as missing a bridge
+        QHash<QString, std::chrono::steady_clock::time_point> _unbridgedSince; // first seen unbridged
         // "tags resolve but no prefab carries them" is diagnosed once per tag set.
         bool _warnedNoPrefabMatch = false;
 

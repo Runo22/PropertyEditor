@@ -156,6 +156,25 @@ file under **plugins ▸ output ▸ hud / ig**. Unscoped components sit under
 filter matches a component's full path, so typing a namespace (`hud`) narrows
 to that branch.
 
+### "My component isn't in the Add menu"
+
+A component is offered when **all** of these hold:
+
+1. it exists in the world as a named flecs component (`world.component<T>(…)`);
+2. it is **bridged** — `rpe::TypeBridge::registerType<T>()` (or
+   `RPE_REGISTER_COMPONENT(T)`) was called — or it is a zero-size tag. RTTR
+   registration alone is not enough: the inspector needs the compile-time `T` the
+   bridge captures. If RTTR knows the type but the bridge doesn't, rpe now warns
+   once on the console, naming the component;
+3. the bridge call reached the **same `rpe_core`** the host uses — a plugin that
+   links its own static copy registers into a registry the host never sees;
+4. its top-level namespace isn't in `hiddenAddNamespaces` (default: `settings`);
+5. the selected entity doesn't already have it.
+
+Plugins can register in any order (flecs first or bridge first, before or after
+the browser starts): the catalog follows component and bridge registrations, and
+is also refreshed whenever an Add menu is about to open.
+
 Top-level namespaces in `Settings::hiddenAddNamespaces` are not offered at all —
 by default `settings` (case-insensitive), for world-wide configuration
 components that are never added to an entity. Change it with
