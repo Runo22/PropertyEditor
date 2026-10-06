@@ -9,8 +9,10 @@ is selected automatically so the panels are never blank.
 - [Two modes](#two-modes) — direct vs. mirror
 - [Settings](#settings)
 - [Selection](#selection)
+- [Keyboard](#keyboard)
 - [Tags & pairs](#tags--pairs)
 - [Add / remove components](#add--remove-components)
+- [Health checks](#health-checks)
 - [Add entities (spawn from prefabs)](#add-entities-spawn-from-prefabs)
 - [Deleting + right-click menus](#deleting--right-click-menus)
   - [Custom menu actions & hooks](#custom-menu-actions--hooks)
@@ -158,29 +160,11 @@ to that branch.
 
 ## Health checks
 
-On-demand diagnostics, in `rpe/ecs/HealthCheck.h` — nothing runs or logs by
-itself; call them when something doesn't show, bind or edit the way you expect.
-No mirror or browser is needed. The world-taking ones read the world, so call
-them where you may touch it (the sim thread, after `progress()`):
-
-```cpp
-auto report = rpe::checkHealth(world, { "game::Player", { "game::npc::Enemy" } });
-qInfo().noquote() << report.toText(rpe::HealthIssue::Severity::Warning);
-```
-
-| function | finds |
-|---|---|
-| `checkComponents(world)` | **size-mismatch** (Error): a component bound to an RTTR type of another size — the "values look shifted" bug; **same-type-twice**: two components bound to one type; **ambiguous-name** / short-name-only bindings; **unbridged-rttr-type**: RTTR knows it by full name, TypeBridge doesn't; *unbridged-maybe* (a hint only — a same-short-name RTTR type exists); bridged types no component uses |
-| `checkTypeRegistry()` | two bridged types under one RTTR name; bridged types with no properties (markers) |
-| `checkRequiredComponent(world, name)` | not found / ambiguous / matched only by suffix or leaf — the filter's exact rule |
-| `checkPrefabGroups(world, tags)` | a tag `world.lookup()` can't find (dotted paths), or one no prefab carries |
-| `checkFlecsBuild()` | rpe compiled against one flecs version, the process running another; a debug flecs |
-| `checkHealth(world, options)` | all of the above that apply |
-
-Every issue has a severity, a stable `check` id, a `subject`, a `message` and
-usually a `fix`; `report.byCheck(id)` / `report.about(subject)` pick them out.
-`TypeBridge::explainResolve(name)` shows how one name resolves (alias, exact,
-scope suffix, short name) and which bridged types competed.
+When a component doesn't show, binds the wrong type, or the picker stays flat,
+ask: `rpe::checkHealth(world, { requiredComponent, prefabGroupTags })` returns a
+report of what's wrong and how to fix it — nothing runs or logs by itself. Call
+it on the simulation thread. Every check is listed in
+[health-checks.md](health-checks.md).
 
 ### "My component isn't in the Add menu"
 
@@ -336,4 +320,6 @@ clicked component's key and flecs id.
 ## Related
 
 - Pin properties to a cross-entity watch list: [pinned-properties.md](pinned-properties.md)
-- Edit semantics (LocalEdit drafts vs write-back): [getting-started.md](getting-started.md)
+- Edit semantics (LocalEdit drafts vs write-back): [getting-started.md](getting-started.md#edit-policies)
+- Component names, namespaces, plugins: [registering-types.md](registering-types.md)
+- What goes wrong and why: [pitfalls.md](pitfalls.md)

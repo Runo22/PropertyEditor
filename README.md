@@ -1,304 +1,115 @@
 # rpe — RTTR Property Editor
 
-A reusable, performance-oriented Qt property editor for C++ simulations, built on
-[RTTR](https://github.com/rttrorg/rttr) reflection, with an optional
-[flecs](https://github.com/SanderMertens/flecs) ECS browser. Think of it as a
-lightweight, embeddable "Details panel" in the spirit of Unreal Engine 5.
+A reusable, performance-oriented Qt property editor for C++ applications and
+simulations, built on [RTTR](https://github.com/rttrorg/rttr) reflection, with an
+optional [flecs](https://github.com/SanderMertens/flecs) ECS browser — a
+lightweight, embeddable "Details panel" in the spirit of Unreal Engine.
 
-It provides **two independent features**:
+**Full documentation: [`docs/`](docs/README.md).**
 
-1. **ECS Entity/Component/Property inspector** — a three-level browser:
-   `Entities → Components → Properties`, with the entity list optionally
-   filtered to those carrying a given component (e.g. a *Transform*). Designed to
-   update live from the world at 50 Hz+.
-2. **RTTR variant editor** — point it at any registered struct wrapped in an
-   `rttr::variant` (owned copy *or* a live external object) and it builds an
-   editor/inspector for it. No flecs dependency.
+## What it does
 
-Both share the same generic property grid: numbers, booleans, strings, enums,
-file paths, colors, **arrays/sequential containers**, and nested structs — all
-discovered automatically from RTTR metadata.
+- **Property grid** for any RTTR-registered type: numbers, booleans, strings,
+  enums and bitmask flags, file paths, colours, dates, durations, nested
+  structs, arrays, maps, `optional`, `shared_ptr` — discovered from reflection,
+  tuned with [editor hints](docs/editor-hints.md) (ranges, pickers, labels,
+  read-only).
+- **Standalone editors** — edit an owned copy (with a change callback) or an
+  object in place; no ECS needed. → [standalone-editors](docs/standalone-editors.md)
+- **ECS browser** — `Entities → Components → Properties` for a flecs world:
+  filtering, a required-component view, adding/removing components, spawning
+  prefabs, deleting entities, custom context menus, full keyboard driving.
+  → [ecs-browser](docs/ecs-browser.md)
+- **Threading mirror** — inspect and edit a world that runs on its own
+  simulation thread, with no lock in your loop. → [threading-mirror](docs/threading-mirror.md)
+- **Watch list** — pin properties of many entities into one live, editable list.
+  → [pinned-properties](docs/pinned-properties.md)
+- **Plugin-friendly** — types registered from plugin DLLs, in any order, with
+  hints and read-only locks that work across modules. → [registering-types](docs/registering-types.md)
+- **Health checks** — on-demand diagnostics for "why doesn't my component show
+  up / bind / edit as expected". → [health-checks](docs/health-checks.md)
 
-Topic guides live in [`docs/`](docs/README.md): getting started, standalone
-editors, the ECS browser, the threading mirror, and the pinned-properties
-watch list.
+## Quick start
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/rpe_demo
+```
+
+```cmake
+add_subdirectory(external/PropertyEditor)
+target_link_libraries(my_app PRIVATE rpe::gui)
+```
+
+```cpp
+#include <rpe/rpe.h>
+#include <rttr/registration.h>
+
+struct Light { double intensity = 1.0; QColor tint = Qt::white; };
+
+RTTR_REGISTRATION
+{
+    rttr::registration::class_<Light>("Light")
+        .property("intensity", &Light::intensity)(
+            rttr::metadata(rpe::hint::Min, 0.0), rttr::metadata(rpe::hint::Max, 100.0))
+        .property("tint", &Light::tint);
+}
+
+Light light;
+auto* editor = new rpe::PropertyEditor;
+editor->editObject(light);     // edits write straight into `light`
+editor->show();
+```
+
+Inspecting a flecs world that runs on a simulation thread:
+
+```cpp
+rpe::TypeBridge::registerTypes<Transform, Physics>();   // once per component type
+
+rpe::EcsMirror mirror;
+mirror.attach(&world);          // on the simulation thread
+mirror.setMaxPumpRateHz(60);    // for uncapped sims
+
+auto* browser = new rpe::EntityComponentBrowser;   // GUI thread
+browser->setMirror(&mirror);
+
+while (running) world.progress(dt);                 // your loop, unchanged
+```
+
+Before you ship it: read [getting-started → Use your flecs](docs/getting-started.md#use-your-flecs)
+and [pitfalls](docs/pitfalls.md).
 
 ## Layout
 
 ```
 include/rpe/
-  core/   engine-agnostic RTTR logic  → library rpe::core (shared)
-          PropertyNode, TypeRenderer, RttrBridge (path get/set),
-          RttrVariantWrapper, TypeBridge, EditorHints, AccessGuard, rttr_prelude
-  gui/    reusable Qt property-grid widgets  → library rpe::gui
-          PropertyModel, PropertyDelegate, EditorWidgets,
-          PropertyEditor, VariantEditor
-  ecs/    optional flecs integration (compiled with RPE_WITH_FLECS)  → rpe::gui
-          EntityListWidget, ComponentListWidget, EntityComponentBrowser,
-          EcsMirror (thread-safe sim/GUI bridge)
-src/      mirrors include/ ; test/ holds the demo app + mirror_test
-```
-
-## Build
-
-Requires CMake ≥ 3.21, a C++17 compiler, and Qt 5 (Widgets). RTTR and flecs are
-fetched automatically.
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-./build/rpe_demo          # three tabs: ECS browser, property editor, variant editor
-```
-
-Options: `-DRPE_WITH_FLECS=OFF` (drop the ECS layer), `-DRPE_BUILD_DEMO=OFF`,
-`-DRPE_USE_SYSTEM_DEPS=ON` (resolve rttr/flecs via `find_package` instead of
-FetchContent).
-
-Two library targets are produced:
-
-| Target              | Kind   | Links               | For |
-| ------------------- | ------ | ------------------- | --- |
-| `rpe::core`         | SHARED | QtCore/Gui, RTTR    | type registration, reflection bridge — link from plugins |
-| `rpe::gui` (`rpe::rpe`) | STATIC | rpe::core, QtWidgets, flecs | the widgets + ECS browser — link from the host |
-
-`rpe_core` is **shared on purpose**: the `TypeBridge`/RTTR registries live in it
-as a single process-wide instance, which a plugin architecture needs (see below).
-
-## Integrating into an existing application
-
-`add_subdirectory` (or FetchContent), then link the host against `rpe::gui`:
-
-```cmake
-add_subdirectory(external/PropertyEditor)
-target_link_libraries(my_app PRIVATE rpe::gui)     # or rpe::rpe (alias)
-```
-
-Dependency resolution is integration-friendly: if your build already defines the
-`RTTR::Core_Lib`/`RTTR::Core` or `flecs::flecs_static`/`flecs::flecs` targets,
-rpe links those and skips its own FetchContent. Otherwise set
-`RPE_USE_SYSTEM_DEPS=ON` to use installed packages, or leave it OFF to fetch
-pinned versions.
-
-The widgets are plain `QWidget`s — embed them in a `QDockWidget`, side panel,
-tab, or window. `EntityComponentBrowser` emits `entitySelected` /
-`componentSelected` (and id/name variants) so the host can mirror the
-inspector's selection (e.g. highlight the entity in a viewport).
-
-### Registering component types (plugins)
-
-To inspect/edit a component referenced by a raw pointer, its type needs a
-one-line bridge — RTTR cannot wrap a `void*` of a runtime type, so the
-compile-time `T` is captured once:
-
-```cpp
-rpe::TypeBridge::registerType<Transform>();          // or:
-rpe::TypeBridge::registerTypes<Transform, Physics>();
-RPE_REGISTER_COMPONENT(Transform);                   // macro form
-```
-
-Put this **next to your RTTR registration** (same translation unit, where `T` is
-complete) so the two share one lifetime. It's per-type-once, not per-use.
-
-* The registry is process-global and independent of any widget — register
-  before or after the browser exists; plugins loaded at runtime are picked up
-  immediately. `registerType` is idempotent (add/remove/add is safe).
-* `unregisterType` removes only the bridge entry; it never touches RTTR. You
-  rarely need it — RTTR has no unregister and its accessors point into the
-  defining module, so the safe pattern is host-owned, process-lifetime
-  registration.
-* **Single-registry requirement:** because `rpe_core` is shared, the host and
-  every plugin that links it see one registry. (A statically-linked core copied
-  into each module would split the registry and the browser wouldn't see a
-  plugin's types — this is why core is shared.)
-
-The widgets are plain `QWidget`s — embed them in a `QDockWidget`, a side panel,
-a tab, or a standalone window. `EntityComponentBrowser` additionally emits
-`entitySelected` / `componentSelected` so the host can mirror the inspector's
-selection (e.g. highlight the entity in a viewport).
-
-### Threading rules
-
-* All widget/model APIs are GUI-thread only, **except**
-  `PropertyEditor::setPropertyValue` / `PropertyModel::setPropertyValue`, which
-  may be called from any thread (values are coalesced and applied on the GUI
-  thread).
-* Painting never touches your data: the model caches all values, so Qt repaints
-  read only the cache. The world/object is touched only while refreshing,
-  enumerating entities/components, and committing WriteBack edits.
-
-**flecs world on a separate simulation thread.** A flecs world must not be
-accessed concurrently, and the GUI thread must never touch it directly. Two
-options:
-
-#### Mirror mode — recommended, no lock in your loop
-
-`EcsMirror` registers a once-per-frame system that runs *inside your existing
-`world.progress()`* on the sim thread. Each frame it snapshots the watched leaf
-values into self-contained copies and applies any edits the GUI queued. The GUI
-only reads those copies. Neither thread blocks; **you don't change your loop.**
-
-```cpp
-rpe::TypeBridge::registerTypes<Transform, Physics>();   // once, by your core
-
-rpe::EcsMirror mirror;
-mirror.attach(&world);                 // call on the sim thread (or before progress)
-mirror.setRequiredComponent("Transform");
-
-browser->setMirror(&mirror);           // instead of setWorld(); GUI never touches world
-
-// simulation thread — UNCHANGED, no mutex:
-while (running)
-    world.progress(dt);                // the mirror's system runs here
-```
-
-Costs: one value-copy per *watched* leaf per frame (only the fields currently
-expanded in the tree, when `setSnapshotOpenFieldsOnly(true)`, the default) and
-~1 frame of latency. The demo's ECS tab runs exactly this — a real `std::thread`
-advancing the world with no lock.
-
-**Which thread does what — this is the #1 source of crashes:**
-
-| Call | Thread |
-| ---- | ------ |
-| `mirror.attach()` / `mirror.detach()` / destroy the `EcsMirror` | the flecs thread (the one running `world.progress()`) |
-| your plugin's flecs registration (`world.component<T>()`, `entity.set<T>()`, creating entities) | the flecs thread |
-| `mirror.setInterest()` / `setRequiredComponent()` / `queueEdit()` / `poll*()` | any thread (lock-free channel) |
-| `new EntityComponentBrowser`, `browser->setMirror()`, all other browser/widget calls | the Qt GUI thread |
-
-A flecs world allows **only one thread at a time**. If anything mutates the world
-(creating entities/components, or `attach()` which adds a system) from a thread
-**other than the one running `progress()`**, it races the simulation and crashes
-— commonly later, inside `pump()` at `world.lookup(...)`. The fix is to do that
-work on the flecs thread.
-
-> ⚠️ Calling `mirror.attach()` from your *main* thread while the *flecs* thread
-> runs `progress()` is the classic mistake: `attach()` only auto-defers when it
-> detects readonly mode, which is only true *inside* `progress()` — from the main
-> thread it installs immediately and races. Run `attach()` on the flecs thread
-> (e.g. enqueue it as a task that the flecs thread executes), exactly as you would
-> your plugin's component registration.
-
-`browser->setMirror()` is the opposite: it touches QTimers/widgets, so it is
-GUI-thread-only. (It now auto-marshals to the GUI thread if you call it from
-another thread, but prefer calling it directly on the GUI thread with the mirror
-pointer.)
-
-**Other requirements:**
-
-* **Build flecs as one shared instance.** When the world is owned by the host
-  and inspected from a plugin DLL, host + rpe + plugins must link the *same*
-  flecs shared library (CMake default: `RPE_FLECS_SHARED=ON`). Two static flecs
-  copies operating on one world fault inside flecs (e.g. `ecs_get_world`).
-* **Under `world.set_threads(n)`** the mirror system runs `immediate()` so flecs
-  sequences it at a sync point (it declares no components, so otherwise flecs
-  would run it concurrently with the component-mutating worker systems).
-* **Destruction order is safe in any order.** The GUI (`EntityComponentBrowser`)
-  holds a `std::shared_ptr<MirrorChannel>`, not the `EcsMirror`. So you may
-  destroy the `EcsMirror` on the sim thread *before* the GUI tears down (the
-  usual shutdown / plugin-unload order): the browser keeps polling the channel,
-  which just returns nothing once the producer is gone — no dangling pointer. The
-  channel owns no flecs resources, so its final release on the GUI thread is
-  safe.
-
-#### Guard mode — simpler, if you can serialize world access
-
-If you *can* take a lock (or marshal onto the sim thread) around world access,
-install a guard and the browser routes every world touch through it:
-
-```cpp
-std::mutex worldMutex;                  // shared with your sim loop
-browser->setWorldAccess([&](const std::function<void()>& work) {
-    std::lock_guard<std::mutex> lock(worldMutex);
-    work();
-});
-// sim thread: { std::lock_guard lock(worldMutex); world.progress(dt); }
-```
-
-The guard runs `work` synchronously, exactly once; guards never nest, so a plain
-mutex suffices. It may instead marshal `work` onto the sim thread (command
-queue) and block until it ran. For a standalone `PropertyEditor` in WriteBack
-mode targeting sim-owned data, use `setWriteGuard` the same way.
-
-## Using the property editor
-
-```cpp
-#include <rpe/rpe.h>
-
-// 1) Reflect your type with RTTR (optionally add editor hints):
-RTTR_REGISTRATION {
-    rttr::registration::class_<Light>("Light")
-        .property("intensity", &Light::intensity)(
-            rttr::metadata(rpe::hint::Min, 0.0),
-            rttr::metadata(rpe::hint::Max, 100.0),
-            rttr::metadata(rpe::hint::Step, 0.5),
-            rttr::metadata(rpe::hint::Decimals, 2))
-        .property("iconPath", &Light::iconPath)(
-            rttr::metadata(rpe::hint::Editor, rpe::editor::FilePath))
-        .property("tint", &Light::tint)(
-            rttr::metadata(rpe::hint::Editor, rpe::editor::Color));
-}
-
-// 2a) Live read-only display (edits stay local drafts), fed from anywhere (thread-safe):
-auto* editor = new rpe::PropertyEditor;
-editor->bindType(rttr::type::get<Light>());
-editor->refresh(rttr::instance(light));                 // GUI thread, 50 Hz
-editor->setPropertyValue("intensity", 12.5);            // any thread
-
-// 2b) As a data editor (edits write straight into the object):
-editor->editObject(light);   // bind + WriteBack + instance provider in one call
-```
-
-### Edit policies
-
-* **LocalEdit** (default) — the edit is kept as a *local draft*: the row shows
-  your value and stops following the live stream until reset (right-click →
-  *Reset to live*, or *Reset All*). The object/world is never written.
-* **WriteBack** — edits are written straight into the bound object via
-  `RttrBridge::setValueByPath`, so the editor becomes a data-authoring tool.
-
-Switch with `setEditPolicy(...)`; the ECS browser exposes this as a
-*"Write edits back to world"* toggle.
-
-## ECS browser
-
-```cpp
-// Register a (void* -> typed instance) bridge once per component type:
-rpe::TypeBridge::registerTypes<Transform, Physics, Material>();
-
-auto* browser = new rpe::EntityComponentBrowser;
-browser->setWorld(&world);
-browser->setEntityComponentFilter("Transform");   // list only entities with it
-browser->setLiveUpdateIntervalMs(20);             // 50 Hz
-```
-
-Components are auto-discovered: a flecs component shows up when its name resolves
-to a registered `rttr::type` *and* a `TypeBridge` wrapper exists for it.
-
-## Variant editor (independent feature)
-
-```cpp
-auto* ve = new rpe::VariantEditor;
-ve->setVariant(rttr::variant(myStruct));   // edits an owned copy → ve->variant()
-ve->edit(myLiveStruct);                    // or edit an external object in place
+  core/  engine-agnostic reflection logic → rpe::core (SHARED: one registry per process)
+         TypeBridge, RttrBridge (path get/set), TypeRenderer, PropertyNode,
+         EditorHints, ReadOnly, OptionalSupport, FlagsSupport, PairSupport, AccessGuard
+  gui/   Qt property-grid widgets → rpe::gui
+         PropertyEditor, PropertyModel, PropertyDelegate, VariantEditor, DarkStyle
+  ecs/   flecs integration (RPE_WITH_FLECS) → rpe::gui
+         EntityComponentBrowser, EntityListWidget, ComponentListWidget,
+         PinnedPropertiesWidget, EcsMirror / MirrorChannel,
+         ComponentScan, ComponentRegistry (bindComponent), HealthCheck
+src/     mirrors include/
+test/    the demo app and the regression tests (one executable per test)
+docs/    the documentation
 ```
 
 ## Design notes
 
-* **Hot path is cheap.** The tree schema is built once in `bindType`; `refresh`
-  only re-reads values and emits tight `dataChanged` ranges. Sequential
-  containers are the only thing rebuilt, and only when their size changes. This
-  keeps many editors updating from the world inexpensive.
-* **Thread-safe injection.** `setPropertyValue` coalesces updates under a mutex
-  and flushes them on the GUI thread via a queued call.
-* **Type-erased access via `TypeBridge`.** RTTR has no public "instance from
-  `(type, void*)`" API, but a variant holding a `T*` acts as an instance of `T`.
-  `TypeBridge` registers the one-line, compile-time wrapper that produces that
-  typed pointer, which `RttrBridge` then drives for read/write by path.
-* **Why not PmPropertyGrid?** It was evaluated (the brief suggested it "if
-  convenient"). The in-repo `QAbstractItemModel` grid was kept instead: it gives
-  full control over the high-frequency live-update path and per-type editors
-  (the performance-critical requirement), needs no third-party GUI dependency,
-  and still covers the full range of editors (number/bool/string/enum/path/
-  color/array/nested). `RttrVariantWrapper` is the clean seam to adapt the data
-  to a different grid later if desired.
-```
+- **The hot path is cheap.** The tree schema is built once per bound type;
+  refreshing re-reads values and emits tight `dataChanged` ranges. Painting reads
+  only cached values — it never touches your data.
+- **The GUI never blocks the simulation.** In mirror mode the sim thread copies
+  only the watched leaf values after each frame; edits queue back. Scans are
+  wall-clock throttled and sliced so a big world costs a flat amount per frame.
+- **Type-erased access via `TypeBridge`.** RTTR can't make an instance from
+  `(type, void*)`, but a variant holding a `T*` acts as one; `TypeBridge`
+  captures the compile-time wrapper once per type. Components are worked on in
+  place — move-only types included.
+- **Why an in-repo grid** (not PmPropertyGrid): full control over the
+  high-frequency live-update path and per-type editors, no third-party GUI
+  dependency.

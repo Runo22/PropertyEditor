@@ -2,42 +2,87 @@
 
 ## Contents
 
-- [Build & integrate](#build--integrate)
-- [Register your types](#register-your-types)
+- [Build](#build)
+- [Integrate into your application](#integrate-into-your-application)
+- [Use your flecs](#use-your-flecs)
+- [Register a type](#register-a-type)
 - [The property editor in 10 lines](#the-property-editor-in-10-lines)
 - [Edit policies](#edit-policies)
 - [Trimmings](#trimmings)
+- [Where next](#where-next)
 
-## Build & integrate
+## Build
 
-The project builds two targets (see the root `CMakeLists.txt` / `README.md`
-for the full story):
+Requires CMake ≥ 3.21, a C++17 compiler and Qt 5 (≥ 5.12, Widgets). RTTR 0.9.6
+and flecs 4.x are fetched automatically unless you provide them.
 
-- **`rpe::core`** (SHARED) — RTTR logic, no widgets/flecs. **Must be shared** in
-  a plugin architecture: the host and every plugin have to link the *same*
-  `TypeBridge` registry instance, or the browser won't see plugin-registered
-  types.
-- **`rpe::gui`** (STATIC, alias `rpe::rpe`) — the Qt widgets and, with
-  `RPE_WITH_FLECS` (default ON), the flecs integration.
-
-```cmake
-add_subdirectory(PropertyEditor)      # or FetchContent
-target_link_libraries(myapp PRIVATE rpe::gui)
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/rpe_demo          # tabs: ECS browser, property editor, variant editor
 ```
 
-Dependencies (Qt5 ≥ 5.12, RTTR 0.9.6, flecs 4.x) resolve via existing targets,
-`find_package` (`RPE_USE_SYSTEM_DEPS=ON`), or FetchContent — in that order.
+| Option | Default | |
+|---|---|---|
+| `RPE_WITH_FLECS` | `ON` | the flecs integration (ECS browser, mirror, health checks) |
+| `RPE_BUILD_DEMO` | `ON` | the demo app and the tests |
+| `RPE_USE_SYSTEM_DEPS` | `OFF` | resolve RTTR/flecs with `find_package` instead of fetching |
+| `RPE_FLECS_SHARED` | `ON` | build/link flecs as a shared library — keep it ON when a world crosses a DLL boundary |
 
-> **MSVC note:** the library's own targets compile with `/utf-8`. If you
-> compile rpe sources through a different build system, keep that flag — the
-> sources contain UTF-8 string literals ("…") that otherwise turn into
-> mojibake ("â€¦") on Windows.
+Two library targets:
 
-One include pulls in everything: `#include <rpe/rpe.h>`.
+| Target | Kind | For |
+|---|---|---|
+| `rpe::core` | **SHARED** | type registration and the reflection bridge — link it from plugins |
+| `rpe::gui` (alias `rpe::rpe`) | STATIC | the widgets and the ECS browser — link it from the host |
 
-## Register your types
+`rpe_core` is shared **on purpose**: the TypeBridge registry lives there as one
+process-wide instance, which a plugin architecture needs.
 
-Properties become visible through RTTR registration:
+> **MSVC:** rpe's targets compile with `/utf-8`. If you build its sources some
+> other way, keep that flag — the sources contain UTF-8 literals that otherwise
+> turn into mojibake.
+
+## Integrate into your application
+
+```cmake
+add_subdirectory(external/PropertyEditor)     # or FetchContent
+target_link_libraries(my_app PRIVATE rpe::gui)
+```
+
+Dependencies resolve in this order: targets your build already defines
+(`RTTR::Core_Lib` / `RTTR::Core`, `flecs::flecs` / `flecs::flecs_static`) →
+`find_package` (with `RPE_USE_SYSTEM_DEPS=ON`) → FetchContent.
+
+One include pulls in everything: `#include <rpe/rpe.h>`. The widgets are plain
+`QWidget`s — put them in a dock, a side panel, a tab or a window.
+
+## Use your flecs
+
+**rpe and your application must use the same flecs — the same library and the
+same version.** rpe's own build fetches a pinned flecs; if your application
+uses another version, two flecs builds end up in one process and fail in ways
+that make no sense.
+
+Pick one:
+
+```cmake
+# 1) Best: add rpe AFTER your flecs target exists — rpe links it, fetches nothing.
+add_subdirectory(external/flecs)              # defines flecs::flecs
+add_subdirectory(external/PropertyEditor)
+
+# 2) Or point rpe's fetch at your flecs sources:
+#    cmake ... -DFETCHCONTENT_SOURCE_DIR_FLECS=/path/to/your/flecs
+
+# 3) Or an installed flecs: -DRPE_USE_SYSTEM_DEPS=ON
+```
+
+Then make sure only **one** flecs shared library is loaded at runtime.
+`rpe::checkFlecsBuild()` ([health checks](health-checks.md)) reports a version
+mismatch between the headers rpe was compiled against and the flecs actually
+running.
+
+## Register a type
 
 ```cpp
 #include <rpe/rpe.h>
@@ -45,118 +90,30 @@ Properties become visible through RTTR registration:
 
 struct Transform
 {
-    Vec3 position;                       // nested structs expand into sub-rows
+    Vec3 position;                    // nested structs expand into sub-rows
     double scale = 1.0;
-    std::vector<int> lodBias;            // arrays expand into per-element rows
-    std::filesystem::path meshPath;      // gets a file/folder picker editor
+    std::vector<int> lodBias;         // arrays expand into per-element rows
+    std::filesystem::path meshPath;   // gets a file/folder picker
 };
 
 RTTR_REGISTRATION
 {
-    rttr::registration::class_<Transform>("Transform")
+    rttr::registration::class_<Transform>("game::Transform")
         .property("position", &Transform::position)
         .property("scale", &Transform::scale)(
-            rttr::metadata(rpe::hint::Min, 0.01),   // editor hints (optional)
-            rttr::metadata(rpe::hint::Max, 100.0),
-            rttr::metadata(rpe::hint::Step, 0.1))
+            rttr::metadata(rpe::hint::Min, 0.01),     // editor hints (optional)
+            rttr::metadata(rpe::hint::Max, 100.0))
         .property("lodBias", &Transform::lodBias)
         .property("meshPath", &Transform::meshPath);
 }
+
+// For the ECS browser / mirror / in-place editing, also bridge it once:
+rpe::TypeBridge::registerType<Transform>();
 ```
 
-Available hints (`rpe/core/EditorHints.h`): `Min`, `Max`, `Step`, `Decimals`,
-`Editor` (`rpe::editor::FilePath` / `SaveFile` / `Directory` / `Color` /
-`Multiline`), `Label`, `Tooltip`, `ReadOnly`.
-
-Hints work wherever the type is registered — including a **plugin DLL**. (Use
-the `rpe::hint::*` constants, not raw `"rpe.min"` strings: RTTR compares a string
-key by address, and each module has its own copy of a literal.)
-
-### Read-only values
-
-A value is shown but **never opens an editor** when any of these hold — the row
-keeps its normal look, gets a small faint lock at the right edge, and its tooltip
-says why:
-
-- the property has **no setter** (`property_readonly(...)`, or a getter-only
-  `property(...)`) — editing it, or any field *below* it, would only write into a
-  temporary copy;
-- the property carries `rttr::metadata(rpe::hint::ReadOnly, true)`;
-- its **type is locked** — wherever that type appears (the whole component, or a
-  struct inside one):
-
-  ```cpp
-  // RTTR side, for a type you register yourself:
-  registration::class_<Tuning>("Tuning")(metadata(rpe::hint::ReadOnly, true)) ...;
-  // Runtime, from anywhere — e.g. the host locking a plugin's type, even before it loads:
-  rpe::TypeBridge::setReadOnly<Tuning>();          // or setReadOnly("audio::Tuning")
-  rpe::TypeBridge::setReadOnly<Tuning>(false);     // unlock
-  ```
-
-The property grid, the watch list and the mirror (on the sim thread) all apply
-the same rule (`rpe::readOnlyReason`), so none of them is a way around it.
-
-A few type-specific behaviours:
-
-- **`std::string_view` / `std::wstring_view`** properties display their text
-  but are deliberately read-only (the view points into memory the object owns
-  — editing it through the grid would be unsafe).
-- **`std::wstring`** is fully supported alongside `std::string` and `QString`:
-  it displays and edits with the same line-edit / multiline / color / path
-  editors.
-- **`std::pair<A, B>`** just needs its `first`/`second` registered like any
-  struct — plain RTTR registration is enough, nothing rpe-specific is
-  required. `rpe::registerPair<int, double>();` (from `rpe/core/PairSupport.h`)
-  is a one-line shorthand for exactly that (an `RPE_REGISTER_PAIR` macro form
-  also exists). The pair then behaves like a two-field struct everywhere,
-  including inside containers.
-- **Small structs (≤ 4 fields)** show a compact `[x, y, z]` summary in the
-  value column while their row is collapsed; expanding the row hides the
-  summary and the fields edit individually. Wider structs show nothing when
-  collapsed; arrays always show their element count `[N]`.
-- **All standard strings** edit inline: `std::string`, `std::wstring`,
-  `std::u16string`, `std::u32string`, `QString`.
-- **`std::optional<T>`** displays `(none)` when empty and edits/engages its
-  inner value — add `RPE_REGISTER_OPTIONAL(T);` next to your registrations
-  (see `rpe/core/OptionalSupport.h`).
-- **`std::map` / `std::unordered_map`** expand into one row per key (rows are
-  sorted by key so `unordered_map` doesn't reshuffle between refreshes); the
-  values edit like array elements, addressed as `scores.[alice]` in dot-paths.
-  Keys themselves are not editable from the grid, and string keys containing
-  `.` or `]` are not addressable.
-- **`std::shared_ptr<T>`** expands to the pointee's fields and edits mutate
-  the pointed-to object in place; a null pointer shows blank fields (safely).
-- **`std::chrono` durations** (the six standard aliases, `nanoseconds` through
-  `hours`) display and edit as their tick count with the unit as suffix
-  (`250 ms`).
-- **`QDateTime`** gets a calendar-popup date/time editor, displayed as
-  `yyyy-MM-dd HH:mm:ss`.
-- **Bitmask / flags enums** — mark the property with
-  `rttr::metadata(rpe::hint::Flags, true)` to show the value decomposed
-  (`Fire | Poison`, with `0xNN` for any un-named leftover bits) and edit it
-  through a multi-check dropdown. Enums are never auto-detected as flags (a
-  plain enum whose values happen to be powers of two would be misread) — the
-  hint is the opt-in. **Editing** a combined value additionally needs the enum
-  registered once with `RPE_REGISTER_FLAGS(Damage);` (see
-  `rpe/core/FlagsSupport.h`): RTTR 0.9.6 cannot build an enum from an integer
-  without the compile-time type. Display works with the hint alone.
-
-For anything that types a **raw pointer** (the ECS browser, mirror mode,
-`VariantEditor::setLinked`), additionally register the bridge next to the RTTR
-registration:
-
-```cpp
-rpe::TypeBridge::registerType<Transform>();   // or RPE_REGISTER_COMPONENT(Transform)
-rpe::TypeBridge::registerTypes<A, B, C>();    // several at once
-```
-
-The type may be **move-only** (copy constructor deleted, e.g. it owns a resource
-through a move-only base): rpe works on components in place through a pointer and
-only ever copies individual property values. RTTR registration is optional for
-such a type — with none, it still lists as a component, can be added and removed
-from the browser, and simply shows no fields. If you do register it with RTTR,
-don't use `policy::ctor::as_object` for its constructor (that needs a copy), and
-don't register a property whose own type is move-only.
+The details — names and namespaces, plugins, move-only types, special types —
+are in [registering-types.md](registering-types.md); every hint is in
+[editor-hints.md](editor-hints.md).
 
 ## The property editor in 10 lines
 
@@ -167,37 +124,46 @@ auto* editor = new rpe::PropertyEditor;
 editor->editObject(t);        // bind type + WriteBack + instance provider
 editor->show();
 
-// or read-only live display, fed from anywhere:
+// …or a read-only live display, fed from anywhere:
 editor->bindType(rttr::type::get<Transform>());
 editor->refresh(rttr::instance(t));               // GUI thread
 editor->setPropertyValue("scale", 2.0);           // ANY thread (coalesced)
 ```
 
+For an editor without the ECS browser (owned copy or in place), see
+[standalone-editors.md](standalone-editors.md).
+
 ## Edit policies
 
 | Policy | What a committed edit does |
 |---|---|
-| `EditPolicy::LocalEdit` (default) | Kept as a **local draft**: the row shows your value (amber) and stops following live updates until *Reset to live* / *Reset All*. **The object/world is never written.** |
-| `EditPolicy::WriteBack` | Written straight into the bound object via the instance provider (optionally under a `setWriteGuard` for objects owned by another thread). |
+| `EditPolicy::LocalEdit` (default) | kept as a **local draft**: the row shows your value (amber) and stops following live updates until *Reset to live* / *Reset All*. The object/world is never written |
+| `EditPolicy::WriteBack` | written straight into the bound object through the instance provider (optionally under `setWriteGuard` for objects another thread owns) |
 
-In **mirror mode** the browser routes edits through the mirror's edit queue to
-the simulation thread regardless of policy — see
-[threading-mirror.md](threading-mirror.md).
+In **mirror mode** the browser sends edits to the simulation thread regardless
+of the policy — see [threading-mirror.md](threading-mirror.md).
 
 ## Trimmings
 
 ```cpp
-rpe::TypeRenderer::setFloatDecimals(3);        // fixed-point float display (default 3)
+rpe::TypeRenderer::setFloatDecimals(3);        // float display precision (default 3)
 editor->setToolbarVisible(false);              // hide the filter/reset row
-editor->setReadOnly(true);
-qApp->setStyleSheet(rpe::darkStyleSheet());    // built-in dark theme (optional to apply)
+editor->setReadOnly(true);                     // inspector-only
+qApp->setStyleSheet(rpe::darkStyleSheet());    // built-in dark theme (optional)
 ```
 
-**Right-click a property row** for **Copy value**, **Copy name**, and
-**Copy "name = value"** (all work in read-only mode), plus Local edit / Reset
-and — when enabled — Pin to watch list.
+**Right-click a row** for *Copy value*, *Copy name* and *Copy "name = value"*
+(also in read-only mode), *Local edit* / *Reset*, and — when enabled — *Pin to
+watch list*.
 
 The toolbar **filter** matches a row's **value** as well as its name, so typing
-`7.5`, `true`, or a struct's `[1, 2]` summary narrows the tree (matched rows keep
-their ancestors visible). It only re-runs on filter-text change, so live values
-cost nothing at steady state.
+`7.5`, `true`, or a struct's `[1, 2]` summary narrows the tree. It only re-runs
+when the filter text changes, so live values cost nothing at steady state.
+
+## Where next
+
+| | |
+|---|---|
+| Inspect a flecs world | [ecs-browser.md](ecs-browser.md) |
+| The world runs on its own thread | [threading-mirror.md](threading-mirror.md) |
+| Something doesn't show / bind | [health-checks.md](health-checks.md), [pitfalls.md](pitfalls.md) |
