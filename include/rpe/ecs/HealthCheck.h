@@ -95,9 +95,16 @@ namespace rpe
     //                                  types and one was picked by a tie-break
     //   "short-name-only"     Info     it bound only through its leaf name
     //   "unbridged-rttr-type" Warning  RTTR knows a type by this component's FULL
-    //                                  name, but TypeBridge doesn't: not shown/addable
-    //   "unbridged-maybe"     Info     not bridged; an unbridged RTTR type with the
-    //                                  same SHORT name exists — possibly this one
+    //                                  name, entities carry it, but TypeBridge doesn't:
+    //                                  it is invisible. (Info when no entity carries it
+    //                                  yet — it may still be meant for the Add menu.)
+    //   "unbridged-maybe"     Info     a USED component is not bridged; an unbridged
+    //                                  RTTR type with the same SHORT name exists —
+    //                                  possibly this one
+    //   Never reported as unbridged: VALUE types — anything that appears inside a
+    //   bridged type (Vec3 as Transform::pos, std::optional<int> as a field), which
+    //   RTTR knows as a field and flecs may know as a component for its own reasons —
+    //   and std:: types.
     //   "unused-bridge"       Info     a bridged type no component in this world uses
     //                                  (plugin not loaded? a different flecs name?)
     HealthReport checkComponents(const flecs::world& world);

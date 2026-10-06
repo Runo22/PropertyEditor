@@ -1,6 +1,7 @@
 // On-demand health checks (rpe/ecs/HealthCheck.h) — each check triggered by the
 // situation it exists for, plus the false positive the old automatic
 // "has an RTTR type but no TypeBridge registration" qWarning produced.
+#include <rpe/core/OptionalSupport.h>
 #include <rpe/core/TypeBridge.h>
 #include <rpe/ecs/HealthCheck.h>
 
@@ -10,6 +11,7 @@
 
 #include <cstdio>
 #include <memory>
+#include <optional>
 
 namespace game
 {
@@ -79,6 +81,24 @@ struct Unused
 {
     int v = 0;
 };
+namespace plug
+{
+    struct UsedRttrOnly // RTTR-registered, unbridged, and CARRIED by an entity
+    {
+        int v = 0;
+    };
+}
+// Value types: known to RTTR as FIELDS of a bridged component, and to flecs as
+// components for its own reasons — the reported false positives.
+struct Vec3
+{
+    double x = 0, y = 0, z = 0;
+};
+struct Body
+{
+    Vec3 pos;
+    std::optional<int> tag;
+};
 namespace audio
 {
     class Marker // move-only, no RTTR registration at all
@@ -106,6 +126,9 @@ RTTR_REGISTRATION
     registration::class_<b::Dup>("Dup").property("w", &b::Dup::w);
     registration::class_<Unused>("Unused").property("v", &Unused::v);
     registration::class_<Settings>("Settings").property("v", &Settings::v);
+    registration::class_<plug::UsedRttrOnly>("plug::UsedRttrOnly").property("v", &plug::UsedRttrOnly::v);
+    registration::class_<Vec3>("Vec3").property("x", &Vec3::x).property("y", &Vec3::y).property("z", &Vec3::z);
+    registration::class_<Body>("Body").property("pos", &Body::pos).property("tag", &Body::tag);
 }
 
 static int g_fails = 0;
@@ -136,6 +159,8 @@ int main(int argc, char** argv)
 
     rpe::TypeBridge::registerTypes<game::Stats, ai::Stats, Transform, Glow, a::Dup, b::Dup, Unused>();
     rpe::TypeBridge::registerType<audio::Marker>(); // move-only, no RTTR registration
+    rpe::TypeBridge::registerType<Body>();
+    RPE_REGISTER_OPTIONAL(int);
 
     flecs::world w;
     w.component<game::Stats>("game::Stats");
@@ -148,6 +173,13 @@ int main(int argc, char** argv)
     w.component<Glow>("fx::Glow");
     w.component<audio::Marker>("audio::Marker");
     w.component<AudioSettings>("audio::Settings");
+    w.entity("Speaker").set<AudioSettings>({}).set<Gizmo>({}); // short-name hints only apply to USED components
+    w.component<plug::UsedRttrOnly>("plug::UsedRttrOnly");
+    w.entity("Carrier").set<plug::UsedRttrOnly>({ 1 });
+    w.component<Body>("Body");
+    w.component<Vec3>("Vec3");            // flecs knows the value types too…
+    w.component<std::optional<int>>();    // …as "std.optional<int>"
+    w.entity("B").set<Body>({});
     w.component<a::Dup>("a::Dup");
     w.component<b::Dup>("b::Dup");
 
@@ -167,7 +199,22 @@ int main(int argc, char** argv)
                                      == rpe::HealthIssue::Severity::Error);
     check("an ambiguous short-name binding is reported", has(comps, "ambiguous-name", "render.Stats"));
     check("one type bound by two components is reported", has(comps, "same-type-twice", "ai::Stats"));
-    check("RTTR-registered by FULL name but unbridged → warning", has(comps, "unbridged-rttr-type", "plug.RttrOnly"));
+    {
+        flecs::world idle;
+        idle.component<Gizmo>("plug::Gizmo"); // same short-name hint — but nothing uses it
+        check("a short-name hint for a component NO entity uses stays silent",
+              rpe::checkComponents(idle).about(QStringLiteral("plug.Gizmo")).isEmpty());
+    }
+    check("RTTR-registered, unbridged, CARRIED by an entity → Warning",
+          has(comps, "unbridged-rttr-type", "plug.UsedRttrOnly")
+              && comps.about(QStringLiteral("plug.UsedRttrOnly")).first().severity == rpe::HealthIssue::Severity::Warning);
+    check("RTTR-registered, unbridged, on NO entity yet → only Info",
+          has(comps, "unbridged-rttr-type", "plug.RttrOnly")
+              && comps.about(QStringLiteral("plug.RttrOnly")).first().severity == rpe::HealthIssue::Severity::Info);
+    check("a VALUE type of a bridged component (Vec3 in Body::pos) is not reported",
+          comps.about(QStringLiteral("Vec3")).isEmpty());
+    check("std::optional<int> (a value type, and std::) is not reported",
+          comps.about(QStringLiteral("std.optional<int>")).isEmpty());
     check("an unbridged same-SHORT-name RTTR type → only a hint", has(comps, "unbridged-maybe", "plug.Gizmo"));
     // The old automatic qWarning's false positive: an unbridged engine component that
     // merely SHARES A SHORT NAME with some RTTR type ("audio.Settings" vs an unrelated

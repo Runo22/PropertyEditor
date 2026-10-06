@@ -1,6 +1,7 @@
 #include "rpe/ecs/HealthCheck.h"
 
 #include "rpe/core/TypeBridge.h"
+#include "rpe/core/TypeRenderer.h"
 #include "rpe/ecs/ComponentScan.h"
 
 #include <QHash>
@@ -38,6 +39,59 @@ namespace rpe
             default:
                 return "INFO";
             }
+        }
+
+        // Every type that appears INSIDE a bridged type — as a property, a container
+        // element, an optional's value — recursively. Such a type is a VALUE type
+        // (Vec3 in Transform::pos, std::optional<int> in Body::tag): RTTR knows it
+        // so the editor can show it as a field, and flecs may know it as a
+        // component for its own reasons, but it was never meant to be bridged.
+        QSet<rttr::type::type_id> valueTypesOfBridged()
+        {
+            QSet<rttr::type::type_id> seen;
+            QVector<rttr::type> work;
+            const auto add = [&](rttr::type t) {
+                if (t.is_valid() && !seen.contains(t.get_id()))
+                {
+                    seen.insert(t.get_id());
+                    work.append(t);
+                }
+            };
+            const auto addWithParts = [&](rttr::type t) {
+                add(t);
+                add(TypeRenderer::rawType(t));
+                for (const rttr::type& a : t.get_template_arguments())
+                {
+                    add(a);
+                }
+            };
+            for (const rttr::type& b : TypeBridge::registeredTypes())
+            {
+                for (const rttr::property& p : TypeRenderer::rawType(b).get_properties())
+                {
+                    addWithParts(p.get_type());
+                }
+            }
+            for (int i = 0; i < work.size(); ++i) // grows while we walk
+            {
+                const rttr::type t = work[i]; // copy: `work` may reallocate below
+                for (const rttr::property& p : TypeRenderer::rawType(t).get_properties())
+                {
+                    addWithParts(p.get_type());
+                }
+                for (const rttr::type& a : t.get_template_arguments())
+                {
+                    addWithParts(a);
+                }
+            }
+            return seen;
+        }
+
+        // Standard-library types (std::optional<int>, std::string, …) are never
+        // the application's components to bridge, whatever flecs registered.
+        bool isStdPath(const QString& path)
+        {
+            return path.startsWith(QLatin1String("std.")) || path.startsWith(QLatin1String("std::"));
         }
 
         // Named, non-built-in component entities: what the browser can list.
@@ -205,8 +259,9 @@ namespace rpe
         HealthReport r;
         QHash<rttr::type::type_id, QStringList> boundBy; // RTTR type → components binding it
         QHash<rttr::type::type_id, rttr::type> boundType;
+        const QSet<rttr::type::type_id> valueTypes = valueTypesOfBridged();
 
-        forEachComponent(world, [&](flecs::entity, const QString& path, const QString& leaf, int32_t size) {
+        forEachComponent(world, [&](flecs::entity comp, const QString& path, const QString& leaf, int32_t size) {
             const TypeBridge::ResolveExplanation why = TypeBridge::explainResolve(path.toStdString());
             using Via = TypeBridge::ResolveExplanation::Via;
 
@@ -263,31 +318,58 @@ namespace rpe
                 return;
             }
 
-            if (size <= 0)
+            if (size <= 0 || isStdPath(path))
             {
-                return; // an unbridged TAG is fine: it's addable without a bridge
+                return; // an unbridged TAG is addable without a bridge; std:: types aren't components
             }
 
-            // Not bridged. Only say something when RTTR knows a candidate type.
+            // Not bridged. Only say something when RTTR knows a candidate type that
+            // isn't simply a VALUE type of some bridged component (see above) — the
+            // false positives an automatic warning used to produce: "Vec3",
+            // "std::optional<int>", … known to RTTR as fields, to flecs as components.
             QString full = path;
             full.replace(QLatin1Char('.'), QStringLiteral("::"));
             const rttr::type exact = rttr::type::get_by_name(full.toStdString());
             if (exact.is_valid() && !TypeBridge::has(exact))
             {
-                r.issues.append(issue(Sev::Warning, "unbridged-rttr-type", path,
-                                      QStringLiteral("RTTR knows %1, but TypeBridge doesn't — the component is "
-                                                     "neither shown nor offered in the Add menu.")
-                                          .arg(typeName(exact)),
-                                      QStringLiteral("Call rpe::TypeBridge::registerType<%1>() (in the same "
-                                                     "rpe_core the host uses).")
-                                          .arg(typeName(exact))));
+                if (valueTypes.contains(exact.get_id()))
+                {
+                    return;
+                }
+                // Carried by entities → it IS used as a component, and invisible:
+                // a warning. Unused so far → it may still be meant for the Add menu,
+                // but nothing is visibly wrong yet: a note.
+                const int32_t users = ecs_count_id(world.c_ptr(), comp.id());
+                if (users > 0)
+                {
+                    r.issues.append(issue(Sev::Warning, "unbridged-rttr-type", path,
+                                          QStringLiteral("%1 entit%2 carry it and RTTR knows %3, but TypeBridge "
+                                                         "doesn't — it is neither shown nor offered in the Add menu.")
+                                              .arg(users)
+                                              .arg(users == 1 ? QStringLiteral("y") : QStringLiteral("ies"))
+                                              .arg(typeName(exact)),
+                                          QStringLiteral("Call rpe::TypeBridge::registerType<%1>() (in the same "
+                                                         "rpe_core the host uses).")
+                                              .arg(typeName(exact))));
+                }
+                else
+                {
+                    r.issues.append(issue(Sev::Info, "unbridged-rttr-type", path,
+                                          QStringLiteral("RTTR knows %1 and flecs has it as a component, but no "
+                                                         "entity carries it and TypeBridge doesn't know it.")
+                                              .arg(typeName(exact)),
+                                          QStringLiteral("If it's meant to be added from the Add menu, call "
+                                                         "rpe::TypeBridge::registerType<%1>().")
+                                              .arg(typeName(exact))));
+                }
                 return;
             }
             // A same-SHORT-name type is only a hint — and only if that type isn't
-            // already bridged (then it belongs to some other component: that was
-            // the false positive the old automatic warning produced).
+            // already bridged (then it belongs to some other component), isn't a
+            // value type of one, and the component is actually in use.
             const rttr::type byLeaf = rttr::type::get_by_name(leaf.toStdString());
-            if (byLeaf.is_valid() && !TypeBridge::has(byLeaf))
+            if (byLeaf.is_valid() && !TypeBridge::has(byLeaf) && !valueTypes.contains(byLeaf.get_id())
+                && ecs_count_id(world.c_ptr(), comp.id()) > 0)
             {
                 r.issues.append(issue(Sev::Info, "unbridged-maybe", path,
                                       QStringLiteral("Not bridged. RTTR has an unbridged type with the same short "
