@@ -356,6 +356,13 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_component_discovery_test test/component_discovery_test.cpp)
     target_link_libraries(rpe_component_discovery_test PRIVATE rpe_gui)
 
+    # A stand-in plugin: a SEPARATE shared library registering hinted types, so the
+    # cross-module metadata lookup is exercised for real.
+    add_library(rpe_test_hint_plugin SHARED test/plugin/hint_plugin.cpp)
+    target_link_libraries(rpe_test_hint_plugin PRIVATE rpe_core)
+    add_executable(rpe_plugin_hints_test test/plugin_hints_test.cpp)
+    target_link_libraries(rpe_plugin_hints_test PRIVATE rpe_gui rpe_test_hint_plugin)
+
     add_executable(rpe_same_rttr_name_test test/same_rttr_name_test.cpp)
     target_link_libraries(rpe_same_rttr_name_test PRIVATE rpe_gui)
 

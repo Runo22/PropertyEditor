@@ -27,7 +27,7 @@ namespace rpe
             return rttr::type::get<void>().get_property(std::string());
         }
 
-        QString metaString(const rttr::property& p, const char* key)
+        QString metaString(const rttr::property& p, hint::Key key)
         {
             if (!p.is_valid())
             {
@@ -43,7 +43,7 @@ namespace rpe
             return ok ? QString::fromStdString(s) : QString();
         }
 
-        bool metaBool(const rttr::property& p, const char* key, bool def)
+        bool metaBool(const rttr::property& p, hint::Key key, bool def)
         {
             if (!p.is_valid())
             {
@@ -59,7 +59,7 @@ namespace rpe
 
         // Returns the metadata value as a QVariant(double) if present & numeric, else
         // an invalid QVariant (so the delegate can apply its own default).
-        QVariant metaNumber(const rttr::property& p, const char* key)
+        QVariant metaNumber(const rttr::property& p, hint::Key key)
         {
             if (!p.is_valid())
             {
