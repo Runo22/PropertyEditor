@@ -185,6 +185,11 @@ namespace rpe
             return;
         }
         varedit::setEditorData(editor, index.data(RttrVariantRole).value<rttr::variant>());
+        const rttr::variant declared = index.data(DeclaredTypeRole).value<rttr::variant>();
+        varedit::rememberOpeningValue(editor,
+                                      declared.is_valid()
+                                          ? TypeRenderer::rawType(declared.get_value<rttr::type>())
+                                          : TypeRenderer::rawType(index.data(RttrVariantRole).value<rttr::variant>().get_type()));
     }
 
     void PropertyDelegate::setModelData(QWidget* editor, QAbstractItemModel* model, const QModelIndex& index) const
@@ -203,6 +208,13 @@ namespace rpe
 
         const rttr::variant newVal = varedit::readEditorData(editor, t);
 
+        // Left as it was opened → nothing to write. Treated as a cancel, so the row
+        // goes back to following live values. (Writing it would, for a value outside
+        // the editor's Min/Max, store the CLAMPED value the user never chose.)
+        if (varedit::unchangedSinceOpen(editor, newVal))
+        {
+            return;
+        }
         if (newVal.is_valid())
         {
             _editCommitted = true;

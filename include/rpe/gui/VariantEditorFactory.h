@@ -47,4 +47,14 @@ namespace rpe::varedit
     // variant when the input can't be parsed (caller should not commit).
     rttr::variant readEditorData(QWidget* editor, rttr::type t);
 
+    // "Did the user change anything?" — for delegates. Call rememberOpeningValue
+    // right after setEditorData: it records what the editor SHOWS, read back the
+    // same way a commit would be (so after any range clamping). At commit time,
+    // unchangedSinceOpen(editor, newVal) is true when the user left it as it was
+    // — then don't write. Otherwise opening an editor on a value outside the
+    // editor's range (Min/Max) and pressing Enter would silently write the
+    // clamped value back.
+    void rememberOpeningValue(QWidget* editor, rttr::type t);
+    bool unchangedSinceOpen(QWidget* editor, const rttr::variant& newVal);
+
 } // namespace rpe::varedit

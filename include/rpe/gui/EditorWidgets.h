@@ -9,7 +9,9 @@
 
 #include <cstdint>
 
+class QAbstractSpinBox;
 class QLineEdit;
+class QSlider;
 class QToolButton;
 class QLabel;
 class QStandardItemModel;
@@ -37,6 +39,10 @@ namespace rpe
 
         explicit FilePathEditor(Mode mode, QWidget* parent = nullptr);
 
+        Mode mode() const
+        {
+            return _mode;
+        }
         QString path() const;
         void setPath(const QString& p);
         void setFilter(const QString& f)
@@ -123,6 +129,47 @@ namespace rpe
         void _refreshText();
         QStandardItemModel* _model = nullptr;
         bool _guard = false; // suppress reentrant updates while we mutate the model
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  SliderEditor — a slider next to the number's own spin box, for the
+    //  rpe::editor::Slider hint on a number with both Min and Max.
+    //
+    //  The SPIN BOX is the editor: it holds the value and the keyboard focus (the
+    //  slider never takes focus), so typing, Enter and Esc behave exactly as in a
+    //  plain spin box, and the value is read/written through it with the same
+    //  type conversion. The slider mirrors it and drags it.
+    // ─────────────────────────────────────────────────────────────────────────────
+    class SliderEditor : public QWidget
+    {
+        Q_OBJECT
+
+    public:
+        // Takes ownership of `spin` (a QSpinBox or QDoubleSpinBox already ranged).
+        SliderEditor(QAbstractSpinBox* spin, double min, double max, double step, QWidget* parent = nullptr);
+
+        QAbstractSpinBox* spinBox() const
+        {
+            return _spin;
+        }
+        QSlider* slider() const
+        {
+            return _slider;
+        }
+
+    private:
+        double _spinValue() const;
+        void _setSpinValue(double v);
+        void _syncSliderFromSpin();
+        void _syncSpinFromSlider(int pos);
+
+        QAbstractSpinBox* _spin = nullptr;
+        QSlider* _slider = nullptr;
+        double _min = 0;
+        double _max = 1;
+        double _step = 0;  // value per slider tick
+        int _ticks = 1;    // slider positions - 1
+        bool _syncing = false;
     };
 
 } // namespace rpe

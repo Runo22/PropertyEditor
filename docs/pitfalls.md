@@ -29,7 +29,8 @@ below explain each case. When in doubt, run
 | Crashes that make no sense, "stack smashing", impossible values | two flecs versions in one process, or objects compiled against different headers | `checkFlecsBuild`; [Mixed builds](#mixed-builds) |
 | Crash later inside the mirror's pump (`world.lookup`) | the world was touched from a thread that isn't running `progress()` (e.g. `attach()` from the main thread) | [Threading](#threading) |
 | Mirror pumps at **half** the expected rate | `setMaxPumpRateHz` set equal to the sim's frame rate | [Performance → rate cap aliasing](#performance) |
-| A typed value **snaps back** | read-only (no setter / locked type), or clamped by `Min`/`Max` | [Editing semantics](#editing-semantics) |
+| A typed value **snaps back** | read-only (no setter / locked type), or the editor's `Min`/`Max` range | [Editing semantics](#editing-semantics) |
+| An `rpe::editor::*` hint seems to do nothing | an rpe older than the fix that reads `const char*` hint values; or `Slider` without both `Min` and `Max` | [editor-hints](editor-hints.md#rpeeditor-values) |
 | Uncapped sim spends time in the mirror | no rate cap — the mirror pumps every frame | [Performance](#performance) |
 
 ## Threading
@@ -153,8 +154,9 @@ anything.
   type). Anything *below* a getter-only struct is read-only too — editing it
   would write into a temporary copy.
 - **`Min`/`Max` is an editor range, not validation.** An out-of-range value from
-  the simulation shows as-is; opening its editor clamps it, and committing (even
-  an unchanged Enter) writes the clamped value.
+  the simulation shows as-is; its editor opens clamped to the range, but an
+  unchanged commit writes nothing — only a value you actually change is
+  written.
 - **`Min`/`Max`/`Step` don't apply to `unsigned int`, `long` or 64-bit
   integers** — they get a line edit so large values are never clamped.
 - **Drive the required-component filter through `Settings`.** A direct
@@ -189,8 +191,6 @@ anything.
   addressed by path.
 - **`std::string_view` / `std::wstring_view`** are always read-only.
 - **Flags enums** need `RPE_REGISTER_FLAGS(E)` to *edit* combined values.
-- **`rpe::editor::Slider`** is declared but not implemented: the property gets
-  its normal spin box.
 - **`TypeBridge::clone()`** returns an invalid variant for move-only types.
 - **flecs pairs without data** are badge rows only; pairs carrying data edit the
   carried type.

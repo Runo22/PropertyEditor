@@ -41,6 +41,15 @@ namespace rpe
             {
                 return {};
             }
+            // A `const char*` VARIABLE — every rpe::editor::* constant — is stored as
+            // a const char*, which RTTR's to_string() can't convert (a string LITERAL
+            // is stored as std::string and converts fine). Read it directly, or
+            // metadata(hint::Editor, rpe::editor::Color) silently means nothing.
+            if (m.get_type() == rttr::type::get<const char*>())
+            {
+                const char* c = m.get_value<const char*>();
+                return c ? QString::fromUtf8(c) : QString();
+            }
             bool ok = false;
             const std::string s = m.to_string(&ok);
             return ok ? QString::fromStdString(s) : QString();

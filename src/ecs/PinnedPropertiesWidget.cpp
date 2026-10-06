@@ -180,15 +180,16 @@ namespace rpe
                 // Seed from the live value if one has arrived; otherwise the editor
                 // opens at its type default (empty line edit, 0, first enum, …).
                 varedit::setEditorData(editor, _valueAt(index));
+                varedit::rememberOpeningValue(editor, pinLeafType(_tree->topLevelItem(index.row())));
             }
 
             void setModelData(QWidget* editor, QAbstractItemModel*, const QModelIndex& index) const override
             {
                 const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()));
                 const rttr::variant v = varedit::readEditorData(editor, t);
-                if (v.is_valid())
+                if (v.is_valid() && !varedit::unchangedSinceOpen(editor, v))
                 {
-                    _commit(index.row(), v);
+                    _commit(index.row(), v); // left unchanged → no write (see unchangedSinceOpen)
                 }
             }
 

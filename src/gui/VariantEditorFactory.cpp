@@ -5,6 +5,7 @@
 #include "rpe/core/OptionalSupport.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/EditorWidgets.h"
+#include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -88,6 +89,21 @@ namespace rpe::varedit
             return {};
         }
 
+    } // namespace
+
+    namespace
+    {
+        // The Slider hint wraps a number's spin box in a SliderEditor — only when
+        // there is a real range to slide over (Min AND Max, Max > Min). Without one
+        // the hint is ignored and the plain spin box is returned.
+        QWidget* maybeSlider(QAbstractSpinBox* sb, const QString& ed, const EditorHints& hints, QWidget* parent)
+        {
+            if (ed != QLatin1String(editor::Slider) || !hints.min || !hints.max || !(*hints.max > *hints.min))
+            {
+                return sb;
+            }
+            return new SliderEditor(sb, *hints.min, *hints.max, hints.step.value_or(0), parent);
+        }
     } // namespace
 
     QWidget* makeEditor(rttr::type t, const QString& ed, const EditorHints& hints, QWidget* parent)
@@ -194,7 +210,7 @@ namespace rpe::varedit
             sb->setDecimals(hints.decimals.value_or(4));
             sb->setRange(hints.min.value_or(-1e15), hints.max.value_or(1e15));
             sb->setSingleStep(hints.step.value_or(0.1));
-            return sb;
+            return maybeSlider(sb, ed, hints, parent);
         }
 
         // integral
@@ -219,7 +235,7 @@ namespace rpe::varedit
             sb->setRange(hints.min ? static_cast<int>(*hints.min) : lo,
                          hints.max ? static_cast<int>(*hints.max) : std::numeric_limits<int>::max());
             sb->setSingleStep(hints.step ? static_cast<int>(*hints.step) : 1);
-            return sb;
+            return maybeSlider(sb, ed, hints, parent);
         }
 
         return nullptr; // expandable / unsupported types are not inline-editable
@@ -229,6 +245,11 @@ namespace rpe::varedit
     {
         if (!editor)
         {
+            return;
+        }
+        if (auto* se = qobject_cast<SliderEditor*>(editor))
+        {
+            setEditorData(se->spinBox(), vIn); // the spin box is the editor; the slider follows
             return;
         }
         rttr::variant v = TypeRenderer::unwrap(vIn);
@@ -325,6 +346,10 @@ namespace rpe::varedit
         if (!editor)
         {
             return {};
+        }
+        if (auto* se = qobject_cast<SliderEditor*>(editor))
+        {
+            return readEditorData(se->spinBox(), t);
         }
         rttr::variant newVal;
 
@@ -456,6 +481,57 @@ namespace rpe::varedit
         }
 
         return newVal;
+    }
+
+    namespace
+    {
+        constexpr const char* kOpeningValue = "rpeOpeningValue";
+    }
+
+    void rememberOpeningValue(QWidget* editor, rttr::type t)
+    {
+        if (editor)
+        {
+            editor->setProperty(kOpeningValue, QVariant::fromValue(readEditorData(editor, t)));
+        }
+    }
+
+    bool unchangedSinceOpen(QWidget* editor, const rttr::variant& newVal)
+    {
+        if (!editor || !newVal.is_valid())
+        {
+            return false;
+        }
+        const QVariant stored = editor->property(kOpeningValue);
+        if (!stored.isValid())
+        {
+            return false;
+        }
+        const rttr::variant before = stored.value<rttr::variant>();
+        if (!before.is_valid() || before.get_type() != newVal.get_type())
+        {
+            return false;
+        }
+        // Enums by their bits: a combined flags mask has no name, so neither ==
+        // nor the rendered text can tell two different masks apart.
+        if (newVal.get_type().is_enumeration())
+        {
+            return TypeRenderer::enumBits(before) == TypeRenderer::enumBits(newVal);
+        }
+        if (before == newVal)
+        {
+            return true;
+        }
+        // RTTR compares only types it has a comparator for; for others (QColor,
+        // QDateTime, …) the rendered text is exact. Never for numbers — their
+        // display is rounded, and == already answered for them — and never on an
+        // empty rendering, which says nothing about equality.
+        if (newVal.get_type().is_arithmetic())
+        {
+            return false;
+        }
+        const QString a = TypeRenderer::toDisplayString(before);
+        return !a.isEmpty() && a == TypeRenderer::toDisplayString(newVal);
     }
 
 } // namespace rpe::varedit

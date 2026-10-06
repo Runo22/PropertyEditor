@@ -16,9 +16,13 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QProxyStyle>
+#include <QSlider>
+#include <QSpinBox>
 #include <QStandardItemModel>
 #include <QStyle>
 #include <QToolButton>
+
+#include <cmath>
 
 namespace rpe
 {
@@ -409,6 +413,100 @@ namespace rpe
             }
         }
         return QComboBox::eventFilter(obj, ev);
+    }
+
+    // ── SliderEditor ─────────────────────────────────────────────────────────────
+
+    SliderEditor::SliderEditor(QAbstractSpinBox* spin, double min, double max, double step, QWidget* parent)
+        : QWidget(parent)
+        , _spin(spin)
+        , _min(min)
+        , _max(max)
+    {
+        // One slider tick per Step when that gives a sensible resolution; otherwise
+        // a fine fixed resolution (the spin box keeps the exact value either way).
+        const double span = _max - _min;
+        const double wanted = step > 0 ? span / step : 0;
+        _ticks = (wanted >= 1 && wanted <= 10000) ? static_cast<int>(std::lround(wanted)) : 1000;
+        _step = span / _ticks;
+
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(4);
+
+        _slider = new QSlider(Qt::Horizontal, this);
+        _slider->setRange(0, _ticks);
+        _slider->setFocusPolicy(Qt::NoFocus); // focus stays in the spin box
+        _slider->setPageStep(qMax(1, _ticks / 10));
+        layout->addWidget(_slider, 1);
+
+        _spin->setParent(this);
+        _spin->setFrame(false);
+        _spin->setMinimumWidth(qMax(56, _spin->sizeHint().width()));
+        layout->addWidget(_spin, 0);
+
+        setFocusProxy(_spin);
+        setAutoFillBackground(true); // cover the cell's value text
+
+        if (auto* d = qobject_cast<QDoubleSpinBox*>(_spin))
+        {
+            connect(d, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this] { _syncSliderFromSpin(); });
+        }
+        else if (auto* i = qobject_cast<QSpinBox*>(_spin))
+        {
+            connect(i, QOverload<int>::of(&QSpinBox::valueChanged), this, [this] { _syncSliderFromSpin(); });
+        }
+        connect(_slider, &QSlider::valueChanged, this, [this](int pos) { _syncSpinFromSlider(pos); });
+        _syncSliderFromSpin();
+    }
+
+    double SliderEditor::_spinValue() const
+    {
+        if (auto* d = qobject_cast<QDoubleSpinBox*>(_spin))
+        {
+            return d->value();
+        }
+        if (auto* i = qobject_cast<QSpinBox*>(_spin))
+        {
+            return i->value();
+        }
+        return _min;
+    }
+
+    void SliderEditor::_setSpinValue(double v)
+    {
+        if (auto* d = qobject_cast<QDoubleSpinBox*>(_spin))
+        {
+            d->setValue(v);
+        }
+        else if (auto* i = qobject_cast<QSpinBox*>(_spin))
+        {
+            i->setValue(static_cast<int>(std::lround(v)));
+        }
+    }
+
+    void SliderEditor::_syncSliderFromSpin()
+    {
+        if (_syncing)
+        {
+            return;
+        }
+        _syncing = true;
+        const double t = _step > 0 ? (_spinValue() - _min) / _step : 0;
+        _slider->setValue(qBound(0, static_cast<int>(std::lround(t)), _ticks));
+        _syncing = false;
+    }
+
+    void SliderEditor::_syncSpinFromSlider(int pos)
+    {
+        if (_syncing)
+        {
+            return;
+        }
+        _syncing = true;
+        // The ends land exactly on Min/Max, not on an accumulated rounding error.
+        _setSpinValue(pos >= _ticks ? _max : _min + pos * _step);
+        _syncing = false;
     }
 
 } // namespace rpe

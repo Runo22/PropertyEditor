@@ -61,7 +61,7 @@ hint alone; combined values also show leftover unnamed bits as `0xNN`.
 | `Directory` | strings, `std::filesystem::path` | line edit + Browse… (pick a folder) |
 | `Color` | `QColor`, strings | swatch + picker; on a string, stored as `#AARRGGBB` (named colours parse too) |
 | `Multiline` | strings | multi-line plain-text editor |
-| `Slider` | — | **declared but not implemented yet**: the property gets its normal spin box |
+| `Slider` | floats and `int`-sized integers with **both** `Min` and `Max` | a slider next to the number's spin box; `Step` sets the slider's resolution. Without a range it falls back to the plain spin box |
 
 `std::filesystem::path` with **no** hint gets a Browse… that accepts a file or a
 folder; a hint pins the dialog kind.
@@ -128,14 +128,16 @@ own copy of a string literal — so a string key registered in one module is nev
 found from another. Value keys compare equal everywhere. The registration syntax
 is the same either way; just use the constants.
 
-(The `rpe::editor::*` *values* are fine as strings — they are compared by text.)
+(The `rpe::editor::*` *values* are compared by text, so a literal like
+`"color"` would work too — but use the constants.)
 
 ## Edge cases
 
 - **`Min`/`Max` are an editor range, not validation.** The simulation (or any
   other code) can still store a value outside it, and the grid shows it as-is.
-  But opening the editor on such a value clamps it to the range, and committing
-  — even with Enter, unchanged — writes the clamped value back.
+  Opening the editor on such a value shows it clamped to the range; if you then
+  commit without changing anything, **nothing is written** — only a value you
+  actually changed is. (An unchanged commit never writes, for any type.)
 - **`Min`/`Max`/`Step` don't apply to `unsigned int`, `long` or 64-bit
   integers** — those use a line edit so large values are never clamped.
 - **`Decimals` doesn't change the displayed value** — only the editor. Use
