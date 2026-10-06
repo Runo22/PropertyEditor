@@ -11,6 +11,13 @@ namespace rpe
 
     class PropertyModel;
 
+    // The read-only mark, shared by every view that shows property values (the
+    // property grid and the watch list), so a locked value looks the same in both:
+    // the value keeps its normal look, and a small faint lock sits at the right edge
+    // of the cell. readOnlyLockWidth() is the strip to keep clear of text.
+    int readOnlyLockWidth(const QStyleOptionViewItem& option);
+    void paintReadOnlyLock(QPainter* painter, const QStyleOptionViewItem& option);
+
     // ─────────────────────────────────────────────────────────────────────────────
     //  PropertyDelegate — provides type-appropriate inline editors for column 1.
     //

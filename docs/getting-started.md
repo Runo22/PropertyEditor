@@ -68,6 +68,34 @@ Available hints (`rpe/core/EditorHints.h`): `Min`, `Max`, `Step`, `Decimals`,
 `Editor` (`rpe::editor::FilePath` / `SaveFile` / `Directory` / `Color` /
 `Multiline`), `Label`, `Tooltip`, `ReadOnly`.
 
+Hints work wherever the type is registered — including a **plugin DLL**. (Use
+the `rpe::hint::*` constants, not raw `"rpe.min"` strings: RTTR compares a string
+key by address, and each module has its own copy of a literal.)
+
+### Read-only values
+
+A value is shown but **never opens an editor** when any of these hold — the row
+keeps its normal look, gets a small faint lock at the right edge, and its tooltip
+says why:
+
+- the property has **no setter** (`property_readonly(...)`, or a getter-only
+  `property(...)`) — editing it, or any field *below* it, would only write into a
+  temporary copy;
+- the property carries `rttr::metadata(rpe::hint::ReadOnly, true)`;
+- its **type is locked** — wherever that type appears (the whole component, or a
+  struct inside one):
+
+  ```cpp
+  // RTTR side, for a type you register yourself:
+  registration::class_<Tuning>("Tuning")(metadata(rpe::hint::ReadOnly, true)) ...;
+  // Runtime, from anywhere — e.g. the host locking a plugin's type, even before it loads:
+  rpe::TypeBridge::setReadOnly<Tuning>();          // or setReadOnly("audio::Tuning")
+  rpe::TypeBridge::setReadOnly<Tuning>(false);     // unlock
+  ```
+
+The property grid, the watch list and the mirror (on the sim thread) all apply
+the same rule (`rpe::readOnlyReason`), so none of them is a way around it.
+
 A few type-specific behaviours:
 
 - **`std::string_view` / `std::wstring_view`** properties display their text
@@ -121,6 +149,14 @@ registration:
 rpe::TypeBridge::registerType<Transform>();   // or RPE_REGISTER_COMPONENT(Transform)
 rpe::TypeBridge::registerTypes<A, B, C>();    // several at once
 ```
+
+The type may be **move-only** (copy constructor deleted, e.g. it owns a resource
+through a move-only base): rpe works on components in place through a pointer and
+only ever copies individual property values. RTTR registration is optional for
+such a type — with none, it still lists as a component, can be added and removed
+from the browser, and simply shows no fields. If you do register it with RTTR,
+don't use `policy::ctor::as_object` for its constructor (that needs a copy), and
+don't register a property whose own type is move-only.
 
 ## The property editor in 10 lines
 

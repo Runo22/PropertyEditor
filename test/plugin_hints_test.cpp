@@ -3,6 +3,7 @@
 // RTTR compares a const char* metadata key by address, and each module has its own
 // copy of a string literal — so Min/Max/Label/ReadOnly/… registered in a plugin
 // were never found by rpe. Keys are now value-compared (rpe::hint::Key).
+#include <rpe/core/ReadOnly.h>
 #include <rpe/core/TypeBridge.h>
 #include <rpe/gui/PropertyEditor.h>
 #include <rpe/gui/PropertyModel.h>
@@ -56,6 +57,8 @@ int main(int argc, char** argv)
     const QModelIndex locked = findPath(model, QStringLiteral("locked")).siblingAtColumn(1);
     check("a ReadOnly PROPERTY hint from the plugin is honoured", !(model->flags(locked) & Qt::ItemIsEditable));
 
+    check("a ReadOnly CLASS hint from the plugin locks the type",
+          !rpe::readOnlyReason(rpe::TypeBridge::resolveByName("plug.Frozen"), QStringLiteral("a")).isEmpty());
 
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;

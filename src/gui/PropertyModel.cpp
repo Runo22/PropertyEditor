@@ -1,5 +1,8 @@
 #include "rpe/gui/PropertyModel.h"
 
+#include "rpe/core/ReadOnly.h"
+#include "rpe/core/TypeBridge.h"
+
 #include "rpe/core/EditorHints.h"
 #include "rpe/core/RttrBridge.h"
 #include "rpe/core/TypeRenderer.h"
@@ -100,6 +103,7 @@ namespace rpe
     void PropertyModel::bindType(rttr::type type)
     {
         beginResetModel();
+        _roCache.clear();
         _resetRoot();
         _boundType = type;
         _expandedPaths.clear();
@@ -114,6 +118,7 @@ namespace rpe
     void PropertyModel::unbind()
     {
         beginResetModel();
+        _roCache.clear();
         _resetRoot();
         _boundType = rttr::type::get<void>();
         _expandedPaths.clear();
@@ -728,6 +733,31 @@ namespace rpe
         return out;
     }
 
+    QString PropertyModel::_readOnlyReason(const PropertyNode* node) const
+    {
+        if (!node || node == _root.get())
+        {
+            return {};
+        }
+        const quint64 regGen = TypeBridge::registryGeneration();
+        const quint64 lockGen = TypeBridge::readOnlyGeneration();
+        if (regGen != _roRegistryGen || lockGen != _roLockGen)
+        {
+            _roCache.clear();
+            _roRegistryGen = regGen;
+            _roLockGen = lockGen;
+        }
+        const QString path = node->path();
+        const auto it = _roCache.constFind(path);
+        if (it != _roCache.constEnd())
+        {
+            return it.value();
+        }
+        const QString why = readOnlyReason(_boundType, path);
+        _roCache.insert(path, why);
+        return why;
+    }
+
     bool PropertyModel::_applyEdit(PropertyNode* node, const rttr::variant& newVal)
     {
         if (_editSink)
@@ -891,7 +921,18 @@ namespace rpe
             }
             break;
 
+        case ReadOnlyRole:
+            return _readOnlyReason(node);
+
         case Qt::ToolTipRole:
+            if (index.column() == 1)
+            {
+                const QString why = _readOnlyReason(node);
+                if (!why.isEmpty())
+                {
+                    return node->tooltip().isEmpty() ? why : node->tooltip() + QStringLiteral("\n\n") + why;
+                }
+            }
             if (node->hasLocalEdit())
             {
                 return QStringLiteral("Local edit (draft, not applied) — right-click to reset to live");
@@ -993,6 +1034,14 @@ namespace rpe
         {
             return false;
         }
+        // The UI never opens an editor on a read-only row; this is for every other
+        // caller. Refusing here — rather than letting the write fail further down —
+        // is what keeps a getter-only value from being shown as a frozen "edit" that
+        // never reached the object.
+        if (!_readOnlyReason(node).isEmpty())
+        {
+            return false;
+        }
 
         if (!_applyEdit(node, newVal))
         {
@@ -1017,9 +1066,10 @@ namespace rpe
         auto* node = static_cast<PropertyNode*>(index.internalPointer());
 
         Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-        const bool forcedRO = metaBool(node->prop(), hint::ReadOnly, false);
-        if (!_readOnly && !forcedRO && index.column() == 1 && node->isLeaf()
-            && TypeRenderer::isInlineEditable(node->type()))
+        // Read-only rows stay ENABLED (normal text, selectable, copyable) — they just
+        // never get ItemIsEditable, so no editor opens. The reason is shown on hover.
+        if (!_readOnly && index.column() == 1 && node->isLeaf() && TypeRenderer::isInlineEditable(node->type())
+            && _readOnlyReason(node).isEmpty())
         {
             f |= Qt::ItemIsEditable;
         }

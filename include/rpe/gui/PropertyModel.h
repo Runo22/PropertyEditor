@@ -39,6 +39,8 @@ namespace rpe
         FilterValueRole,  // QString — value text for filtering (expansion-independent:
                           //           a collapsed struct's "[a, b]" summary or an
                           //           array's "[N]" is matchable even while expanded)
+        ReadOnlyRole,     // QString — why the row can't be edited (see rpe::readOnlyReason);
+                          //           empty when it can. Drives the lock mark + tooltip.
     };
 
     // How committed edits are applied.
@@ -182,6 +184,15 @@ namespace rpe
         std::unique_ptr<PropertyNode> _root;
         QHash<QString, PropertyNode*> _nodeByPath;
         rttr::type _boundType = rttr::type::get<void>();
+        // Why a node can't be edited (rpe::readOnlyReason), cached per PATH — not per
+        // node pointer: array rows are rebuilt on refresh, and a new node landing at a
+        // freed node's address must not inherit its answer — and dropped whenever the
+        // bound schema, the bridge registry or the set of locked types changes.
+        // flags() is asked on every paint.
+        QString _readOnlyReason(const PropertyNode* node) const;
+        mutable QHash<QString, QString> _roCache;
+        mutable quint64 _roRegistryGen = ~quint64(0);
+        mutable quint64 _roLockGen = ~quint64(0);
 
         mutable QMutex _pendingMutex;
         QHash<QString, rttr::variant> _pendingUpdates;

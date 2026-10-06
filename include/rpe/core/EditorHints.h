@@ -66,7 +66,9 @@ namespace rpe::hint
     // Tooltip / description (value: const char*).
     inline constexpr Key Tooltip = makeKey("rpe.tooltip");
 
-    // Mark a property read-only even in an editable view (value: bool).
+    // Mark a property read-only even in an editable view (value: bool). Also valid
+    // as CLASS metadata — class_<T>("T")(metadata(rpe::hint::ReadOnly, true)) —
+    // which locks the type wherever it appears (see rpe/core/ReadOnly.h).
     inline constexpr Key ReadOnly = makeKey("rpe.readOnly");
 
     // Treat an enumeration property as a BITMASK (value: bool). The value is shown

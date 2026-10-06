@@ -1,5 +1,6 @@
 #include "rpe/ecs/EcsMirror.h"
 
+#include "rpe/core/ReadOnly.h"
 #include "rpe/core/RttrBridge.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/core/TypeRenderer.h"
@@ -643,6 +644,12 @@ namespace rpe
             if (!_resolveEditTarget(world, ed.entity, ed.component, ptr, t, compId))
             {
                 continue; // target gone (destroyed / component removed) — nothing to write
+            }
+            // The UI never offers an editor on a read-only path (rpe::readOnlyReason);
+            // refuse here too, so an API caller can't write around it.
+            if (!readOnlyReason(t, ed.path).isEmpty())
+            {
+                continue;
             }
             rttr::variant access = TypeBridge::wrap(t, ptr);
             if (!access.is_valid())
@@ -1354,6 +1361,10 @@ namespace rpe
                 if (!resolvePin(k, pp, pt, cid))
                 {
                     continue;
+                }
+                if (!readOnlyReason(pt, k.path).isEmpty())
+                {
+                    continue; // read-only: same rule as the grid and the watch list
                 }
                 rttr::variant access = TypeBridge::wrap(pt, pp);
                 if (!access.is_valid())

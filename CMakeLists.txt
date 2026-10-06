@@ -96,6 +96,7 @@ set(RPE_CORE_SOURCES
     src/core/RttrBridge.cpp
     src/core/RttrVariantWrapper.cpp
     src/core/TypeBridge.cpp
+    src/core/ReadOnly.cpp
     src/core/OptionalSupport.cpp
     src/core/FlagsSupport.cpp)
 
@@ -355,6 +356,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_component_discovery_test test/component_discovery_test.cpp)
     target_link_libraries(rpe_component_discovery_test PRIVATE rpe_gui)
+
+    add_executable(rpe_read_only_test test/read_only_test.cpp)
+    target_link_libraries(rpe_read_only_test PRIVATE rpe_gui)
 
     # A stand-in plugin: a SEPARATE shared library registering hinted types, so the
     # cross-module metadata lookup is exercised for real.

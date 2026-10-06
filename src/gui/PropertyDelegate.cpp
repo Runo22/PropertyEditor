@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QPainter>
+#include <QPen>
 #include <QStyle>
 
 namespace rpe
@@ -41,6 +42,44 @@ namespace rpe
 
     } // namespace
 
+    namespace
+    {
+        int lockSide(const QStyleOptionViewItem& option)
+        {
+            return qBound(8, option.rect.height() * 11 / 20, 14);
+        }
+    } // namespace
+
+    int readOnlyLockWidth(const QStyleOptionViewItem& option)
+    {
+        return lockSide(option) + 6;
+    }
+
+    void paintReadOnlyLock(QPainter* painter, const QStyleOptionViewItem& option)
+    {
+        // A shackle over a body, in the text colour, faint — present, not loud.
+        const int side = lockSide(option);
+        const bool selected = option.state & QStyle::State_Selected;
+        QColor c = option.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
+        c.setAlphaF(selected ? 0.75 : 0.40);
+        const QRectF box(option.rect.right() - readOnlyLockWidth(option) + 3, option.rect.center().y() - side / 2.0,
+                         side, side);
+        const QRectF body(box.left(), box.top() + box.height() * 0.45, box.width(), box.height() * 0.55);
+        const qreal sw = box.width() * 0.56;
+        const QRectF shackle(box.center().x() - sw / 2, box.top(), sw, box.height() * 0.80);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setPen(QPen(c, qMax<qreal>(1.2, side / 9.0)));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawArc(shackle, 0, 180 * 16);
+        painter->drawLine(QPointF(shackle.left(), shackle.center().y()), QPointF(shackle.left(), body.top()));
+        painter->drawLine(QPointF(shackle.right(), shackle.center().y()), QPointF(shackle.right(), body.top()));
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(c);
+        painter->drawRoundedRect(body, 1.5, 1.5);
+        painter->restore();
+    }
+
     PropertyDelegate::PropertyDelegate(PropertyModel* model, QObject* parent)
         : QStyledItemDelegate(parent)
         , _model(model)
@@ -64,6 +103,34 @@ namespace rpe
             const QWidget* w = opt.widget;
             QStyle* style = w ? w->style() : QApplication::style();
             style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, w);
+            return;
+        }
+
+        // A read-only value keeps its NORMAL look — it is information, not a
+        // disabled control — plus a small, faint lock at the right edge that says
+        // "deliberately not editable" (the reason is in the tooltip).
+        if (index.column() == 1 && !index.data(ReadOnlyRole).toString().isEmpty())
+        {
+            const int lockW = readOnlyLockWidth(option);
+
+            // Background/selection across the WHOLE cell, so the highlight doesn't
+            // stop short of the lock...
+            QStyleOptionViewItem bg(option);
+            initStyleOption(&bg, index);
+            bg.text.clear();
+            bg.icon = QIcon();
+            bg.features &= ~(QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration);
+            const QWidget* w = bg.widget;
+            QStyle* style = w ? w->style() : QApplication::style();
+            style->drawControl(QStyle::CE_ItemViewItem, &bg, painter, w);
+
+            // ...the value itself in the remaining width (elided, never under the lock)...
+            QStyleOptionViewItem text(option);
+            text.rect.setRight(option.rect.right() - lockW);
+            QStyledItemDelegate::paint(painter, text, index);
+
+            // ...and the lock.
+            paintReadOnlyLock(painter, option);
             return;
         }
         QStyledItemDelegate::paint(painter, option, index);

@@ -4,6 +4,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace rpe
 {
@@ -47,6 +48,12 @@ namespace rpe
                 rttr::type::type_id id {};
             };
             std::unordered_map<std::string, Resolved> resolved;
+
+            // Read-only types: by type id, and by (normalised) name for types the
+            // host locks before they exist. See TypeBridge::setReadOnly.
+            std::unordered_set<rttr::type::type_id> readOnlyIds;
+            std::unordered_set<std::string> readOnlyNames;
+            std::atomic<uint64_t> readOnlyGeneration { 0 };
         };
 
         // Bound on the memo: a world has a few thousand component names; anything far
@@ -295,6 +302,114 @@ namespace rpe
         std::lock_guard<std::mutex> lk(r.mutex);
         const auto it = r.map.find(t.get_id());
         return it != r.map.end() ? it->second.wrap(obj) : rttr::variant();
+    }
+
+    namespace
+    {
+        // Name key for read-only matching: an unregistered type's RTTR name is
+        // compiler-derived (MSVC: "class audio::Speaker"), so drop the keyword, then
+        // normalise the separators.
+        std::string readOnlyKey(std::string name)
+        {
+            for (const char* kw : { "class ", "struct ", "enum ", "union " })
+            {
+                const size_t n = std::char_traits<char>::length(kw);
+                if (name.compare(0, n, kw) == 0)
+                {
+                    name.erase(0, n);
+                    break;
+                }
+            }
+            return normalizeScopes(name);
+        }
+    } // namespace
+
+    void TypeBridge::setReadOnly(rttr::type t, bool readOnly)
+    {
+        if (!t.is_valid())
+        {
+            return;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        if (readOnly)
+        {
+            r.readOnlyIds.insert(t.get_id());
+        }
+        else
+        {
+            r.readOnlyIds.erase(t.get_id());
+            r.readOnlyNames.erase(readOnlyKey(t.get_name().to_string()));
+        }
+        r.readOnlyGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void TypeBridge::setReadOnly(std::string_view typeName, bool readOnly)
+    {
+        if (typeName.empty())
+        {
+            return;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        const std::string key = readOnlyKey(std::string(typeName));
+        if (readOnly)
+        {
+            r.readOnlyNames.insert(key);
+        }
+        else
+        {
+            r.readOnlyNames.erase(key);
+            // Also release a type locked by id under that name.
+            for (auto it = r.readOnlyIds.begin(); it != r.readOnlyIds.end();)
+            {
+                const auto e = r.map.find(*it);
+                const bool same = e != r.map.end() ? e->second.normFull == key : false;
+                it = same ? r.readOnlyIds.erase(it) : std::next(it);
+            }
+        }
+        r.readOnlyGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    bool TypeBridge::isReadOnly(rttr::type t)
+    {
+        if (!t.is_valid())
+        {
+            return false;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        if (r.readOnlyIds.count(t.get_id()))
+        {
+            return true;
+        }
+        if (r.readOnlyNames.empty())
+        {
+            return false;
+        }
+        // By name: the RTTR name, the bridged entry's normalised name, and every
+        // alias (which includes the type's C++ name) that maps to this type.
+        if (r.readOnlyNames.count(readOnlyKey(t.get_name().to_string())))
+        {
+            return true;
+        }
+        if (const auto e = r.map.find(t.get_id()); e != r.map.end() && r.readOnlyNames.count(e->second.normFull))
+        {
+            return true;
+        }
+        for (const auto& [alias, id] : r.aliases)
+        {
+            if (id == t.get_id() && r.readOnlyNames.count(alias))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    uint64_t TypeBridge::readOnlyGeneration()
+    {
+        return registry().readOnlyGeneration.load(std::memory_order_relaxed);
     }
 
     rttr::variant TypeBridge::clone(rttr::type t, void* obj)

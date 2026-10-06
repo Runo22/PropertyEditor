@@ -1,16 +1,20 @@
 #include "rpe/ecs/PinnedPropertiesWidget.h"
 
+#include "rpe/core/ReadOnly.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/ecs/EcsMirror.h"
+#include "rpe/gui/PropertyDelegate.h"
 #include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
 #include "rpe/gui/VariantEditorFactory.h"
 
 #include <QAbstractItemDelegate>
 #include <QApplication>
 #include <QHeaderView>
+#include <QIcon>
 #include <QLabel>
 #include <QMenu>
+#include <QStyle>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QTreeWidget>
@@ -31,6 +35,7 @@ namespace rpe
             PathRole,                       // QString (dot-path)
             LastValueRole,                  // rttr::variant (last mirrored value)
             RawIdRole,                      // qulonglong (pair id; 0 for plain components)
+            PinReadOnlyRole,                // QString — why it can't be edited (empty: it can)
         };
 
         constexpr int kValueColumn = 2; // Entity | Property | Value
@@ -122,8 +127,36 @@ namespace rpe
             {
             }
 
+            void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            {
+                const QTreeWidgetItem* it = _tree->topLevelItem(index.row());
+                if (index.column() != kValueColumn || !it || it->data(0, PinReadOnlyRole).toString().isEmpty())
+                {
+                    QStyledItemDelegate::paint(painter, option, index);
+                    return;
+                }
+                // Same read-only look as the property grid: full-cell background, the
+                // value in the remaining width, a faint lock at the right edge.
+                QStyleOptionViewItem bg(option);
+                initStyleOption(&bg, index);
+                bg.text.clear();
+                bg.icon = QIcon();
+                bg.features &= ~(QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration);
+                const QWidget* w = bg.widget;
+                (w ? w->style() : QApplication::style())->drawControl(QStyle::CE_ItemViewItem, &bg, painter, w);
+                QStyleOptionViewItem text(option);
+                text.rect.setRight(option.rect.right() - readOnlyLockWidth(option));
+                QStyledItemDelegate::paint(painter, text, index);
+                paintReadOnlyLock(painter, option);
+            }
+
             QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const override
             {
+                const QTreeWidgetItem* row = _tree->topLevelItem(index.row());
+                if (row && !row->data(0, PinReadOnlyRole).toString().isEmpty())
+                {
+                    return nullptr; // read-only: never an editor (the item isn't editable either)
+                }
                 // Drive the editor from the leaf's declared type (resolvable straight
                 // after pinning) and fall back to the mirrored value's type. No hint
                 // metadata in the pin list → default numeric ranges.
@@ -339,7 +372,21 @@ namespace rpe
         item->setData(0, ComponentRole, component);
         item->setData(0, PathRole, path);
         item->setData(0, RawIdRole, rawId);
-        item->setFlags(item->flags() | Qt::ItemIsEditable);
+        // Same rule as the property grid (rpe::readOnlyReason): a getter-only
+        // property, one marked read-only, or a locked type stays non-editable here
+        // too — otherwise the watch list would be the back door around it.
+        const QString readOnly = rawId != 0
+            ? QString()
+            : readOnlyReason(TypeBridge::resolveByName(component.toUtf8().constData()), path);
+        item->setData(0, PinReadOnlyRole, readOnly);
+        if (readOnly.isEmpty())
+        {
+            item->setFlags(item->flags() | Qt::ItemIsEditable);
+        }
+        else
+        {
+            item->setToolTip(kValueColumn, readOnly);
+        }
         item->setText(kValueColumn, placeholderText()); // until the first value lands
         _updating = false;
 

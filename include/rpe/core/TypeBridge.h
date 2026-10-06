@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace rpe
@@ -165,13 +166,26 @@ namespace rpe
 
         static void registerEntry(rttr::type t, Wrapper wrap, Cloner clone);
 
+        // T may be MOVE-ONLY (copy constructor deleted). Inspection and editing work
+        // through a T* and copy only individual property values, never T itself;
+        // the one hook that needs a copy is clone(), which then returns an invalid
+        // variant for T. Nothing in rpe calls clone().
         template <class T>
         static void registerType()
         {
+            Cloner cloner = nullptr;
+            if constexpr (std::is_copy_constructible_v<T>)
+            {
+                cloner = +[](void* p) -> rttr::variant { return rttr::variant(*static_cast<T*>(p)); };
+            }
+            else
+            {
+                cloner = +[](void*) -> rttr::variant { return rttr::variant(); };
+            }
             registerEntry(
                 rttr::type::get<T>(),
                 +[](void* p) -> rttr::variant { return rttr::variant(static_cast<T*>(p)); },
-                +[](void* p) -> rttr::variant { return rttr::variant(*static_cast<T*>(p)); });
+                cloner);
             // Alias the type by its REAL C++ name ("game::Stats"), so a flecs path
             // resolves to the right type even when the RTTR registration used a
             // different — or namespace-stripped, or duplicated — name. Without this,
@@ -234,9 +248,34 @@ namespace rpe
         static rttr::variant wrap(rttr::type t, void* obj);
 
         // Deep-copy the pointee into a self-contained value variant (invalid if
-        // unregistered). The result owns its data and is safe to hand to another
-        // thread.
+        // unregistered, or if the type is move-only). The result owns its data and
+        // is safe to hand to another thread.
         static rttr::variant clone(rttr::type t, void* obj);
+
+        // ── Read-only types ──────────────────────────────────────────────────────
+        // Lock a type against editing: the editor shows its values (normal colour,
+        // a lock mark, the reason in a tooltip) but never opens an editor for them —
+        // for a component type, the whole component; for any other struct type,
+        // every place it appears inside a component. The mirror refuses edits to it
+        // on the sim thread too, so API callers can't write around the UI.
+        //
+        // Runtime, and independent of registration order: the host can lock a
+        // plugin's type before the plugin loads (by name), without touching the
+        // plugin's code. The RTTR-side equivalent, for a type you register yourself,
+        // is class metadata: class_<T>("T")(metadata(rpe::hint::ReadOnly, true)).
+        static void setReadOnly(rttr::type t, bool readOnly = true);
+        template <class T>
+        static void setReadOnly(bool readOnly = true)
+        {
+            setReadOnly(rttr::type::get<T>(), readOnly);
+        }
+        // By name ("audio::Speaker" / "audio.Speaker"); matched against a type's RTTR
+        // name, its C++ name and its aliases, so it works before the type exists.
+        static void setReadOnly(std::string_view typeName, bool readOnly = true);
+        static bool isReadOnly(rttr::type t);
+        // Bumped on every setReadOnly change — lets views refresh cached decisions.
+        // (Separate from registryGeneration: locking a type changes no resolution.)
+        static uint64_t readOnlyGeneration();
 
         // Monotonic counter bumped by every registration change (registerEntry,
         // registerAlias, unregisterType). Lets a consumer cache derived data (e.g.
