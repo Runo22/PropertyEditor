@@ -9,12 +9,14 @@
 //     unloaded in the same pump, never appeared: the catalog was rescanned only
 //     when the component COUNT or the bridge registry changed;
 //   • a component registered with RTTR but never TypeBridge::registerType'd is,
-//     correctly, not offered — but nothing said why.
+//     correctly, not offered — rpe::checkComponents() says why, on demand
+//     (nothing is logged by itself: an automatic warning gave false positives).
 #include <rpe/core/TypeBridge.h>
 #include <rpe/ecs/ComponentListWidget.h>
 #include <rpe/ecs/EcsMirror.h>
 #include <rpe/ecs/EntityComponentBrowser.h>
 #include <rpe/ecs/EntityListWidget.h>
+#include <rpe/ecs/HealthCheck.h>
 
 #include <rttr/registration.h>
 
@@ -174,23 +176,19 @@ int main(int argc, char** argv)
     pumpMs(100);
     check("flecs-first-then-bridge is offered", has(QStringLiteral("plug.LateBridge")));
 
-    // ── RTTR but no bridge: not offered — and now it SAYS so, once ─────────────
+    // ── RTTR but no bridge: not offered — and the health check says why ────────
     w.component<RttrOnly>("plug::RttrOnly");
     pumpMs(100);
     check("an RTTR-only (unbridged) component is not offered", !has(QStringLiteral("plug.RttrOnly")));
-    pumpMs(3500); // past the grace period; the hover refresh rescans
-    offered();
-    pumpMs(100);
+    const rpe::HealthReport health = rpe::checkComponents(w);
     bool namesIt = false;
-    bool namesLateBridge = false;
-    for (const QString& m : g_warnings)
-    {
-        namesIt = namesIt || m.contains(QStringLiteral("plug.RttrOnly"));
-        namesLateBridge = namesLateBridge || m.contains(QStringLiteral("LateBridge"));
-    }
-    check("...and a warning names it and the fix", namesIt && g_warnings.join(' ').contains(QStringLiteral("registerType")));
-    check("...exactly once", g_warnings.size() == 1);
-    check("a component bridged shortly AFTER its flecs registration is never warned about", !namesLateBridge);
+    for (const rpe::HealthIssue& i : health.byCheck(QStringLiteral("unbridged-rttr-type")))
+        namesIt = namesIt || i.subject == QStringLiteral("plug.RttrOnly");
+    check("...checkComponents() names it, with the fix",
+          namesIt && health.about(QStringLiteral("plug.RttrOnly")).first().fix.contains(QStringLiteral("registerType")));
+    check("a component bridged after its flecs registration has nothing to report",
+          health.about(QStringLiteral("plug.LateBridge")).isEmpty());
+    check("nothing is logged by itself", g_warnings.isEmpty());
 
     mirror.detach();
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);

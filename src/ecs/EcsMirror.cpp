@@ -146,8 +146,6 @@ namespace rpe
         _unresolvedGroups.clear();
         _catalogScanned = false; // the new world's component set is unknown
         _lastCatalogFullScan = {};
-        _warnedUnbridged.clear();
-        _unbridgedSince.clear();
         _warnedNoPrefabMatch = false;
         _pinRt.clear(); // component ids/types belong to the old world
         _pinMissing.clear();
@@ -746,28 +744,6 @@ namespace rpe
                 _bridgedIds.clear();
                 _reqId = 0;
 
-                // The required component, identified the way the host named it. A
-                // scoped name ("game::Stats" / "game.Stats") must pick THAT component:
-                // matching on the leaf alone let "game::Stats" select ai::Stats when
-                // both exist (whichever came last), and a dotted spelling matched
-                // nothing. In order of preference:
-                //   1. the full path;
-                //   2. a scope-aligned suffix ("npc::Enemy" → game.npc.Enemy);
-                //   3. the leaf — only when the host gave just a leaf.
-                // Several candidates at one level → the shortest path, deterministically,
-                // with a one-time warning. A scoped name never falls back to the leaf.
-                QString reqPath = required;
-                reqPath.replace(QStringLiteral("::"), QStringLiteral("."));
-                while (reqPath.startsWith(QLatin1Char('.')))
-                {
-                    reqPath.remove(0, 1);
-                }
-                const bool reqScoped = reqPath.contains(QLatin1Char('.'));
-                const QString reqSuffix = QLatin1Char('.') + reqPath;
-                uint64_t reqExact = 0;
-                QVector<QPair<QString, uint64_t>> reqSuffixHits;
-                QVector<QPair<QString, uint64_t>> reqLeafHits;
-
                 _componentQuery.each([&](flecs::entity comp) {
                     const char* cn = comp.name();
                     if (!cn || cn[0] == '\0')
@@ -788,67 +764,37 @@ namespace rpe
                     {
                         _bridgedIds.insert(comp.raw_id());
                     }
-                    if (!reqPath.isEmpty())
-                    {
-                        const QString cp = QString::fromUtf8(pc);
-                        if (cp == reqPath)
-                        {
-                            reqExact = comp.raw_id();
-                        }
-                        else if (reqScoped && cp.endsWith(reqSuffix))
-                        {
-                            reqSuffixHits.append({ cp, comp.raw_id() });
-                        }
-                        else if (!reqScoped && QString::fromUtf8(cn) == reqPath)
-                        {
-                            reqLeafHits.append({ cp, comp.raw_id() });
-                        }
-                    }
                 });
 
-                if (!reqPath.isEmpty())
+                // The required component, resolved by the rule the host's name implies
+                // (rpe::matchComponentName — full path, then scope suffix, then leaf
+                // only for an unscoped name). Matching the leaf alone used to let
+                // "game::Stats" select ai::Stats when both exist.
+                if (!required.isEmpty())
                 {
-                    const auto pick = [&](QVector<QPair<QString, uint64_t>>& hits, const char* how) -> uint64_t {
-                        if (hits.isEmpty())
-                        {
-                            return 0;
-                        }
-                        std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
-                            return a.first.size() != b.first.size() ? a.first.size() < b.first.size() : a.first < b.first;
-                        });
-                        if (hits.size() > 1 && _warnedRequired != required)
-                        {
-                            _warnedRequired = required;
-                            QStringList all;
-                            for (const auto& h : hits)
-                            {
-                                all << h.first;
-                            }
-                            qWarning("rpe: required component \"%s\" matches %d components by %s (%s) — "
-                                     "using \"%s\". Give the full path to choose.",
-                                     qPrintable(required), static_cast<int>(hits.size()), how,
-                                     qPrintable(all.join(QStringLiteral(", "))), qPrintable(hits.first().first));
-                        }
-                        return hits.first().second;
-                    };
-                    _reqId = reqExact;
-                    if (_reqId == 0)
-                    {
-                        _reqId = pick(reqSuffixHits, "scope suffix");
-                    }
-                    if (_reqId == 0)
-                    {
-                        _reqId = pick(reqLeafHits, "leaf name");
-                    }
-                    if (_reqId == 0 && _warnedRequired != required)
+                    const ComponentNameMatch m = matchComponentName(world, required);
+                    _reqId = m.component.is_valid() ? m.component.raw_id() : 0;
+                    if (_warnedRequired != required && (m.ambiguous() || !m.component.is_valid()))
                     {
                         _warnedRequired = required;
-                        qWarning("rpe: required component \"%s\" not found in the world — the entity list "
-                                 "stays empty until it is registered.%s",
-                                 qPrintable(required),
-                                 reqScoped ? " (A scoped name only matches that scope, never another "
-                                             "namespace's same-named component.)"
-                                           : "");
+                        if (m.ambiguous())
+                        {
+                            qWarning("rpe: required component \"%s\" matches %d components (%s) — using \"%s\". "
+                                     "Give the full path to choose.",
+                                     qPrintable(required), static_cast<int>(m.candidates.size()),
+                                     qPrintable(m.candidates.join(QStringLiteral(", "))),
+                                     qPrintable(m.candidates.first()));
+                        }
+                        else
+                        {
+                            qWarning("rpe: required component \"%s\" not found in the world — the entity list "
+                                     "stays empty until it is registered.%s",
+                                     qPrintable(required),
+                                     required.contains(QLatin1Char('.')) || required.contains(QStringLiteral("::"))
+                                         ? " (A scoped name only matches that scope, never another namespace's "
+                                           "same-named component.)"
+                                         : "");
+                        }
                     }
                 }
             }
@@ -1045,41 +991,6 @@ namespace rpe
                     // Full scoped path so the GUI's add picker can group by namespace;
                     // findComponentEntity accepts either the path or the leaf name.
                     catalog.append({ c.path.isEmpty() ? c.name : c.path, c.tag });
-                    _unbridgedSince.remove(c.path);
-                }
-                else if (!_warnedUnbridged.contains(c.path))
-                {
-                    // A data component with no bridge never appears in the menu (nor
-                    // in the component list) — the inspector can't read it without
-                    // the compile-time T that TypeBridge::registerType<T>() captures.
-                    // The common cause is a plugin that registered with RTTR and
-                    // forgot the bridge, which is silent otherwise. Say so — but only
-                    // when RTTR actually knows a type by that name, so the thousands
-                    // of components that simply have no reflection stay quiet.
-                    QString rttrName = c.path;
-                    rttrName.replace(QLatin1Char('.'), QStringLiteral("::"));
-                    rttr::type rt = rttr::type::get_by_name(rttrName.toStdString());
-                    if (!rt.is_valid())
-                    {
-                        rt = rttr::type::get_by_name(c.name.toStdString());
-                    }
-                    // Registering with flecs first and the bridge a moment later is a
-                    // normal plugin order — only a gap that PERSISTS is a mistake.
-                    constexpr std::chrono::seconds kUnbridgedGrace { 3 };
-                    const auto since = _unbridgedSince.constFind(c.path);
-                    if (rt.is_valid() && since == _unbridgedSince.constEnd())
-                    {
-                        _unbridgedSince.insert(c.path, scanNow);
-                    }
-                    else if (rt.is_valid() && scanNow - since.value() >= kUnbridgedGrace)
-                    {
-                        _warnedUnbridged.insert(c.path);
-                        qWarning("rpe: component \"%s\" has an RTTR type (\"%s\") but no TypeBridge "
-                                 "registration, so it can't be inspected or added from the menu. Call "
-                                 "rpe::TypeBridge::registerType<T>() (or RPE_REGISTER_COMPONENT(T)) where "
-                                 "it is registered — in the same rpe_core the host uses.",
-                                 qPrintable(c.path), rt.get_name().to_string().c_str());
-                    }
                 }
             }
             std::sort(catalog.begin(), catalog.end(),

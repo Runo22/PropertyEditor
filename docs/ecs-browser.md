@@ -156,6 +156,32 @@ file under **plugins ▸ output ▸ hud / ig**. Unscoped components sit under
 filter matches a component's full path, so typing a namespace (`hud`) narrows
 to that branch.
 
+## Health checks
+
+On-demand diagnostics, in `rpe/ecs/HealthCheck.h` — nothing runs or logs by
+itself; call them when something doesn't show, bind or edit the way you expect.
+No mirror or browser is needed. The world-taking ones read the world, so call
+them where you may touch it (the sim thread, after `progress()`):
+
+```cpp
+auto report = rpe::checkHealth(world, { "game::Player", { "game::npc::Enemy" } });
+qInfo().noquote() << report.toText(rpe::HealthIssue::Severity::Warning);
+```
+
+| function | finds |
+|---|---|
+| `checkComponents(world)` | **size-mismatch** (Error): a component bound to an RTTR type of another size — the "values look shifted" bug; **same-type-twice**: two components bound to one type; **ambiguous-name** / short-name-only bindings; **unbridged-rttr-type**: RTTR knows it by full name, TypeBridge doesn't; *unbridged-maybe* (a hint only — a same-short-name RTTR type exists); bridged types no component uses |
+| `checkTypeRegistry()` | two bridged types under one RTTR name; bridged types with no properties (markers) |
+| `checkRequiredComponent(world, name)` | not found / ambiguous / matched only by suffix or leaf — the filter's exact rule |
+| `checkPrefabGroups(world, tags)` | a tag `world.lookup()` can't find (dotted paths), or one no prefab carries |
+| `checkFlecsBuild()` | rpe compiled against one flecs version, the process running another; a debug flecs |
+| `checkHealth(world, options)` | all of the above that apply |
+
+Every issue has a severity, a stable `check` id, a `subject`, a `message` and
+usually a `fix`; `report.byCheck(id)` / `report.about(subject)` pick them out.
+`TypeBridge::explainResolve(name)` shows how one name resolves (alias, exact,
+scope suffix, short name) and which bridged types competed.
+
 ### "My component isn't in the Add menu"
 
 A component is offered when **all** of these hold:
@@ -164,8 +190,8 @@ A component is offered when **all** of these hold:
 2. it is **bridged** — `rpe::TypeBridge::registerType<T>()` (or
    `RPE_REGISTER_COMPONENT(T)`) was called — or it is a zero-size tag. RTTR
    registration alone is not enough: the inspector needs the compile-time `T` the
-   bridge captures. If RTTR knows the type but the bridge doesn't, rpe now warns
-   once on the console, naming the component;
+   bridge captures. `rpe::checkComponents(world)` tells you when RTTR knows the
+   type but the bridge doesn't (see [Health checks](#health-checks));
 3. the bridge call reached the **same `rpe_core`** the host uses — a plugin that
    links its own static copy registers into a registry the host never sees;
 4. its top-level namespace isn't in `hiddenAddNamespaces` (default: `settings`);
@@ -208,8 +234,9 @@ display, so two groups sharing a leaf stay two separate groups.
 
 The tag must be on the **prefab entity itself** — the producer asks
 `prefab.has(tag)`, and instances inherit the tag through `is_a`, not the other
-way round. All three ways this goes wrong now warn once on the console instead of
-just leaving the picker flat:
+way round. All three ways this goes wrong warn once on the console instead of
+just leaving the picker flat (and `rpe::checkPrefabGroups(world, tags)` reports
+the same on demand):
 
 | symptom | cause |
 |---|---|

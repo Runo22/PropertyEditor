@@ -1,5 +1,6 @@
 #include "rpe/core/TypeBridge.h"
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -173,7 +174,8 @@ namespace rpe
 
     namespace
     {
-        rttr::type resolveLocked(Registry& r, const std::string& name);
+        rttr::type resolveLocked(Registry& r, const std::string& name,
+                                 TypeBridge::ResolveExplanation* why = nullptr);
     } // namespace
 
     rttr::type TypeBridge::resolveByName(std::string_view flecsName)
@@ -215,8 +217,17 @@ namespace rpe
     namespace
     {
         // The resolution ladder itself. Caller holds r.mutex.
-        rttr::type resolveLocked(Registry& r, const std::string& name)
+        rttr::type resolveLocked(Registry& r, const std::string& name, TypeBridge::ResolveExplanation* why)
         {
+            using Via = TypeBridge::ResolveExplanation::Via;
+            const auto explain = [&](Via via, rttr::type t) {
+                if (why)
+                {
+                    why->via = via;
+                    why->type = t;
+                }
+                return t;
+            };
             const std::string normName = normalizeScopes(name);
 
             // 1) Alias wins — an explicit registerType<T>(name)/registerAlias, or the
@@ -228,7 +239,11 @@ namespace rpe
             {
                 if (const auto e = r.map.find(a->second); e != r.map.end())
                 {
-                    return e->second.type;
+                    if (why)
+                    {
+                        why->candidates.push_back(e->second.fullName);
+                    }
+                    return explain(Via::Alias, e->second.type);
                 }
             }
 
@@ -240,7 +255,11 @@ namespace rpe
             {
                 if (entry.normFull == normName)
                 {
-                    return entry.type;
+                    if (why)
+                    {
+                        why->candidates.push_back(entry.fullName);
+                    }
+                    return explain(Via::ExactName, entry.type);
                 }
             }
 
@@ -256,8 +275,13 @@ namespace rpe
                 for (const auto& [id, entry] : r.map)
                 {
                     const std::string& full = entry.normFull;
-                    if (full.size() > suffix.size()
-                        && full.compare(full.size() - suffix.size(), suffix.size(), suffix) == 0
+                    const bool matches = full.size() > suffix.size()
+                        && full.compare(full.size() - suffix.size(), suffix.size(), suffix) == 0;
+                    if (matches && why)
+                    {
+                        why->candidates.push_back(entry.fullName);
+                    }
+                    if (matches
                         && (!best.is_valid() || full.size() < bestFull.size()
                             || (full.size() == bestFull.size() && full < bestFull)))
                     {
@@ -267,7 +291,7 @@ namespace rpe
                 }
                 if (best.is_valid())
                 {
-                    return best;
+                    return explain(Via::ScopedSuffix, best);
                 }
             }
 
@@ -282,15 +306,37 @@ namespace rpe
             for (const auto& [id, entry] : r.map)
             {
                 const std::string& full = entry.fullName;
+                if (entry.leaf == target && why)
+                {
+                    why->candidates.push_back(full);
+                }
                 if (entry.leaf == target && (!best.is_valid() || full < bestFull))
                 {
                     best = entry.type;
                     bestFull = full;
                 }
             }
-            return best.is_valid() ? best : rttr::type::get_by_name(std::string()); // invalid
+            return best.is_valid() ? explain(Via::ShortName, best) : rttr::type::get_by_name(std::string()); // invalid
         }
     } // namespace
+
+    TypeBridge::ResolveExplanation TypeBridge::explainResolve(std::string_view flecsName)
+    {
+        ResolveExplanation why;
+        if (flecsName.empty())
+        {
+            return why;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        resolveLocked(r, std::string(flecsName), &why); // never the memo: show the work
+        if (why.via == ResolveExplanation::Via::None)
+        {
+            why.candidates.clear();
+        }
+        std::sort(why.candidates.begin(), why.candidates.end());
+        return why;
+    }
 
     rttr::variant TypeBridge::wrap(rttr::type t, void* obj)
     {

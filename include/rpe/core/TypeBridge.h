@@ -244,6 +244,26 @@ namespace rpe
         // string source (const char* / std::string / view).
         static rttr::type resolveByName(std::string_view flecsName);
 
+        // resolveByName, showing its work — for diagnostics (see rpe/ecs/HealthCheck.h),
+        // never the hot path. `via` is the rung that decided; `candidates` lists every
+        // bridged type that matched AT that rung (by RTTR name), so more than one at
+        // ShortName means the choice between same-leaf types was a tie-break.
+        struct ResolveExplanation
+        {
+            enum class Via
+            {
+                None,         // nothing bridged matches
+                Alias,        // an explicit or C++-name alias
+                ExactName,    // the full RTTR name, separator-insensitively
+                ScopedSuffix, // a scope-aligned tail of a longer RTTR name
+                ShortName     // the leaf only — ambiguous if several share it
+            };
+            rttr::type type = rttr::type::get_by_name(std::string()); // invalid if None
+            Via via = Via::None;
+            std::vector<std::string> candidates;
+        };
+        static ResolveExplanation explainResolve(std::string_view flecsName);
+
         // Wrap `obj` as a variant holding a typed pointer (invalid if unregistered).
         static rttr::variant wrap(rttr::type t, void* obj);
 

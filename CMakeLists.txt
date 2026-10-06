@@ -136,6 +136,7 @@ if(RPE_WITH_FLECS)
         src/ecs/EcsMirror.cpp
         src/ecs/MirrorChannel.cpp
         src/ecs/ComponentScan.cpp
+        src/ecs/HealthCheck.cpp
         resources/rpe_resources.qrc
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
@@ -359,6 +360,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_read_only_test test/read_only_test.cpp)
     target_link_libraries(rpe_read_only_test PRIVATE rpe_gui)
+
+    add_executable(rpe_health_check_test test/health_check_test.cpp)
+    target_link_libraries(rpe_health_check_test PRIVATE rpe_gui)
 
     # A stand-in plugin: a SEPARATE shared library registering hinted types, so the
     # cross-module metadata lookup is exercised for real.
