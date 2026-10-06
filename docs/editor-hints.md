@@ -29,6 +29,7 @@ RTTR_REGISTRATION
 - [Hint reference](#hint-reference)
 - [`rpe::editor::*` values](#rpeeditor-values)
 - [Editors by type](#editors-by-type)
+- [Quick-edit helpers](#quick-edit-helpers) — inline vector row, drag to scrub, colour swatch
 - [Read-only values](#read-only-values)
 - [Why the constants, and never strings](#why-the-constants-and-never-strings)
 - [Edge cases](#edge-cases)
@@ -85,6 +86,51 @@ folder; a hint pins the dialog kind.
 
 Float **display** precision is global: `rpe::TypeRenderer::setFloatDecimals(3)`
 (the `Decimals` hint is for the editor only).
+
+## Quick-edit helpers
+
+These need no hint; they kick in by shape.
+
+### Inline vector row
+
+A struct with **2–4 numeric fields** (`Vec2`, `Vec3`, `Color4`, `Size2`, …) can be
+edited **on its own row**: double-click the `[1, 2, 3]` summary and every field
+gets a compact box side by side. Fields named `x/y/z/w` or `r/g/b/a` carry a
+coloured axis chip (red/green/blue/grey); other names show as a small label.
+The row still expands as usual to edit one field.
+
+- Each field keeps its own `Min`/`Max`/`Step`/`Decimals`.
+- Only the fields you **changed** are written — the others keep their live value
+  (in the mirror, each changed field is a separate edit).
+- Not offered when the struct is read-only, any field is read-only, a field is a
+  `bool`, a struct, or an integer type that gets a line edit (`unsigned int`,
+  `long`, 64-bit).
+
+### Drag to scrub
+
+Press on a numeric property's **name** and drag horizontally to change its
+value; the cursor turns into a ↔ over names that scrub.
+
+| | |
+|---|---|
+| step | the `Step` hint, else 0.1 (floats) / 1 (integers) per 4 px |
+| Shift | fine — step × 0.1 |
+| Ctrl | coarse — step × 10 |
+| Esc (while dragging) | restores the starting value |
+| range | clamped to `Min`/`Max` |
+
+A plain click still just selects the row — nothing changes until the mouse
+moves past the platform drag distance, and the value starts from where you
+crossed it, so it never jumps. Read-only values never scrub. Turn it off with
+`editor->setDragToScrubEnabled(false)`.
+
+Each step is a normal edit: under `LocalEdit` the row becomes a draft, under
+`WriteBack`/mirror the value is written as you drag.
+
+### Colour swatch
+
+A `QColor` value, and a **string** with `editor::Color`, show a swatch of the
+colour in the value cell (a string that isn't a valid colour shows none).
 
 ## Read-only values
 

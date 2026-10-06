@@ -18,6 +18,7 @@
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
 
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -532,6 +533,21 @@ namespace rpe::varedit
         }
         const QString a = TypeRenderer::toDisplayString(before);
         return !a.isEmpty() && a == TypeRenderer::toDisplayString(newVal);
+    }
+
+    rttr::variant numberAs(double value, rttr::type t)
+    {
+        const rttr::type r = TypeRenderer::rawType(t);
+        if (r == rttr::type::get<double>())
+        {
+            return value;
+        }
+        if (r == rttr::type::get<float>())
+        {
+            return static_cast<float>(value);
+        }
+        rttr::variant v = static_cast<int64_t>(std::llround(value));
+        return v.convert(r) ? v : rttr::variant();
     }
 
 } // namespace rpe::varedit

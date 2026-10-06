@@ -1,20 +1,27 @@
 #include "rpe/gui/PropertyEditor.h"
 
+#include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/PropertyDelegate.h"
+#include "rpe/gui/VariantEditorFactory.h"
 
 #include <QAction>
-#include <QHBoxLayout>
-#include <QHeaderView>
-#include <QLabel>
-#include <QLineEdit>
 #include <QApplication>
 #include <QClipboard>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
+#include <QScopedValueRollback>
 #include <QSortFilterProxyModel>
 #include <QToolButton>
-#include <QScopedValueRollback>
 #include <QTreeView>
 #include <QVBoxLayout>
+
+#include <algorithm>
+#include <cmath>
 
 namespace rpe
 {
@@ -114,6 +121,11 @@ namespace rpe
         _view->setModel(_proxy);
         _view->setItemDelegateForColumn(1, _delegate);
         _view->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::SelectedClicked | QAbstractItemView::EditKeyPressed);
+        // Drag-to-scrub watches the viewport (hover cursor, press/drag/release) and
+        // the view (Esc mid-drag).
+        _view->viewport()->setMouseTracking(true);
+        _view->viewport()->installEventFilter(this);
+        _view->installEventFilter(this);
         _view->setAlternatingRowColors(true);
         _view->setUniformRowHeights(true);
         _view->setAnimated(false); // keep redraws cheap under live updates
@@ -343,6 +355,173 @@ namespace rpe
     {
         _toolbar->setVisible(visible);
     }
+    // ── Drag-to-scrub ─────────────────────────────────────────────────────────────
+
+    void PropertyEditor::setDragToScrubEnabled(bool on)
+    {
+        _scrubEnabled = on;
+        if (!on)
+        {
+            _endScrub(false);
+            _view->viewport()->unsetCursor();
+        }
+    }
+
+    bool PropertyEditor::_isScrubbable(const QModelIndex& nameIndex) const
+    {
+        if (!nameIndex.isValid() || nameIndex.column() != 0)
+        {
+            return false;
+        }
+        const QModelIndex value = nameIndex.siblingAtColumn(1);
+        if (!(value.flags() & Qt::ItemIsEditable) || !value.data(IsLeafRole).toBool())
+        {
+            return false; // read-only rows, structs, the whole editor in read-only mode
+        }
+        const rttr::variant declared = value.data(DeclaredTypeRole).value<rttr::variant>();
+        if (!declared.is_valid())
+        {
+            return false;
+        }
+        const rttr::type t = TypeRenderer::rawType(declared.get_value<rttr::type>());
+        return t.is_arithmetic() && t != rttr::type::get<bool>();
+    }
+
+    void PropertyEditor::_applyScrub(int dx, Qt::KeyboardModifiers mods)
+    {
+        if (!_scrubValue.isValid())
+        {
+            return;
+        }
+        const rttr::type t = TypeRenderer::rawType(
+            _scrubValue.data(DeclaredTypeRole).value<rttr::variant>().get_value<rttr::type>());
+        const bool floating = t == rttr::type::get<float>() || t == rttr::type::get<double>()
+            || t == rttr::type::get<long double>();
+        const QVariant stepHint = _scrubValue.data(StepRole);
+        double step = stepHint.isValid() && stepHint.toDouble() > 0 ? stepHint.toDouble() : (floating ? 0.1 : 1.0);
+        if (mods & Qt::ShiftModifier)
+        {
+            step *= 0.1; // fine
+        }
+        else if (mods & Qt::ControlModifier)
+        {
+            step *= 10.0; // coarse
+        }
+        constexpr double kPixelsPerStep = 4.0;
+        double v = _scrubStart + (dx / kPixelsPerStep) * step;
+        if (!floating)
+        {
+            v = std::round(v);
+        }
+        if (const QVariant lo = _scrubValue.data(MinRole); lo.isValid())
+        {
+            v = std::max(v, lo.toDouble());
+        }
+        if (const QVariant hi = _scrubValue.data(MaxRole); hi.isValid())
+        {
+            v = std::min(v, hi.toDouble());
+        }
+        if (v == _scrubLast)
+        {
+            return; // nothing changed — no write
+        }
+        const rttr::variant typed = varedit::numberAs(v, t);
+        if (typed.is_valid() && _view->model()->setData(_scrubValue, QVariant::fromValue(typed), Qt::EditRole))
+        {
+            _scrubLast = v;
+        }
+    }
+
+    void PropertyEditor::_endScrub(bool restore)
+    {
+        if (_scrubbing && restore && _scrubValue.isValid() && _scrubLast != _scrubStart)
+        {
+            const rttr::type t = TypeRenderer::rawType(
+                _scrubValue.data(DeclaredTypeRole).value<rttr::variant>().get_value<rttr::type>());
+            const rttr::variant typed = varedit::numberAs(_scrubStart, t);
+            if (typed.is_valid())
+            {
+                _view->model()->setData(_scrubValue, QVariant::fromValue(typed), Qt::EditRole);
+            }
+        }
+        _scrubArmed = false;
+        _scrubbing = false;
+        _scrubValue = QPersistentModelIndex();
+    }
+
+    bool PropertyEditor::eventFilter(QObject* obj, QEvent* ev)
+    {
+        if (obj == _view->viewport() && _scrubEnabled)
+        {
+            switch (ev->type())
+            {
+            case QEvent::MouseMove:
+            {
+                auto* me = static_cast<QMouseEvent*>(ev);
+                if (_scrubArmed && (me->buttons() & Qt::LeftButton))
+                {
+                    const int dx = me->pos().x() - _scrubPressX;
+                    if (!_scrubbing)
+                    {
+                        if (std::abs(dx) < QApplication::startDragDistance())
+                        {
+                            return false; // still a click, not a drag
+                        }
+                        // Crossing the threshold STARTS the drag here: re-anchor, so
+                        // the value doesn't jump by the threshold's worth of pixels.
+                        _scrubbing = true;
+                        _scrubPressX = me->pos().x();
+                        return true;
+                    }
+                    _applyScrub(dx, me->modifiers());
+                    return true; // no rubber-band / drag-selection while scrubbing
+                }
+                // Hover: advertise the scrubbable names.
+                if (_isScrubbable(_view->indexAt(me->pos())))
+                {
+                    _view->viewport()->setCursor(Qt::SizeHorCursor);
+                }
+                else
+                {
+                    _view->viewport()->unsetCursor();
+                }
+                return false;
+            }
+            case QEvent::MouseButtonPress:
+            {
+                auto* me = static_cast<QMouseEvent*>(ev);
+                const QModelIndex idx = _view->indexAt(me->pos());
+                if (me->button() == Qt::LeftButton && _isScrubbable(idx))
+                {
+                    // Arm, but let the press through: a plain click still selects.
+                    _scrubArmed = true;
+                    _scrubbing = false;
+                    _scrubPressX = me->pos().x();
+                    _scrubValue = idx.siblingAtColumn(1);
+                    const rttr::variant v = TypeRenderer::unwrap(_scrubValue.data(RttrVariantRole).value<rttr::variant>());
+                    _scrubStart = _scrubLast = v.is_valid() ? v.to_double() : 0.0;
+                }
+                return false;
+            }
+            case QEvent::MouseButtonRelease:
+            {
+                const bool wasScrubbing = _scrubbing;
+                _endScrub(false);
+                return wasScrubbing; // a drag's release isn't a click
+            }
+            default:
+                break;
+            }
+        }
+        if (obj == _view && ev->type() == QEvent::KeyPress && _scrubbing
+            && static_cast<QKeyEvent*>(ev)->key() == Qt::Key_Escape)
+        {
+            _endScrub(true); // Esc mid-drag: back to where it started
+            return true;
+        }
+        return QWidget::eventFilter(obj, ev);
+    }
+
     void PropertyEditor::expandAll()
     {
         const QScopedValueRollback<bool> bulk(_bulkExpanding, true);

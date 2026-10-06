@@ -5,6 +5,7 @@
 #include "rpe/gui/PropertyModel.h"
 
 #include <QHash>
+#include <QPersistentModelIndex>
 #include <QSet>
 #include <QString>
 #include <QWidget>
@@ -103,6 +104,20 @@ namespace rpe
             return _view;
         }
 
+        // Drag a number's NAME left/right to change it (on by default) — the
+        // pointer shows a horizontal-resize cursor over such names. Shift = fine,
+        // Ctrl = coarse; Esc during the drag restores the starting value. The
+        // step is the property's Step hint (else 0.1 for floats, 1 for integers),
+        // the result kept within its Min/Max hints. Read-only values don't scrub.
+        void setDragToScrubEnabled(bool on);
+        bool isDragToScrubEnabled() const
+        {
+            return _scrubEnabled;
+        }
+
+    protected:
+        bool eventFilter(QObject* obj, QEvent* ev) override;
+
     signals:
         void propertyEdited(const QString& path, const rttr::variant& newValue);
         // Pin/unpin requests from the context menu (only when pinning is enabled).
@@ -127,6 +142,17 @@ namespace rpe
         bool _bulkExpanding = false;
         // Enable the Reset control only while the current component has a frozen value.
         void _updateResetEnabled();
+        // Drag-to-scrub (see setDragToScrubEnabled).
+        bool _isScrubbable(const QModelIndex& nameIndex) const;
+        void _applyScrub(int dx, Qt::KeyboardModifiers mods);
+        void _endScrub(bool restore);
+        bool _scrubEnabled = true;
+        bool _scrubArmed = false; // pressed on a scrubbable name; not dragging yet
+        bool _scrubbing = false;  // past the drag threshold
+        QPersistentModelIndex _scrubValue; // the value cell (proxy index)
+        int _scrubPressX = 0;
+        double _scrubStart = 0;
+        double _scrubLast = 0;
         // Show/hide the "no reflected properties" hint for the just-bound type.
         void _updateEmptyHint(rttr::type t);
 

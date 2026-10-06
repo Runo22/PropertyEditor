@@ -10,6 +10,7 @@ namespace rpe
 {
 
     class PropertyModel;
+    class VectorEditor;
 
     // The read-only mark, shared by every view that shows property values (the
     // property grid and the watch list), so a locked value looks the same in both:
@@ -48,6 +49,10 @@ namespace rpe
         // type isn't inline-editable. Separate so createEditor pins the row only on
         // success.
         QWidget* _makeEditor(rttr::type t, const QString& ed, const QModelIndex& index, QWidget* parent) const;
+        // A small numeric struct's row: one box per field (see InlineVectorRole).
+        QWidget* _makeVectorEditor(const QModelIndex& index, QWidget* parent) const;
+        void _setVectorData(VectorEditor* editor, const QModelIndex& index) const;
+        void _commitVector(VectorEditor* editor, const QModelIndex& index) const;
 
         PropertyModel* _model;
         // Track the in-progress edit so a cancelled edit (Esc / focus loss without

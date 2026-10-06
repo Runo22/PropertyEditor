@@ -367,6 +367,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_editor_commit_test test/editor_commit_test.cpp)
     target_link_libraries(rpe_editor_commit_test PRIVATE rpe_gui)
 
+    add_executable(rpe_visual_editors_test test/visual_editors_test.cpp)
+    target_link_libraries(rpe_visual_editors_test PRIVATE rpe_gui)
+
     # A stand-in plugin: a SEPARATE shared library registering hinted types, so the
     # cross-module metadata lookup is exercised for real.
     add_library(rpe_test_hint_plugin SHARED test/plugin/hint_plugin.cpp)

@@ -41,6 +41,8 @@ namespace rpe
                           //           array's "[N]" is matchable even while expanded)
         ReadOnlyRole,     // QString — why the row can't be edited (see rpe::readOnlyReason);
                           //           empty when it can. Drives the lock mark + tooltip.
+        InlineVectorRole, // bool    — a struct row of 2–4 writable numeric fields that
+                          //           edits inline as one row (x / y / z / w boxes)
     };
 
     // How committed edits are applied.
@@ -190,6 +192,9 @@ namespace rpe
         // bound schema, the bridge registry or the set of locked types changes.
         // flags() is asked on every paint.
         QString _readOnlyReason(const PropertyNode* node) const;
+        // A struct of 2–4 numeric (non-bool, non-enum, int-sized or floating) leaf
+        // fields, none of them read-only: its row can be edited inline as a vector.
+        bool _isInlineVector(const PropertyNode* node) const;
         mutable QHash<QString, QString> _roCache;
         mutable quint64 _roRegistryGen = ~quint64(0);
         mutable quint64 _roLockGen = ~quint64(0);

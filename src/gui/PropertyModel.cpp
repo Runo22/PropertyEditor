@@ -928,7 +928,22 @@ namespace rpe
                     return v.get_value<QColor>();
                 }
             }
+            // …and so do STRINGS that hold a colour (the rpe::editor::Color hint):
+            // "#AARRGGBB", "#RRGGBB" or a named colour. Not a colour → no swatch.
+            if (index.column() == 1 && node->isLeaf()
+                && metaString(node->prop(), hint::Editor) == QLatin1String(editor::Color))
+            {
+                const rttr::variant v = TypeRenderer::unwrap(node->effectiveValue());
+                const QColor c(v.is_valid() ? TypeRenderer::toDisplayString(v) : QString());
+                if (c.isValid())
+                {
+                    return c;
+                }
+            }
             break;
+
+        case InlineVectorRole:
+            return _isInlineVector(node);
 
         case ReadOnlyRole:
             return _readOnlyReason(node);
@@ -1082,7 +1097,39 @@ namespace rpe
         {
             f |= Qt::ItemIsEditable;
         }
+        // A small numeric struct (Vec3, a colour as floats, a 2D size…) also edits
+        // inline on its OWN row — one box per field — without expanding it.
+        if (!_readOnly && index.column() == 1 && _isInlineVector(node))
+        {
+            f |= Qt::ItemIsEditable;
+        }
         return f;
+    }
+
+    bool PropertyModel::_isInlineVector(const PropertyNode* node) const
+    {
+        if (!node || node == _root.get() || node->isLeaf() || node->arraySize() >= 0)
+        {
+            return false;
+        }
+        const auto& ch = node->children();
+        if (ch.size() < 2 || ch.size() > 4 || !_readOnlyReason(node).isEmpty())
+        {
+            return false;
+        }
+        for (const PropertyNode* c : ch)
+        {
+            const rttr::type t = TypeRenderer::rawType(c->type());
+            const bool wide = t == rttr::type::get<long>() || t == rttr::type::get<unsigned long>()
+                || t == rttr::type::get<long long>() || t == rttr::type::get<unsigned long long>()
+                || t == rttr::type::get<unsigned int>();
+            if (!c->isLeaf() || !t.is_arithmetic() || t == rttr::type::get<bool>() || wide
+                || !_readOnlyReason(c).isEmpty())
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     QVariant PropertyModel::headerData(int section, Qt::Orientation orientation, int role) const

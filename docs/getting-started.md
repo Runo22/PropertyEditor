@@ -149,6 +149,7 @@ of the policy — see [threading-mirror.md](threading-mirror.md).
 rpe::TypeRenderer::setFloatDecimals(3);        // float display precision (default 3)
 editor->setToolbarVisible(false);              // hide the filter/reset row
 editor->setReadOnly(true);                     // inspector-only
+editor->setDragToScrubEnabled(false);          // no drag-on-name value scrubbing (on by default)
 qApp->setStyleSheet(rpe::darkStyleSheet());    // built-in dark theme (optional)
 ```
 

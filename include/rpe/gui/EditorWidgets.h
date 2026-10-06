@@ -5,6 +5,7 @@
 #include <QList>
 #include <QPair>
 #include <QString>
+#include <QVector>
 #include <QWidget>
 
 #include <cstdint>
@@ -170,6 +171,49 @@ namespace rpe
         double _step = 0;  // value per slider tick
         int _ticks = 1;    // slider positions - 1
         bool _syncing = false;
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  VectorEditor — a small numeric struct (Vec3, a size, a float colour…) edited
+    //  on ONE row: a short coloured axis label and a compact spin box per field.
+    //  Fields named x / y / z / w (or r / g / b / a) get the usual axis colours
+    //  and a one-letter label; any other field is labelled with its name.
+    //
+    //  The editor only holds numbers; the delegate reads each field's value in,
+    //  and writes back only the fields that changed (each through its own path).
+    // ─────────────────────────────────────────────────────────────────────────────
+    class VectorEditor : public QWidget
+    {
+        Q_OBJECT
+
+    public:
+        struct Field
+        {
+            QString name;           // the property's display name
+            bool integral = false;  // spin box kind
+            double min = -1e15;     // the field's own Min/Max/Step/Decimals hints
+            double max = 1e15;
+            double step = 0;        // 0 → 0.1 (floating) / 1 (integral)
+            int decimals = 3;
+        };
+
+        explicit VectorEditor(const QVector<Field>& fields, QWidget* parent = nullptr);
+
+        int count() const
+        {
+            return _spins.size();
+        }
+        double value(int i) const;
+        void setValue(int i, double v);
+        QAbstractSpinBox* spinBox(int i) const
+        {
+            return _spins.value(i);
+        }
+        // The axis colour a field name maps to (invalid for an ordinary name).
+        static QColor axisColor(const QString& name);
+
+    private:
+        QVector<QAbstractSpinBox*> _spins;
     };
 
 } // namespace rpe

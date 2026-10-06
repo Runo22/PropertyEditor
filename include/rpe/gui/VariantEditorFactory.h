@@ -55,6 +55,11 @@ namespace rpe::varedit
     // editor's range (Min/Max) and pressing Enter would silently write the
     // clamped value back.
     void rememberOpeningValue(QWidget* editor, rttr::type t);
+
+    // `value` as a variant of the numeric type `t` (float, double, or an integer
+    // type — rounded, and range-checked by RTTR's conversion). Invalid when it
+    // can't be represented.
+    rttr::variant numberAs(double value, rttr::type t);
     bool unchangedSinceOpen(QWidget* editor, const rttr::variant& newVal);
 
 } // namespace rpe::varedit
