@@ -2,8 +2,21 @@
 #include <rpe/core/TypeBridge.h>
 #include <rttr/type>
 #include <flecs.h>
-#include <dlfcn.h>
+#include <rpe/core/EditorHints.h>
 #include <cstdio>
+#ifdef _WIN32
+#include <windows.h>
+static void* openLib(const char* p) { return LoadLibraryA(p); }
+static void* sym(void* h, const char* n) { return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(h), n)); }
+static bool closeLib(void* h) { return FreeLibrary(static_cast<HMODULE>(h)) != 0; }
+static const char* libError() { return "LoadLibrary failed"; }
+#else
+#include <dlfcn.h>
+static void* openLib(const char* p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
+static void* sym(void* h, const char* n) { return dlsym(h, n); }
+static bool closeLib(void* h) { return dlclose(h) == 0; }
+static const char* libError() { return dlerror(); }
+#endif
 #include <string>
 
 static int fails = 0;
@@ -17,11 +30,11 @@ struct Plugin
     std::size_t (*count)() = nullptr;
     bool open(const char* path)
     {
-        h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-        if (!h) { std::printf("dlopen: %s\n", dlerror()); return false; }
-        load = reinterpret_cast<void (*)(flecs::world*)>(dlsym(h, "plugin_load"));
-        unload = reinterpret_cast<void (*)(flecs::world*)>(dlsym(h, "plugin_unload"));
-        count = reinterpret_cast<std::size_t (*)()>(dlsym(h, "plugin_type_count"));
+        h = openLib(path);
+        if (!h) { std::printf("load: %s\n", libError()); return false; }
+        load = reinterpret_cast<void (*)(flecs::world*)>(sym(h, "plugin_load"));
+        unload = reinterpret_cast<void (*)(flecs::world*)>(sym(h, "plugin_unload"));
+        count = reinterpret_cast<std::size_t (*)()>(sym(h, "plugin_type_count"));
         return load && unload && count;
     }
 };
@@ -49,6 +62,10 @@ int main(int, char** argv)
         check("speed max = kMaxSpeed", meta(light, "speed", "rpe.max") == 250.0);
         check("iconPath label", light.get_property("iconPath").get_metadata(std::string("rpe.label")).to_string() == "Icon");
         check("damage gets flags hint automatically", light.get_property("damage").get_metadata(std::string("rpe.flags")).to_bool());
+        // Why generated code uses std::string keys: the old const char* form only
+        // matches when the key pointer comes from the same module.
+        std::printf("    info: lookup with this module's rpe::hint::Min pointer %s\n",
+                    light.get_property("intensity").get_metadata(rpe::hint::Min).is_valid() ? "found it" : "does NOT find it");
         check("non-PROP field 'cache' not registered", !light.get_property("cache").is_valid());
 
         rttr::type stats = rttr::type::get_by_name("game::Stats");
@@ -84,8 +101,8 @@ int main(int, char** argv)
         check("after unload: flecs component deleted", !world.lookup("game::Light").is_valid() && !world.lookup("ai::Stats").is_valid());
         check("after unload: Lamp kept, only its name left", lamp.is_alive() && std::string(lamp.type().str().c_str()) == "(Identifier,Name)");
         check("after unload: rpe no longer resolves game.Light", !rpe::TypeBridge::resolveByName("game.Light").is_valid());
-        dlclose(p.h);
-        check("after dlclose: RTTR forgot game::Light", !rttr::type::get_by_name("game::Light").is_valid());
+        check("library unloaded", closeLib(p.h));
+        check("after unload: RTTR forgot game::Light", !rttr::type::get_by_name("game::Light").is_valid());
         world.progress();
     }
     std::printf("%s (%d failure(s))\n", fails ? "FAILED" : "ALL PASSED", fails);
