@@ -869,6 +869,9 @@ int main(int argc, char** argv)
     {
         cargs.emplace_back("/TP");
         cargs.emplace_back("/DREFLECT_PARSE");
+        // The MSVC STL #errors on Clang versions it was not released with; we only
+        // need the declarations, so don't let the installed LLVM's age block parsing.
+        cargs.emplace_back("/D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
     }
     else
     {
