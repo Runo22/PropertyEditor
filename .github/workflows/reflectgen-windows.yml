@@ -19,7 +19,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cxx: [17, 23] # 23 → /std:c++latest, as in the host project
+        include:
+          - cxx: 17
+            flags: ''
+          # 23 → /std:c++latest, as in the host project. RTTR 0.9.6's bind_impl.h
+          # does not compile under the strict /permissive- that C++20+ turns on.
+          - cxx: 23
+            flags: '/permissive'
+    name: msvc (c++${{ matrix.cxx }})
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +46,7 @@ jobs:
           "C:\Program Files\LLVM\bin\clang.exe" --version
           cmake -S ..\rttr -B ..\rttr-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC=OFF -DBUILD_RTTR_DYNAMIC=ON -DBUILD_UNIT_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_DOCUMENTATION=OFF -DBUILD_BENCHMARKS=OFF -DBUILD_PACKAGE=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "-DCMAKE_INSTALL_PREFIX=%CD%\..\rttr-inst" || exit /b 1
           cmake --build ..\rttr-build --target install || exit /b 1
-          cmake -S tools\reflectgen\test -B build-rg -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.cxx }} "-DCMAKE_PREFIX_PATH=%CD%\..\rttr-inst" "-DFLECS_ROOT=%CD%\..\flecs" "-DRPE_ROOT=%CD%" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 || exit /b 1
+          cmake -S tools\reflectgen\test -B build-rg -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.cxx }} "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc ${{ matrix.flags }}" "-DCMAKE_PREFIX_PATH=%CD%\..\rttr-inst" "-DFLECS_ROOT=%CD%\..\flecs" "-DRPE_ROOT=%CD%" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 || exit /b 1
           cmake --build build-rg -v || exit /b 1
 
       - name: Show generated code
