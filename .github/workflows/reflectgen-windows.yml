@@ -21,19 +21,20 @@ jobs:
       matrix:
         include:
           - cxx: 17
-            flags: ''
+            rttr: v0.9.6
           # 23 → /std:c++latest, as in the host project. RTTR 0.9.6's bind_impl.h
-          # does not compile under the strict /permissive- that C++20+ turns on.
+          # does not compile with MSVC in C++20+ mode (even with /permissive);
+          # RTTR master carries the fixes.
           - cxx: 23
-            flags: '/permissive'
-    name: msvc (c++${{ matrix.cxx }})
+            rttr: master
+    name: msvc (c++${{ matrix.cxx }}, rttr ${{ matrix.rttr }})
     steps:
       - uses: actions/checkout@v4
 
       - name: Fetch RTTR and flecs
         shell: bash
         run: |
-          git clone -q --depth 1 -b v0.9.6 https://github.com/rttrorg/rttr.git ../rttr
+          git clone -q --depth 1 -b ${{ matrix.rttr }} https://github.com/rttrorg/rttr.git ../rttr
           git clone -q --depth 1 -b v4.1.5 https://github.com/SanderMertens/flecs.git ../flecs
 
       - name: Build with MSVC + Ninja
@@ -46,7 +47,7 @@ jobs:
           "C:\Program Files\LLVM\bin\clang.exe" --version
           cmake -S ..\rttr -B ..\rttr-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC=OFF -DBUILD_RTTR_DYNAMIC=ON -DBUILD_UNIT_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_DOCUMENTATION=OFF -DBUILD_BENCHMARKS=OFF -DBUILD_PACKAGE=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "-DCMAKE_INSTALL_PREFIX=%CD%\..\rttr-inst" || exit /b 1
           cmake --build ..\rttr-build --target install || exit /b 1
-          cmake -S tools\reflectgen\test -B build-rg -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.cxx }} "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc ${{ matrix.flags }}" "-DCMAKE_PREFIX_PATH=%CD%\..\rttr-inst" "-DFLECS_ROOT=%CD%\..\flecs" "-DRPE_ROOT=%CD%" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 || exit /b 1
+          cmake -S tools\reflectgen\test -B build-rg -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.cxx }} "-DCMAKE_PREFIX_PATH=%CD%\..\rttr-inst" "-DFLECS_ROOT=%CD%\..\flecs" "-DRPE_ROOT=%CD%" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 || exit /b 1
           cmake --build build-rg -v || exit /b 1
 
       - name: Show generated code
