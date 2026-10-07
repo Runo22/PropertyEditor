@@ -24,12 +24,14 @@
 
 #include "reflect/Reflect.h"
 
-#include <rttr/registration.h>
-
+// Standard headers first: RTTR 0.9.6's variant.h uses std::string without
+// including <string>, which recent MSVC STLs no longer pull in transitively.
 #include <cstddef>
 #include <string>
 #include <type_traits>
 #include <vector>
+
+#include <rttr/registration.h>
 
 #if !defined(REFLECT_NO_RPE) && __has_include(<rpe/core/TypeBridge.h>)
 #define REFLECT_WITH_RPE 1
