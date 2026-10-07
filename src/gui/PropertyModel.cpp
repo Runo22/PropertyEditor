@@ -27,16 +27,37 @@ namespace rpe
             return rttr::type::get<void>().get_property(std::string());
         }
 
+        // RTTR compares const char* metadata keys by ADDRESS, and every module (exe,
+        // each plugin DLL) has its own copy of the rpe::hint::* literals — so a hint
+        // registered in a plugin is invisible to a const char* lookup from here.
+        // std::string keys compare by content and work across modules; try those
+        // first, then the const char* form for same-module registrations.
+        rttr::variant metaValue(const rttr::property& p, const char* key)
+        {
+            rttr::variant m = p.get_metadata(std::string(key));
+            if (!m.is_valid())
+            {
+                m = p.get_metadata(key);
+            }
+            return m;
+        }
+
         QString metaString(const rttr::property& p, const char* key)
         {
             if (!p.is_valid())
             {
                 return {};
             }
-            const rttr::variant m = p.get_metadata(key);
+            const rttr::variant m = metaValue(p, key);
             if (!m.is_valid())
             {
                 return {};
+            }
+            // RTTR cannot to_string() a const char* value (e.g. rpe::editor::Color).
+            if (m.is_type<const char*>())
+            {
+                const char* c = m.get_value<const char*>();
+                return c ? QString::fromUtf8(c) : QString();
             }
             bool ok = false;
             const std::string s = m.to_string(&ok);
@@ -49,7 +70,7 @@ namespace rpe
             {
                 return def;
             }
-            const rttr::variant m = p.get_metadata(key);
+            const rttr::variant m = metaValue(p, key);
             if (!m.is_valid())
             {
                 return def;
@@ -65,7 +86,7 @@ namespace rpe
             {
                 return {};
             }
-            const rttr::variant m = p.get_metadata(key);
+            const rttr::variant m = metaValue(p, key);
             if (!m.is_valid())
             {
                 return {};
