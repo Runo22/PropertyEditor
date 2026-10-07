@@ -74,6 +74,11 @@ depfile, and only rewrites output that changed: a no-op build stays a no-op.
 `C:/Program Files/LLVM`. Use a recent LLVM — the MSVC STL refuses Clang versions
 older than the ones it supports.
 
+**Verified on MSVC** by `.github/workflows/reflectgen-windows.yml` (VS 18 /
+MSVC 14.51, runner LLVM): C++17 with RTTR 0.9.6 and C++23 (`/std:c++latest`)
+with RTTR master. RTTR 0.9.6 itself does not compile with MSVC in C++20+ mode
+(`bind_impl.h`, `/permissive` does not help) — use RTTR master there.
+
 ## Module lifecycle (plugins)
 
 Call from the module that owns the types — the plugin's own entry points:
