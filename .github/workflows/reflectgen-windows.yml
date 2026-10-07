@@ -1,0 +1,53 @@
+name: reflectgen (Windows / MSVC)
+
+# Real-MSVC check of tools/reflectgen: builds the generator against the LLVM that
+# ships on the runner, generates registration for a plugin DLL, then loads,
+# inspects, unloads (FreeLibrary) and reloads it from a host exe.
+on:
+  push:
+    branches: [reflectgen]
+    paths:
+      - 'tools/reflectgen/**'
+      - 'src/core/**'
+      - 'include/rpe/**'
+      - '.github/workflows/reflectgen-windows.yml'
+  workflow_dispatch:
+
+jobs:
+  msvc:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [17, 23] # 23 → /std:c++latest, as in the host project
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch RTTR and flecs
+        shell: bash
+        run: |
+          git clone -q --depth 1 -b v0.9.6 https://github.com/rttrorg/rttr.git ../rttr
+          git clone -q --depth 1 -b v4.1.5 https://github.com/SanderMertens/flecs.git ../flecs
+
+      - name: Build with MSVC + Ninja
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSDIR=%%i
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          where ninja || choco install ninja -y || exit /b 1
+          cl 2>&1 | findstr /C:"Version"
+          "C:\Program Files\LLVM\bin\clang.exe" --version
+          cmake -S ..\rttr -B ..\rttr-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC=OFF -DBUILD_RTTR_DYNAMIC=ON -DBUILD_UNIT_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_DOCUMENTATION=OFF -DBUILD_BENCHMARKS=OFF -DBUILD_PACKAGE=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "-DCMAKE_INSTALL_PREFIX=%CD%\..\rttr-inst" || exit /b 1
+          cmake --build ..\rttr-build --target install || exit /b 1
+          cmake -S tools\reflectgen\test -B build-rg -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.cxx }} "-DCMAKE_PREFIX_PATH=%CD%\..\rttr-inst" "-DFLECS_ROOT=%CD%\..\flecs" "-DRPE_ROOT=%CD%" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 || exit /b 1
+          cmake --build build-rg -v || exit /b 1
+
+      - name: Show generated code
+        shell: bash
+        run: cat build-rg/reflect_gen/game_plugin/plugin/game/Components.h.gen.cpp | head -80
+
+      - name: Run plugin load / unload / reload test
+        shell: cmd
+        run: |
+          set "PATH=%CD%\..\rttr-inst\bin;%PATH%"
+          ctest --test-dir build-rg --output-on-failure -V
