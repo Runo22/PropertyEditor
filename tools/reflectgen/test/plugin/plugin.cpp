@@ -1,7 +1,13 @@
 #include <reflect/Runtime.h>
 #include "game/Components.h"
 
-extern "C" __attribute__((visibility("default"))) void plugin_load(flecs::world* w)
+#ifdef _WIN32
+#define PLUGIN_API extern "C" __declspec(dllexport)
+#else
+#define PLUGIN_API extern "C" __attribute__((visibility("default")))
+#endif
+
+PLUGIN_API void plugin_load(flecs::world* w)
 {
     reflect::register_types();
     reflect::register_world(*w);
@@ -9,10 +15,10 @@ extern "C" __attribute__((visibility("default"))) void plugin_load(flecs::world*
     w->entity("Orc").set<game::Stats>({}).set<game::inner::Stats>({ 3 });
 }
 
-extern "C" __attribute__((visibility("default"))) void plugin_unload(flecs::world* w)
+PLUGIN_API void plugin_unload(flecs::world* w)
 {
     reflect::unregister_world(*w);
     reflect::unregister_types();
 }
 
-extern "C" __attribute__((visibility("default"))) std::size_t plugin_type_count() { return reflect::type_count(); }
+PLUGIN_API std::size_t plugin_type_count() { return reflect::type_count(); }
