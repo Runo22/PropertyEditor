@@ -8,11 +8,13 @@
 #include "rpe/gui/PropertyEditor.h"
 
 #include <QCheckBox>
+#include <QMenu>
 #include <QSplitter>
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <string>
 
 #include <rttr/instance.h>
@@ -168,11 +170,15 @@ namespace rpe
             _writeCheck->setVisible(true);
         }
 
+        // Clear the panels BEFORE handing the world to the list: the list auto-selects
+        // its top entity, which fills the component panel through _onEntitySelected.
+        // Clearing afterwards left that entity highlighted with an empty panel — and
+        // clicking it again changed nothing (it was already current).
         _world = world;
-        _entityList->setWorld(world);
         _liveTimer->stop();
         _componentList->clearEntity();
         _propertyEditor->unbind();
+        _entityList->setWorld(world);
         _applyEntityFilter(); // re-apply the configured filter to the new mode
     }
 
@@ -260,47 +266,135 @@ namespace rpe
         _entityList->setEntityRemovingEnabled(on);
     }
 
-    void EntityComponentBrowser::addEntityAction(const EntityAction& action)
+    qulonglong EntityComponentBrowser::_menuEntityId() const
     {
-        _entityActions.append(action);
-        _entityList->setContextActions(_entityActions);
+        return _mirrorEntity != 0 ? _mirrorEntity
+                                  : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
     }
 
-    void EntityComponentBrowser::addComponentAction(const ComponentAction& action)
+    int EntityComponentBrowser::addEntityAction(const EntityAction& action)
     {
-        _componentActions.append(action);
+        const int handle = _nextMenuHandle++;
+        _entityActions.append({ handle, action });
+        _pushEntityActions();
+        return handle;
+    }
+
+    void EntityComponentBrowser::removeEntityAction(int handle)
+    {
+        const auto n = _entityActions.size();
+        _entityActions.erase(std::remove_if(_entityActions.begin(), _entityActions.end(),
+                                            [handle](const auto& e) { return e.first == handle; }),
+                             _entityActions.end());
+        if (_entityActions.size() != n)
+            _pushEntityActions();
+    }
+
+    void EntityComponentBrowser::_pushEntityActions()
+    {
+        QVector<EntityAction> list;
+        list.reserve(_entityActions.size());
+        for (const auto& e : _entityActions)
+            list.append(e.second);
+        _entityList->setContextActions(list);
+    }
+
+    int EntityComponentBrowser::addComponentAction(const ComponentAction& action)
+    {
+        const int handle = _nextMenuHandle++;
+        _componentActions.append({ handle, action });
+        _pushComponentActions();
+        return handle;
+    }
+
+    void EntityComponentBrowser::removeComponentAction(int handle)
+    {
+        const auto n = _componentActions.size();
+        _componentActions.erase(std::remove_if(_componentActions.begin(), _componentActions.end(),
+                                               [handle](const auto& e) { return e.first == handle; }),
+                                _componentActions.end());
+        if (_componentActions.size() != n)
+            _pushComponentActions();
+    }
+
+    void EntityComponentBrowser::_pushComponentActions()
+    {
         // Wrap each host action so the widget-level callback (key, rawId) forwards the
         // CURRENTLY selected entity id, read at click time.
         QVector<ComponentListWidget::MenuAction> wrapped;
         wrapped.reserve(_componentActions.size());
-        for (const ComponentAction& a : _componentActions)
+        for (const auto& e : _componentActions)
         {
-            const auto cb = a.callback;
-            wrapped.append({ a.label, a.icon, [this, cb](const QString& key, qulonglong rawId) {
-                                const qulonglong id = _mirrorEntity != 0
-                                    ? _mirrorEntity
-                                    : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
-                                if (cb)
-                                    cb(id, key, rawId);
-                            } });
+            const auto cb = e.second.callback;
+            wrapped.append({ e.second.label, e.second.icon,
+                             [this, cb](const QString& key, qulonglong rawId) {
+                                 if (cb)
+                                     cb(_menuEntityId(), key, rawId);
+                             },
+                             e.second.menu });
         }
         _componentList->setContextActions(wrapped);
     }
 
-    void EntityComponentBrowser::setEntityMenuHook(std::function<void(qulonglong, QMenu&)> hook)
+    int EntityComponentBrowser::addEntityMenuHook(EntityMenuHook hook)
     {
-        _entityList->setContextMenuHook(std::move(hook));
+        const int handle = _nextMenuHandle++;
+        _entityMenuHooks.append({ handle, std::move(hook) });
+        _installMenuHooks();
+        return handle;
     }
 
-    void EntityComponentBrowser::setComponentMenuHook(
-        std::function<void(qulonglong, const QString&, qulonglong, QMenu&)> hook)
+    int EntityComponentBrowser::addComponentMenuHook(ComponentMenuHook hook)
     {
-        _componentList->setContextMenuHook([this, hook](const QString& key, qulonglong rawId, QMenu& menu) {
-            const qulonglong id = _mirrorEntity != 0
-                ? _mirrorEntity
-                : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
-            if (hook)
-                hook(id, key, rawId, menu);
+        const int handle = _nextMenuHandle++;
+        _componentMenuHooks.append({ handle, std::move(hook) });
+        _installMenuHooks();
+        return handle;
+    }
+
+    void EntityComponentBrowser::removeMenuHook(int handle)
+    {
+        auto byHandle = [handle](const auto& e) { return e.first == handle; };
+        _entityMenuHooks.erase(std::remove_if(_entityMenuHooks.begin(), _entityMenuHooks.end(), byHandle),
+                               _entityMenuHooks.end());
+        _componentMenuHooks.erase(std::remove_if(_componentMenuHooks.begin(), _componentMenuHooks.end(), byHandle),
+                                  _componentMenuHooks.end());
+    }
+
+    void EntityComponentBrowser::setEntityMenuHook(EntityMenuHook hook)
+    {
+        _entityMenuHook = std::move(hook);
+        _installMenuHooks();
+    }
+
+    void EntityComponentBrowser::setComponentMenuHook(ComponentMenuHook hook)
+    {
+        _componentMenuHook = std::move(hook);
+        _installMenuHooks();
+    }
+
+    void EntityComponentBrowser::_installMenuHooks()
+    {
+        // One widget-level hook per list that runs every registered hook. Each run
+        // iterates a COPY, so a hook may add or remove hooks while the menu builds.
+        _entityList->setContextMenuHook([this](qulonglong id, QMenu& menu) {
+            const EntityMenuHook primary = _entityMenuHook;
+            const auto hooks = _entityMenuHooks;
+            if (primary)
+                primary(id, menu);
+            for (const auto& h : hooks)
+                if (h.second)
+                    h.second(id, menu);
+        });
+        _componentList->setContextMenuHook([this](const QString& key, qulonglong rawId, QMenu& menu) {
+            const qulonglong id = _menuEntityId();
+            const ComponentMenuHook primary = _componentMenuHook;
+            const auto hooks = _componentMenuHooks;
+            if (primary)
+                primary(id, key, rawId, menu);
+            for (const auto& h : hooks)
+                if (h.second)
+                    h.second(id, key, rawId, menu);
         });
     }
 

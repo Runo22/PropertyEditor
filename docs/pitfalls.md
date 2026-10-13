@@ -110,9 +110,16 @@ smashing detected", fields with impossible values. When in doubt: clean rebuild.
 
 ### Unloading a plugin
 
-Call `rpe::TypeBridge::unregisterType<T>()` **before** the DLL is unloaded. After
-that rpe never calls into the plugin's code; inspecting a component whose bridge
-points into an unloaded DLL would.
+Before the DLL is unloaded:
+
+- `rpe::TypeBridge::unregisterType<T>()` for its types — after that rpe never
+  calls into the plugin's code; inspecting a component whose bridge points into
+  an unloaded DLL would;
+- `removeEntityAction` / `removeComponentAction` / `removeMenuHook` with the
+  handles its menu entries returned — the stored callbacks are its code too.
+
+A plugin should use `addEntityMenuHook` / `addComponentMenuHook`, never the
+single-slot `set*MenuHook`: a second plugin calling `set*` replaces the first.
 
 ## Prefabs & flecs
 

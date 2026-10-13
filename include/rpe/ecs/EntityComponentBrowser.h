@@ -10,10 +10,12 @@
 
 #include <QIcon>
 #include <QMetaType>
+#include <QPair>
 #include <QSet>
 #include <QVector>
 #include <QWidget>
 
+#include <functional>
 #include <memory>
 
 #include "rpe/ecs/flecs_prelude.h"
@@ -169,20 +171,33 @@ namespace rpe
         // mode queues a destroy on the sim thread; direct mode destructs under the
         // guard). Off by default.
         void setEntityRemovingEnabled(bool on);
-        // Add an app-specific entry to the ENTITY right-click menu (runs on the GUI
-        // thread with the clicked entity's id). Sits beside the built-in Delete.
-        void addEntityAction(const EntityAction& action);
-        // Add an app-specific entry to the COMPONENT right-click menu (runs with the
-        // selected entity's id, the component key and its flecs id).
-        void addComponentAction(const ComponentAction& action);
+        // ── Right-click menu extensions ─────────────────────────────────────────
+        // Static entries: a fixed label + callback, optionally filed under a submenu
+        // path (EntityAction::menu, e.g. { "Debug", "Physics" }). Callbacks run on
+        // the GUI thread; component entries also get the selected entity's id.
+        // Each add returns a handle: a plugin that adds entries must remove them
+        // before it unloads (the callbacks live in its code).
+        int addEntityAction(const EntityAction& action);
+        int addComponentAction(const ComponentAction& action);
+        void removeEntityAction(int handle);
+        void removeComponentAction(int handle);
 
-        // Dynamic menu hooks — called each time a right-click menu is built, handed
-        // the live QMenu so the host can add entity-/component-specific entries at
-        // open time (conditional labels, submenus, …). More flexible than the static
-        // addEntityAction / addComponentAction; both can be used together.
-        void setEntityMenuHook(std::function<void(qulonglong entityId, QMenu& menu)> hook);
-        void setComponentMenuHook(
-            std::function<void(qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu)> hook);
+        // Dynamic hooks — called each time a menu opens, handed the live QMenu so
+        // entries can depend on the entity/component (conditional labels, checkable
+        // actions, submenus). Use rpe::subMenu(menu, { "Debug" }) to share a submenu
+        // with static entries and other hooks.
+        //  • add*MenuHook: any number (one per plugin, say), run in the order added;
+        //    the handle goes to removeMenuHook.
+        //  • set*MenuHook: the single host hook, replaced on each call (nullptr
+        //    clears it); runs before the added hooks.
+        using EntityMenuHook = std::function<void(qulonglong entityId, QMenu& menu)>;
+        using ComponentMenuHook =
+            std::function<void(qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu)>;
+        int addEntityMenuHook(EntityMenuHook hook);
+        int addComponentMenuHook(ComponentMenuHook hook);
+        void removeMenuHook(int handle);
+        void setEntityMenuHook(EntityMenuHook hook);
+        void setComponentMenuHook(ComponentMenuHook hook);
 
         // Bundled get/set of all the above options. setSettings applies every field
         // (filter, snapshot policy, edit policy, component-editing, layout, timers);
@@ -324,8 +339,18 @@ namespace rpe
         // Remembered so setMirror() can (re)push the tags to a channel that did not
         // exist yet when the host configured them — see _applyPrefabGroups().
         QVector<PrefabGroup> _prefabGroups;
-        QVector<EntityAction> _entityActions;
-        QVector<ComponentAction> _componentActions;
+        // Menu extensions, each with the handle its add* returned.
+        QVector<QPair<int, EntityAction>> _entityActions;
+        QVector<QPair<int, ComponentAction>> _componentActions;
+        QVector<QPair<int, EntityMenuHook>> _entityMenuHooks;
+        QVector<QPair<int, ComponentMenuHook>> _componentMenuHooks;
+        EntityMenuHook _entityMenuHook;       // the set*MenuHook slot
+        ComponentMenuHook _componentMenuHook; // the set*MenuHook slot
+        int _nextMenuHandle = 1;
+        void _pushEntityActions();
+        void _pushComponentActions();
+        void _installMenuHooks();
+        qulonglong _menuEntityId() const;
         Settings _settings;
 
         PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)

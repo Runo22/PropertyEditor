@@ -263,59 +263,80 @@ component panel already offers the same for components (a `×` per row and a
 ### Custom menu actions & hooks
 
 Both lists' right-click menus are extensible, two ways — a **static** action
-(fixed label, registered once) or a **dynamic** hook (a function that builds the
-menu each time it opens). Four entry points, one per (entity/component) ×
-(static/dynamic):
+(fixed label, registered once) or a **dynamic** hook (a function that builds
+entries each time the menu opens):
 
 | | Entity | Component |
 | --- | --- | --- |
-| **Static** | `addEntityAction` | `addComponentAction` |
-| **Dynamic** | `setEntityMenuHook` | `setComponentMenuHook` |
+| **Static** | `addEntityAction` / `removeEntityAction` | `addComponentAction` / `removeComponentAction` |
+| **Dynamic, many** | `addEntityMenuHook` / `removeMenuHook` | `addComponentMenuHook` / `removeMenuHook` |
+| **Dynamic, one** | `setEntityMenuHook` | `setComponentMenuHook` |
 
-#### Static — a fixed label + callback
+Every `add*` returns an `int` handle for its `remove*`.
+
+#### Static — a fixed label + callback, optionally in a submenu
 
 ```cpp
 // Entity: the callback gets the clicked entity's id.
 browser.addEntityAction({ "Focus camera", cameraIcon,
                           [](qulonglong entityId) { focusCameraOn(entityId); } });
 
+// The 4th field files it under a submenu: Debug ▸ Physics ▸ Wake.
+browser.addEntityAction({ "Wake", QIcon(), [](qulonglong id) { wake(id); },
+                          { "Debug", "Physics" } });
+
 // Component: the callback gets the selected entity id + the clicked component's
 // key (a data component's path, or a pair's "Rel (Target)") and its flecs id.
-browser.addComponentAction({ "Copy to clipboard", QIcon(),
+browser.addComponentAction({ "Copy as JSON", QIcon(),
     [](qulonglong entityId, const QString& component, qulonglong rawId) {
         copyComponent(entityId, component);
-    } });
+    },
+    { "Export" } });
 ```
-
-Add as many as you like; each becomes one menu entry (with the optional icon).
 
 #### Dynamic — a hook handed the live `QMenu`
 
-Run each time the menu opens, so you can build entity-/component-specific entries
-— conditional items, submenus, checkable actions, whatever `QMenu` supports:
+Run each time the menu opens, so entries can depend on the entity or component —
+conditional items, checkable actions, anything `QMenu` supports. Use
+**`rpe::subMenu(menu, { … })`** for submenus: it finds or creates each level, so
+static actions, several hooks and several plugins that name the same path share
+**one** submenu instead of each adding its own "Debug".
 
 ```cpp
-// Entity menu, built per-entity at open time.
-browser.setEntityMenuHook([this](qulonglong id, QMenu& menu) {
-    menu.addAction("Focus camera", [id]{ focusCameraOn(id); });
-    if (isSelected(id))
-        menu.addAction("Clear selection", [this, id]{ deselect(id); });
-    QMenu* tag = menu.addMenu("Tag as…");             // a submenu
-    tag->addAction("Enemy",    [id]{ tagAs(id, "Enemy"); });
-    tag->addAction("Friendly", [id]{ tagAs(id, "Friendly"); });
+// A plugin: add on load, keep the handle, remove before unloading.
+int handle = browser.addEntityMenuHook([](qulonglong id, QMenu& menu) {
+    QMenu* physics = rpe::subMenu(menu, { "Debug", "Physics" });
+    physics->addAction("Freeze", [id] { freeze(id); });
+    if (isSleeping(id))
+        physics->addAction("Wake", [id] { wake(id); });
 });
+// …
+browser.removeMenuHook(handle);
 
-// Component menu — same idea; also gets the component key + flecs id.
+// The host's own hook (one slot, replaced on each call; nullptr clears it).
 browser.setComponentMenuHook(
-    [this](qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu) {
-        menu.addAction("Reset to defaults", [=]{ resetComponent(entityId, rawId); });
+    [](qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu) {
+        rpe::subMenu(menu, { "Export" })->addAction("Copy as YAML", [=] { copyYaml(entityId, rawId); });
     });
 ```
 
-Static actions and the hook can be used together; both render in the same styled
-menu, **after** the built-in Delete / Remove. Callbacks run on the GUI thread;
-the component variants receive the currently-selected entity's id alongside the
-clicked component's key and flecs id.
+**Order in the menu:** built-in Delete / Remove, then static actions (in the
+order added), then the `set*` hook, then the `add*` hooks (in the order added). A
+submenu sits where its path was first used.
+
+**Why a path list and not `"Debug/Physics"`:** a label may legitimately contain
+`/` ("I/O", "Save/Load"); a list needs no escaping rules. A level matches an
+existing submenu by its title with `&` mnemonics ignored (`"&Debug"` and `"Debug"`
+are the same submenu). Blank levels are skipped.
+
+**Plugins:** remove what you added **before the DLL unloads** — the stored
+callbacks are code in that DLL (see [pitfalls](pitfalls.md#unloading-a-plugin)).
+Use `add*MenuHook`, not `set*MenuHook`: the `set*` slot holds one hook, so a
+second plugin calling it silently replaces the first.
+
+Callbacks run on the GUI thread; component callbacks also receive the
+currently-selected entity's id. The component key is the same in direct and
+mirror mode.
 
 ## Related
 

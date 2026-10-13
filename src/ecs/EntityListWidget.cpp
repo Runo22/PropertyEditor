@@ -1,6 +1,7 @@
 #include "rpe/ecs/EntityListWidget.h"
 
 #include "PickerKeys.h"
+#include "rpe/ecs/RowActions.h"
 #include "rpe/core/TypeBridge.h"
 
 #include <QAction>
@@ -341,7 +342,8 @@ namespace rpe
             {
                 if (a.label.isEmpty() || !a.callback)
                     continue;
-                QAction* act = a.icon.isNull() ? menu.addAction(a.label) : menu.addAction(a.icon, a.label);
+                QMenu* into = subMenu(menu, a.menu);
+                QAction* act = a.icon.isNull() ? into->addAction(a.label) : into->addAction(a.icon, a.label);
                 const auto cb = a.callback;
                 connect(act, &QAction::triggered, this, [cb, id] { cb(id); });
             }

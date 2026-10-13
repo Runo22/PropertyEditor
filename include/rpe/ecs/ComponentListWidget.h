@@ -89,6 +89,7 @@ namespace rpe
             QString label;
             QIcon icon;
             std::function<void(const QString& key, qulonglong rawId)> callback;
+            QStringList menu; // optional submenu path (see rpe::subMenu)
         };
         void setContextActions(const QVector<MenuAction>& actions);
         // Dynamic hook: called when the component right-click menu is built, with the

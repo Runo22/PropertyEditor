@@ -1,6 +1,7 @@
 #include "rpe/ecs/ComponentListWidget.h"
 
 #include "PickerKeys.h"
+#include "rpe/ecs/RowActions.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/ecs/ComponentScan.h"
 
@@ -108,6 +109,8 @@ namespace rpe
         {
             CompKindRole = Qt::UserRole + 1,  // int (MirrorChannel::RowKind)
             CompRawIdRole = Qt::UserRole + 2, // qulonglong flecs id
+            CompKeyRole = Qt::UserRole + 3,   // QString selection key, same in both modes
+                                              // (path, or "Rel (Target)" for a pair)
         };
 
         // Row display text: data/tag rows show the leaf name; pairs "Rel \u2192 Target".
@@ -400,7 +403,8 @@ namespace rpe
         {
             return;
         }
-        const QString key = item->data(Qt::UserRole).toString();
+        // CompKeyRole, not UserRole: in direct mode UserRole is a row index.
+        const QString key = item->data(CompKeyRole).toString();
         const qulonglong rawId = item->data(CompRawIdRole).toULongLong();
         static_cast<RemoveButtonDelegate*>(_rowDelegate)->clearConfirm();
 
@@ -426,7 +430,8 @@ namespace rpe
             {
                 if (a.label.isEmpty() || !a.callback)
                     continue;
-                QAction* act = a.icon.isNull() ? menu.addAction(a.label) : menu.addAction(a.icon, a.label);
+                QMenu* into = subMenu(menu, a.menu);
+                QAction* act = a.icon.isNull() ? into->addAction(a.label) : into->addAction(a.icon, a.label);
                 const auto cb = a.callback;
                 connect(act, &QAction::triggered, this, [cb, key, rawId] { cb(key, rawId); });
             }
@@ -664,6 +669,7 @@ namespace rpe
         // Collect under the guard (entity/component reads touch the world);
         // populate the widget afterwards without holding it.
         QStringList names;
+        QStringList keys;       // parallel to names: the selection key menus report
         QVector<int> dataKinds; // 0 = component, 3 = data-carrying pair (badge)
         QVector<MirrorChannel::ComponentRow> extraRows; // tags + dataless pairs
         withGuard(_guard, [&] {
@@ -706,6 +712,7 @@ namespace rpe
                         {
                             _components.append(ComponentInfo { id, rt });
                             names.append(componentLeaf(relPath) + QStringLiteral(" \u2192 ") + target);
+                            keys.append(relPath + QStringLiteral(" (") + target + QLatin1Char(')'));
                             dataKinds.append(3);
                             return;
                         }
@@ -754,6 +761,7 @@ namespace rpe
 
                 _components.append(ComponentInfo { id, t });
                 names.append(QString::fromUtf8(raw));
+                keys.append(fullPath);
                 dataKinds.append(0);
             });
         });
@@ -773,6 +781,7 @@ namespace rpe
                 return c != 0 ? c < 0 : names[a].compare(names[b], Qt::CaseInsensitive) < 0;
             });
             QStringList sortedNames;
+            QStringList sortedKeys;
             QVector<ComponentInfo> sortedInfos;
             QVector<int> sortedKinds;
             sortedNames.reserve(names.size());
@@ -781,10 +790,12 @@ namespace rpe
             for (int i : order)
             {
                 sortedNames.append(names[i]);
+                sortedKeys.append(keys[i]);
                 sortedInfos.append(_components[i]);
                 sortedKinds.append(dataKinds[i]);
             }
             names = sortedNames;
+            keys = sortedKeys;
             _components = sortedInfos;
             dataKinds = sortedKinds;
         }
@@ -802,12 +813,14 @@ namespace rpe
         {
             auto* item = new QListWidgetItem(names[i], _list);
             item->setData(Qt::UserRole, i);
+            item->setData(CompKeyRole, keys[i]);
             item->setData(CompKindRole, dataKinds[i]);
             item->setData(CompRawIdRole, static_cast<qulonglong>(_components[i].id.raw_id()));
         }
         for (const auto& r : extraRows)
         {
             auto* item = new QListWidgetItem(rowDisplay(r), _list);
+            item->setData(CompKeyRole, r.key());
             item->setData(CompKindRole, static_cast<int>(r.kind));
             item->setData(CompRawIdRole, r.rawId);
             item->setFlags(Qt::ItemIsEnabled); // presence row: removable, not selectable
@@ -899,6 +912,7 @@ namespace rpe
         {
             auto* item = new QListWidgetItem(rowDisplay(r), _list);
             item->setData(Qt::UserRole, r.key()); // unique identity (string) → mirror mode
+            item->setData(CompKeyRole, r.key());
             item->setData(CompKindRole, static_cast<int>(r.kind));
             item->setData(CompRawIdRole, r.rawId);
             const bool selectable = r.kind == MirrorChannel::RowKind::Data

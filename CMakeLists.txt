@@ -137,6 +137,7 @@ if(RPE_WITH_FLECS)
         src/ecs/MirrorChannel.cpp
         src/ecs/ComponentScan.cpp
         src/ecs/HealthCheck.cpp
+        src/ecs/RowActions.cpp
         resources/rpe_resources.qrc
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
