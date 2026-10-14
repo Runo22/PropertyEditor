@@ -11,6 +11,7 @@ on:
       - 'src/core/**'
       - 'include/rpe/**'
       - 'CMakeLists.txt'
+      - '.github/ci/**'
       - '.github/workflows/reflectgen-windows.yml'
   workflow_dispatch:
 
@@ -54,7 +55,7 @@ jobs:
           "C:\Program Files\LLVM\bin\clang.exe" --version
           cmake -S ..\rttr -B ..\rttr-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC=OFF -DBUILD_RTTR_DYNAMIC=ON -DBUILD_UNIT_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_DOCUMENTATION=OFF -DBUILD_BENCHMARKS=OFF -DBUILD_PACKAGE=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "-DCMAKE_INSTALL_PREFIX=%CD%\..\rttr-inst" || exit /b 1
           cmake --build ..\rttr-build --target install || exit /b 1
-          cmake -S tools\reflectgen\test -B build-rg -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.cxx }} "-DCMAKE_PREFIX_PATH=%CD%\..\rttr-inst;%CD%\..\Qt\5.15.2\msvc2019_64" "-DFLECS_ROOT=%CD%\..\flecs" "-DRPE_ROOT=%CD%" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 || exit /b 1
+          cmake -S tools\reflectgen\test -B build-rg -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=${{ matrix.cxx }} "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc /FI%CD%\.github\ci\qt5_stdext_shim.h" "-DCMAKE_PREFIX_PATH=%CD%\..\rttr-inst;%CD%\..\Qt\5.15.2\msvc2019_64" "-DFLECS_ROOT=%CD%\..\flecs" "-DRPE_ROOT=%CD%" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 || exit /b 1
           cmake --build build-rg -v || exit /b 1
 
       - name: Show generated code
