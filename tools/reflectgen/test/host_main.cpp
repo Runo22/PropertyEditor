@@ -60,7 +60,7 @@ int main(int, char** argv)
         std::printf("── round %d\n", round);
         Plugin p;
         check("plugin loads", p.open(argv[1]));
-        check("7 reflected types linked in the plugin's own list", p.count() == 7);
+        check("8 reflected types linked in the plugin's own list", p.count() == 8);
         p.load(&world);
 
         rttr::type light = rttr::type::get_by_name("game::Light");
@@ -76,6 +76,8 @@ int main(int, char** argv)
         check("all-mode: hp, shield, inventory registered", stats.get_property("hp").is_valid() && stats.get_property("shield").is_valid() && stats.get_property("inventory").is_valid());
         check("all-mode: NOPROP debugCounter skipped", !stats.get_property("debugCounter").is_valid());
         check("private secret via REFLECT_FRIEND, readonly", stats.get_property("secret").get_metadata(rpe::hint::ReadOnly).to_bool());
+
+        check("second header (unity TU) registered: game::Velocity", rttr::type::get_by_name("game::Velocity").get_property("dx").is_valid());
 
         rttr::type shape = rttr::type::get_by_name("game::Shape");
         check("enum Shape: NOPROP Count skipped", shape.is_enumeration() && shape.get_enumeration().get_names().size() == 2);
