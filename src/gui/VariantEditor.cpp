@@ -1,5 +1,6 @@
 #include "rpe/gui/VariantEditor.h"
 
+#include "rpe/core/TypeRelease.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/PropertyEditor.h"
 
@@ -24,6 +25,14 @@ namespace rpe
         _editor->setEditPolicy(EditPolicy::WriteBack);
         _editor->setInstanceProvider([this] { return _wrapper.instance(); });
         layout->addWidget(_editor, 1);
+        // A plugin unloading: an owned value of its type is its code — drop it now
+        // (any thread, plain data only); the tree unbinds itself.
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>& released) {
+            if (_wrapper.isValid() && isReleased(_wrapper.type(), released))
+            {
+                _wrapper = RttrVariantWrapper();
+            }
+        });
 
         connect(_editor, &PropertyEditor::propertyEdited, this, [this](const QString& path, const rttr::variant& v) {
             // The write already landed in _wrapper. Refresh dependent rows
@@ -34,6 +43,13 @@ namespace rpe
             QMetaObject::invokeMethod(this, [this] { refreshFromSource(); }, Qt::QueuedConnection);
             emit valueChanged(path, v);
         });
+    }
+
+    VariantEditor::~VariantEditor()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+        TypeUseScope scope;
+        _wrapper = RttrVariantWrapper();
     }
 
     void VariantEditor::setVariant(const rttr::variant& v)

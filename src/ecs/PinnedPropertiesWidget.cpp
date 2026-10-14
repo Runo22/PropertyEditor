@@ -6,6 +6,7 @@
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/gui/PropertyDelegate.h"
 #include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
+#include "rpe/core/TypeRelease.h"
 #include "rpe/gui/VariantEditorFactory.h"
 
 #include <QAbstractItemDelegate>
@@ -33,7 +34,7 @@ namespace rpe
             EntityRole = Qt::UserRole,      // qulonglong
             ComponentRole,                  // QString (full scoped name / pair key)
             PathRole,                       // QString (dot-path)
-            LastValueRole,                  // rttr::variant (last mirrored value)
+            LastValueRoleUnused,            // (was the last value — now kept in _lastValues)
             RawIdRole,                      // qulonglong (pair id; 0 for plain components)
             PinReadOnlyRole,                // QString — why it can't be edited (empty: it can)
         };
@@ -86,7 +87,9 @@ namespace rpe
         // The type an editor for this row should be built from: the DECLARED type when
         // resolvable (so pins are editable before any value arrives), otherwise the
         // last mirrored value's type. Invalid when neither is available.
-        rttr::type pinLeafType(const QTreeWidgetItem* it)
+        using LastValues = QHash<const QTreeWidgetItem*, rttr::variant>;
+
+        rttr::type pinLeafType(const QTreeWidgetItem* it, const LastValues& values)
         {
             const rttr::type dt = pinDeclaredType(it);
             if (dt.is_valid() && dt != rttr::type::get<void>())
@@ -95,7 +98,7 @@ namespace rpe
             }
             if (it)
             {
-                const rttr::variant last = it->data(0, LastValueRole).value<rttr::variant>();
+                const rttr::variant last = values.value(it);
                 if (last.is_valid())
                 {
                     return TypeRenderer::rawType(last.get_type());
@@ -119,9 +122,10 @@ namespace rpe
             using Commit = std::function<void(int row, const rttr::variant&)>;
             using Arm = std::function<void(int row)>;
 
-            PinnedValueDelegate(QTreeWidget* tree, Commit commit, Arm arm, QObject* parent)
+            PinnedValueDelegate(QTreeWidget* tree, const LastValues* values, Commit commit, Arm arm, QObject* parent)
                 : QStyledItemDelegate(parent)
                 , _tree(tree)
+                , _values(values)
                 , _commit(std::move(commit))
                 , _arm(std::move(arm))
             {
@@ -152,6 +156,7 @@ namespace rpe
 
             QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const override
             {
+                TypeUseScope scope; // see rpe/core/TypeRelease.h
                 const QTreeWidgetItem* row = _tree->topLevelItem(index.row());
                 if (row && !row->data(0, PinReadOnlyRole).toString().isEmpty())
                 {
@@ -160,7 +165,7 @@ namespace rpe
                 // Drive the editor from the leaf's declared type (resolvable straight
                 // after pinning) and fall back to the mirrored value's type. No hint
                 // metadata in the pin list → default numeric ranges.
-                const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()));
+                const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()), *_values);
                 if (!t.is_valid())
                 {
                     return nullptr;
@@ -179,13 +184,15 @@ namespace rpe
             {
                 // Seed from the live value if one has arrived; otherwise the editor
                 // opens at its type default (empty line edit, 0, first enum, …).
+                TypeUseScope scope;
                 varedit::setEditorData(editor, _valueAt(index));
-                varedit::rememberOpeningValue(editor, pinLeafType(_tree->topLevelItem(index.row())));
+                varedit::rememberOpeningValue(editor, pinLeafType(_tree->topLevelItem(index.row()), *_values));
             }
 
             void setModelData(QWidget* editor, QAbstractItemModel*, const QModelIndex& index) const override
             {
-                const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()));
+                TypeUseScope scope;
+                const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()), *_values);
                 const rttr::variant v = varedit::readEditorData(editor, t);
                 if (v.is_valid() && !varedit::unchangedSinceOpen(editor, v))
                 {
@@ -204,10 +211,11 @@ namespace rpe
             rttr::variant _valueAt(const QModelIndex& index) const
             {
                 QTreeWidgetItem* it = _tree->topLevelItem(index.row());
-                return it ? it->data(0, LastValueRole).value<rttr::variant>() : rttr::variant();
+                return it ? _values->value(it) : rttr::variant();
             }
 
             QTreeWidget* _tree;
+            const LastValues* _values;
             Commit _commit;
             Arm _arm;
         };
@@ -217,9 +225,20 @@ namespace rpe
         : QWidget(parent)
     {
         _setupUi();
+        // A plugin unloading: drop the last values (a value read through a plugin's
+        // property calls into it when destroyed). The rows keep their text; the next
+        // poll refills the values.
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>&) { _lastValues.clear(); });
         _timer = new QTimer(this);
         _timer->setInterval(33); // ~30 Hz, same cadence as the browser's mirror poll
         connect(_timer, &QTimer::timeout, this, &PinnedPropertiesWidget::pollNow);
+    }
+
+    PinnedPropertiesWidget::~PinnedPropertiesWidget()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+        TypeUseScope scope;
+        _lastValues.clear();
     }
 
     void PinnedPropertiesWidget::_setupUi()
@@ -252,6 +271,7 @@ namespace rpe
         // is written back to the display and queued to the sim thread as a pin edit.
         auto* delegate = new PinnedValueDelegate(
             _tree,
+            &_lastValues,
             [this](int row, const rttr::variant& v) { _commitValueEdit(row, v); },
             [this](int row) { _editingItem = _tree->topLevelItem(row); }, // an editor opened
             _tree);
@@ -403,6 +423,10 @@ namespace rpe
             {
                 _editingItem = nullptr;
             }
+            {
+                TypeUseScope scope;
+                _lastValues.remove(it);
+            }
             delete it;
             _pushPins();
             emit pinsChanged();
@@ -416,6 +440,10 @@ namespace rpe
             return;
         }
         _editingItem = nullptr;
+        {
+            TypeUseScope scope;
+            _lastValues.clear();
+        }
         _updating = true;
         _tree->clear();
         _updating = false;
@@ -433,6 +461,7 @@ namespace rpe
 
     void PinnedPropertiesWidget::pollNow()
     {
+        TypeUseScope scope; // the polled values may come from a plugin's properties
         if (!_channel)
         {
             return;
@@ -462,7 +491,8 @@ namespace rpe
                     continue;
                 }
                 it->setText(kValueColumn, TypeRenderer::toDisplayString(u.value));
-                it->setData(0, LastValueRole, QVariant::fromValue(u.value));
+                TypeUseScope scope;
+                _lastValues.insert(it, u.value);
             }
         }
         _updating = false;

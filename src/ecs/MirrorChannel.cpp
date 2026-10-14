@@ -1,5 +1,7 @@
 #include "rpe/ecs/MirrorChannel.h"
 
+#include "rpe/core/TypeRelease.h"
+
 namespace rpe
 {
 
@@ -38,6 +40,29 @@ namespace rpe
     {
         std::lock_guard<std::mutex> lk(_m);
         _edits.push_back(EditRequest { entity, component, path, std::move(value) });
+    }
+
+    MirrorChannel::MirrorChannel()
+    {
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>&) { _onTypesReleased(); });
+    }
+
+    MirrorChannel::~MirrorChannel()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+    }
+
+    void MirrorChannel::_onTypesReleased()
+    {
+        // Every value, not just the released type's: on Windows a variant made by a
+        // plugin's property getter carries the PLUGIN's copy of RTTR's value code,
+        // whatever the value's type (even a double). The views ask for a resend.
+        std::lock_guard<std::mutex> lk(_m);
+        _outValues.clear();
+        _outPinValues.clear();
+        _edits.clear();
+        _pinEdits.clear();
+        _resync = true;
     }
 
     void MirrorChannel::requestResync()

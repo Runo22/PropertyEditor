@@ -45,6 +45,7 @@ namespace rpe
 
     public:
         explicit ComponentListWidget(QWidget* parent = nullptr);
+        ~ComponentListWidget() override;
 
         void setEntity(flecs::world* world, flecs::entity e);
         void clearEntity();
@@ -131,6 +132,7 @@ namespace rpe
         QToolButton* _addBtn = nullptr;
         QStyledItemDelegate* _rowDelegate = nullptr; // actually a RemoveButtonDelegate
         QVector<ComponentInfo> _components;
+        int _releaseHandle = 0; // rpe/core/TypeRelease.h
         QVector<MirrorChannel::ComponentRow> _mirrorRows; // last externally-fed set (dedup)
         QVector<MirrorChannel::CatalogEntry> _addable;    // "+" picker entries
         QVector<MenuAction> _contextActions;

@@ -1,6 +1,7 @@
 #include "rpe/ecs/EntityComponentBrowser.h"
 
 #include "rpe/core/TypeBridge.h"
+#include "rpe/core/TypeRelease.h"
 #include "rpe/ecs/ComponentScan.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityListWidget.h"
@@ -32,6 +33,15 @@ namespace rpe
         _liveTimer = new QTimer(this);
         _liveTimer->setInterval(20); // 50 Hz default
         connect(_liveTimer, &QTimer::timeout, this, &EntityComponentBrowser::_onLiveUpdate);
+
+        // A plugin unloading: drop what we hold of its types now, rebind by name
+        // once they are back (see rpe/core/TypeRelease.h).
+        _releaseHandle = addTypeReleaseHandler(
+            [this](const std::vector<rttr::type>& released) { _onTypesReleased(released); });
+        connect(_propertyEditor, &PropertyEditor::boundTypeReleased, this, [this] { _onBoundTypeReleased(); });
+        _rebindTimer = new QTimer(this);
+        _rebindTimer->setInterval(100);
+        connect(_rebindTimer, &QTimer::timeout, this, &EntityComponentBrowser::_tryRebindReleased);
 
         _mirrorTimer = new QTimer(this);
         _mirrorTimer->setInterval(33); // ~30 Hz GUI poll of the mirror
@@ -495,6 +505,78 @@ namespace rpe
     // model's write path holds it when invoking the instance provider, and the
     // browser's own call sites wrap it explicitly). Not guarded here so that
     // guards never nest — a plain mutex stays sufficient.
+    EntityComponentBrowser::~EntityComponentBrowser()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+        TypeUseScope scope;
+        _liveWrapper = RttrVariantWrapper();
+    }
+
+    void EntityComponentBrowser::_onTypesReleased(const std::vector<rttr::type>& released)
+    {
+        // Any thread, while no other thread is in a TypeUseScope; the released
+        // module is still loaded. Only plain data here — no signals, no widgets.
+        if (isReleased(_selectedComponent.rttrType, released))
+        {
+            // Invalid (not void): _liveComponentPtr then reads nothing — the
+            // component's flecs id is about to die with the plugin.
+            _selectedComponent.rttrType = rttr::type::get_by_name(std::string());
+        }
+        if (_liveWrapper.isValid() && isReleased(_liveWrapper.type(), released))
+        {
+            _liveWrapper = RttrVariantWrapper(); // a variant made by the plugin's code
+        }
+    }
+
+    void EntityComponentBrowser::_onBoundTypeReleased()
+    {
+        _rebindPending = true;
+        _rebindGen = ~quint64(0); // try now
+        _tryRebindReleased();
+        if (_rebindPending && !_channel)
+        {
+            _rebindTimer->start(); // mirror mode retries on every poll instead
+        }
+    }
+
+    void EntityComponentBrowser::_tryRebindReleased()
+    {
+        if (!_rebindPending)
+        {
+            _rebindTimer->stop();
+            return;
+        }
+        const quint64 gen = TypeBridge::registryGeneration();
+        if (gen == _rebindGen)
+        {
+            return; // nothing registered since the last try
+        }
+        _rebindGen = gen;
+        if (_channel)
+        {
+            if (_mirrorEntity == 0 || _mirrorComponent.isEmpty())
+            {
+                _rebindPending = false;
+                return;
+            }
+            const QString typeName = _pairTypeName.value(_mirrorComponent, _mirrorComponent);
+            if (TypeBridge::resolveByName(typeName.toUtf8().constData()).is_valid())
+            {
+                _onComponentNameSelected(_mirrorComponent); // clears _rebindPending
+            }
+            return;
+        }
+        // Direct mode: rebuild the entity's component list; it reselects the same
+        // component by name, which binds it again.
+        if (!_world || !_selectedEntity.is_alive())
+        {
+            _rebindPending = false;
+            _rebindTimer->stop();
+            return;
+        }
+        _componentList->setEntity(_world, _selectedEntity);
+    }
+
     void* EntityComponentBrowser::_liveComponentPtr() const
     {
         if (!_world || !_selectedEntity.is_alive() || !_selectedComponent.rttrType.is_valid())
@@ -552,6 +634,8 @@ namespace rpe
 
     void EntityComponentBrowser::_onComponentSelected(ComponentInfo info)
     {
+        _rebindPending = false;
+        _rebindTimer->stop();
         _selectedComponent = info;
         if (!info.rttrType.is_valid())
         {
@@ -560,6 +644,7 @@ namespace rpe
 
         _propertyEditor->bindType(info.rttrType);
         withGuard(_guard, [&] {
+            TypeUseScope scope; // inside the guard: never wait for a release holding it
             if (void* p = _liveComponentPtr())
             {
                 _liveWrapper = RttrVariantWrapper::makeLinked(info.rttrType, p);
@@ -584,6 +669,7 @@ namespace rpe
         // section: the component could move or be removed between the two
         // otherwise. Painting later reads only the model's cached values.
         withGuard(_guard, [&] {
+            TypeUseScope scope; // inside the guard: never wait for a release holding it
             if (void* p = _liveComponentPtr())
             {
                 _liveWrapper.relink(p);
@@ -791,6 +877,7 @@ namespace rpe
         // it, so it can't land on the next selection.
         if (_mirrorEntity != 0)
         {
+            TypeUseScope scope; // the values may come from a plugin's properties
             for (auto& u : _channel->pollValues())
             {
                 // Drop values read from a target we've since moved away from: a pump
@@ -805,8 +892,11 @@ namespace rpe
         }
         else
         {
+            TypeUseScope scope;
             _channel->pollValues(); // drain
         }
+
+        _tryRebindReleased();
 
         // Re-send interest each tick so newly expanded fields start mirroring.
         _pushInterest();
@@ -983,6 +1073,7 @@ namespace rpe
         {
             return; // direct mode uses _onComponentSelected
         }
+        _rebindPending = false;
         _mirrorComponent = name;
         // `name` is the row's selection key: the component's full flecs path, or for
         // a data-carrying pair the "Rel (Target)" identity — in that case the schema

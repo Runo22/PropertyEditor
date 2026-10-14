@@ -1,4 +1,5 @@
 #include "rpe/core/TypeBridge.h"
+#include "rpe/core/TypeRelease.h"
 
 #include <algorithm>
 #include <atomic>
@@ -154,17 +155,25 @@ namespace rpe
         {
             return;
         }
-        auto& r = registry();
-        std::lock_guard<std::mutex> lk(r.mutex);
-        r.map.erase(t.get_id());
-        // Drop any aliases pointing at this type so a stale name can't resolve to a
-        // freed (unloaded-plugin) entry.
-        for (auto it = r.aliases.begin(); it != r.aliases.end();)
         {
-            it = (it->second == t.get_id()) ? r.aliases.erase(it) : std::next(it);
+            auto& r = registry();
+            std::lock_guard<std::mutex> lk(r.mutex);
+            r.map.erase(t.get_id());
+            // Drop any aliases pointing at this type so a stale name can't resolve to a
+            // freed (unloaded-plugin) entry.
+            for (auto it = r.aliases.begin(); it != r.aliases.end();)
+            {
+                it = (it->second == t.get_id()) ? r.aliases.erase(it) : std::next(it);
+            }
+            // A type lock by TYPE dies with it (its id is an address RTTR may reuse);
+            // a lock by NAME survives and applies to the reloaded type.
+            r.readOnlyIds.erase(t.get_id());
+            r.resolved.clear();
+            r.generation.fetch_add(1, std::memory_order_relaxed);
         }
-        r.resolved.clear();
-        r.generation.fetch_add(1, std::memory_order_relaxed);
+        // The release point: everything rpe holds of `t` is dropped now, while the
+        // module that defines it is still loaded (see rpe/core/TypeRelease.h).
+        detail::releaseTypes({ t });
     }
 
     uint64_t TypeBridge::registryGeneration()

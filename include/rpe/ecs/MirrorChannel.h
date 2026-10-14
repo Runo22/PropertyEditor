@@ -31,6 +31,11 @@ namespace rpe
     class MirrorChannel
     {
     public:
+        MirrorChannel();
+        ~MirrorChannel();
+        MirrorChannel(const MirrorChannel&) = delete;
+        MirrorChannel& operator=(const MirrorChannel&) = delete;
+
         struct EntityEntry
         {
             qulonglong id = 0;
@@ -318,6 +323,11 @@ namespace rpe
         QHash<QString, PinKey> _outDeadPins;
 
         std::atomic<bool> _producerAlive { true };
+
+        // Type release (rpe/core/TypeRelease.h): drop every queued value — a value
+        // read through a plugin's property calls into the plugin when destroyed.
+        int _releaseHandle = 0;
+        void _onTypesReleased();
     };
 
 } // namespace rpe

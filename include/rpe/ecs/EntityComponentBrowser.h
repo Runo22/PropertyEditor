@@ -86,6 +86,7 @@ namespace rpe
         };
 
         explicit EntityComponentBrowser(QWidget* parent = nullptr);
+        ~EntityComponentBrowser() override;
 
         void setWorld(flecs::world* world);
         void setLiveUpdateIntervalMs(int ms);
@@ -285,6 +286,17 @@ namespace rpe
         void _onRemoveComponent(const QString& name);
 
     private:
+        // ── A plugin unloading (rpe/core/TypeRelease.h) ──────────────────────────
+        // Any thread: drop what this browser holds of the released types.
+        void _onTypesReleased(const std::vector<rttr::type>& released);
+        // GUI: the property editor unbound itself → rebind once the type is back.
+        void _onBoundTypeReleased();
+        void _tryRebindReleased();
+        int _releaseHandle = 0;
+        bool _rebindPending = false;
+        QTimer* _rebindTimer = nullptr; // direct mode: retries while a rebind is pending
+        quint64 _rebindGen = ~quint64(0);
+
         void _setupUi();
         void _applyLayout(Layout layout);
         void* _liveComponentPtr() const;

@@ -27,6 +27,7 @@ below explain each case. When in doubt, run
 | Entity list **empty** with a required component | the name doesn't resolve — a scoped name only matches its scope | `checkRequiredComponent` |
 | Process **aborts** when spawning a prefab | a **move-only** component on the prefab | [Move-only components on prefabs](#move-only-components-on-prefabs) |
 | Crashes that make no sense, "stack smashing", impossible values | two flecs versions in one process, or objects compiled against different headers | `checkFlecsBuild`; [Mixed builds](#mixed-builds) |
+| Crash after reloading a plugin whose component was on screen (`is_wrapper`, `get_metadata`, a destructor) | the plugin was unloaded without `unregisterType` first, or its types were first registered by the plugin | [Unloading a plugin](#unloading-a-plugin) |
 | Crash later inside the mirror's pump (`world.lookup`) | the world was touched from a thread that isn't running `progress()` (e.g. `attach()` from the main thread) | [Threading](#threading) |
 | Mirror pumps at **half** the expected rate | `setMaxPumpRateHz` set equal to the sim's frame rate | [Performance → rate cap aliasing](#performance) |
 | A typed value **snaps back** | read-only (no setter / locked type), or the editor's `Min`/`Max` range | [Editing semantics](#editing-semantics) |
@@ -110,16 +111,44 @@ smashing detected", fields with impossible values. When in doubt: clean rebuild.
 
 ### Unloading a plugin
 
+RTTR frees a module's types when the module unloads, and every value read
+through its properties carries pointers into its code (on Windows even a plain
+`double`: each DLL has its own copy of RTTR's value code). Anything still holding
+one crashes on the next touch — an `is_wrapper()` or `get_metadata()` on freed
+type data, a value's destructor jumping into the unloaded DLL.
+
 Before the DLL is unloaded:
 
-- `rpe::TypeBridge::unregisterType<T>()` for its types — after that rpe never
-  calls into the plugin's code; inspecting a component whose bridge points into
-  an unloaded DLL would;
-- `removeEntityAction` / `removeComponentAction` / `removeMenuHook` with the
+- **`rpe::TypeBridge::unregisterType<T>()` for each of its bridged types.** This
+  is rpe's release point: everything rpe holds of `T` — and of every type inside
+  it — is dropped right there, on the calling thread, while the plugin is still
+  loaded. The views reset on their own thread afterwards and the browser rebinds
+  the selected component by name once it's registered again.
+- **`removeEntityAction` / `removeComponentAction` / `removeMenuHook`** with the
   handles its menu entries returned — the stored callbacks are its code too.
 
-A plugin should use `addEntityMenuHook` / `addComponentMenuHook`, never the
-single-slot `set*MenuHook`: a second plugin calling `set*` replaces the first.
+Rules:
+
+- **Unregister, then unload.** Unloading without `unregisterType` leaves rpe
+  holding the plugin's data.
+- **Any thread works**, and the release never waits for another thread to *run*
+  — only for one to finish a short internal read section. A GUI thread blocked
+  while the sim thread reloads the plugin (or the other way round) is fine.
+- **Don't unload from inside an rpe callback** (a browser signal handler, a
+  menu action) — nor block there waiting for a thread that unloads: rpe code is
+  still on the stack, holding the types. Queue it.
+- **Types the host shares with plugins** (a `Vec3` in a host header used by a
+  plugin component): register or use them in the host *before* plugins load.
+  RTTR gives a type's data to the first module that asks for it; if a plugin is
+  first, unloading it frees the type under the host. rpe does this for every
+  type it names itself (`QString`, `QColor`, `std::string`, chrono, …).
+- A plugin should use `addEntityMenuHook` / `addComponentMenuHook`, never the
+  single-slot `set*MenuHook`: a second plugin calling `set*` replaces the first.
+
+Your own widgets/code that keep plugin values or types (`rttr::variant`,
+`rttr::type`, `rttr::property`) need the same care: drop them before the unload.
+`rpe::addTypeReleaseHandler` (in `rpe/core/TypeRelease.h`) calls you at the
+release point.
 
 ## Prefabs & flecs
 

@@ -96,6 +96,7 @@ set(RPE_CORE_SOURCES
     src/core/RttrBridge.cpp
     src/core/RttrVariantWrapper.cpp
     src/core/TypeBridge.cpp
+    src/core/TypeRelease.cpp
     src/core/ReadOnly.cpp
     src/core/OptionalSupport.cpp
     src/core/FlagsSupport.cpp)
@@ -377,6 +378,26 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     target_link_libraries(rpe_test_hint_plugin PRIVATE rpe_core)
     add_executable(rpe_plugin_hints_test test/plugin_hints_test.cpp)
     target_link_libraries(rpe_plugin_hints_test PRIVATE rpe_gui rpe_test_hint_plugin)
+
+    # A plugin UNLOADED and reloaded while its component is on screen (dlopen /
+    # LoadLibrary at run time — never linked). Built to unload like a Windows DLL:
+    # no GCC "unique" symbols (they pin it in memory), hidden visibility (its RTTR
+    # registration manager stays its own instead of being interposed by the host's).
+    add_library(rpe_test_reload_plugin MODULE test/plugin/reload_plugin.cpp)
+    target_link_libraries(rpe_test_reload_plugin PRIVATE rpe_core ${RPE_FLECS_TARGET})
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(rpe_test_reload_plugin PRIVATE -fno-gnu-unique)
+    endif()
+    set_target_properties(rpe_test_reload_plugin PROPERTIES
+        CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    add_executable(rpe_plugin_reload_test test/plugin_reload_test.cpp)
+    target_link_libraries(rpe_plugin_reload_test PRIVATE rpe_gui ${CMAKE_DL_LIBS})
+    add_dependencies(rpe_plugin_reload_test rpe_test_reload_plugin)
+    target_compile_definitions(rpe_plugin_reload_test PRIVATE
+        RPE_RELOAD_PLUGIN_PATH="$<TARGET_FILE:rpe_test_reload_plugin>")
+
+    add_executable(rpe_type_release_test test/type_release_test.cpp)
+    target_link_libraries(rpe_type_release_test PRIVATE rpe_core)
 
     add_executable(rpe_same_rttr_name_test test/same_rttr_name_test.cpp)
     target_link_libraries(rpe_same_rttr_name_test PRIVATE rpe_gui)

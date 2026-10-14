@@ -2,6 +2,7 @@
 
 #include "PickerKeys.h"
 #include "rpe/ecs/RowActions.h"
+#include "rpe/core/TypeRelease.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/ecs/ComponentScan.h"
 
@@ -309,6 +310,17 @@ namespace rpe
     ComponentListWidget::ComponentListWidget(QWidget* parent)
         : QWidget(parent)
     {
+        // A plugin unloading: forget its types (any thread; plain data only). Its
+        // rows stay until the next listing; selecting one then binds nothing.
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>& released) {
+            for (ComponentInfo& c : _components)
+            {
+                if (isReleased(c.rttrType, released))
+                {
+                    c.rttrType = rttr::type::get_by_name(std::string());
+                }
+            }
+        });
         _setupUi();
     }
 
@@ -384,6 +396,11 @@ namespace rpe
         // Tab walks the panel the way it reads — Add → filter — and then leaves for
         // the next panel; the rows are entered with Enter or the arrows instead.
         setTabOrder(_addBtn, _filterEdit);
+    }
+
+    ComponentListWidget::~ComponentListWidget()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
     }
 
     void ComponentListWidget::setContextActions(const QVector<MenuAction>& actions)

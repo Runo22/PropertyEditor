@@ -71,6 +71,10 @@ namespace rpe
         _delegate = new PropertyDelegate(_model, this);
         _setupUi();
         connect(_model, &PropertyModel::propertyEdited, this, &PropertyEditor::propertyEdited);
+        connect(_model, &PropertyModel::boundTypeReleased, this, [this](const QString& typeName) {
+            _endScrub(false); // its value cell is gone
+            emit boundTypeReleased(typeName);
+        });
         connect(_model, &PropertyModel::localEditsChanged, this, &PropertyEditor::_updateResetEnabled);
         _updateResetEnabled(); // start disabled — nothing is frozen yet
     }

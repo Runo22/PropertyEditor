@@ -123,6 +123,10 @@ namespace rpe
         // Pin/unpin requests from the context menu (only when pinning is enabled).
         void pinRequested(const QString& path);
         void unpinRequested(const QString& path);
+        // The bound type was released — a plugin is unloading (see
+        // rpe/core/TypeRelease.h) — and the editor unbound itself. Rebind once the
+        // type is registered again (EntityComponentBrowser does this by itself).
+        void boundTypeReleased(const QString& typeName);
 
     private slots:
         void _onFilterChanged(const QString& text);

@@ -5,6 +5,7 @@
 
 #include "rpe/core/EditorHints.h"
 #include "rpe/core/RttrBridge.h"
+#include "rpe/core/TypeRelease.h"
 #include "rpe/core/TypeRenderer.h"
 
 #include <QBrush>
@@ -96,9 +97,66 @@ namespace rpe
     {
         qRegisterMetaType<rttr::variant>("rttr::variant");
         _resetRoot();
+        _releaseHandle = addTypeReleaseHandler(
+            [this](const std::vector<rttr::type>& released) { _onTypesReleased(released); });
     }
 
-    PropertyModel::~PropertyModel() = default;
+    PropertyModel::~PropertyModel()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+        TypeUseScope scope; // the tree's destructor may run a plugin's variant code
+        _root.reset();
+    }
+
+    namespace
+    {
+        bool treeUses(const PropertyNode* node, const std::vector<rttr::type>& released)
+        {
+            if (isReleased(node->type(), released))
+            {
+                return true;
+            }
+            for (const PropertyNode* c : node->children())
+            {
+                if (treeUses(c, released))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    } // namespace
+
+    void PropertyModel::_onTypesReleased(const std::vector<rttr::type>& released)
+    {
+        // Any thread; no other thread is inside a TypeUseScope. The released module
+        // is still loaded, so reading its types (and destroying its values) is fine
+        // HERE — and never again after this returns.
+        if (!isReleased(_boundType, released) && !treeUses(_root.get(), released))
+        {
+            return;
+        }
+        _releasedTypeName = QString::fromStdString(_boundType.get_name().to_string());
+        _root->releaseReflection(); // keeps the rows (views hold indexes), empties them
+        _boundType = rttr::type::get<void>();
+        {
+            QMutexLocker lk(&_pendingMutex);
+            _pendingUpdates.clear();
+        }
+        _released.store(true, std::memory_order_release);
+        // Resetting the model (signals, views) belongs on its own thread.
+        QMetaObject::invokeMethod(this, [this] { _finishRelease(); }, Qt::QueuedConnection);
+    }
+
+    void PropertyModel::_finishRelease()
+    {
+        if (!_released.exchange(false))
+        {
+            return;
+        }
+        unbind();
+        emit boundTypeReleased(_releasedTypeName);
+    }
 
     void PropertyModel::_resetRoot()
     {
@@ -111,6 +169,8 @@ namespace rpe
 
     void PropertyModel::bindType(rttr::type type)
     {
+        TypeUseScope scope;
+        _released.store(false); // a fresh tree supersedes a pending release
         beginResetModel();
         _roCache.clear();
         _resetRoot();
@@ -126,6 +186,7 @@ namespace rpe
 
     void PropertyModel::unbind()
     {
+        TypeUseScope scope;
         beginResetModel();
         _roCache.clear();
         _resetRoot();
@@ -187,6 +248,7 @@ namespace rpe
 
     void PropertyModel::refresh(const rttr::instance& obj)
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!obj.is_valid() || !_root)
         {
             return;
@@ -472,6 +534,7 @@ namespace rpe
 
     void PropertyModel::_flushPending()
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         _flushScheduled.store(false, std::memory_order_release);
         QHash<QString, rttr::variant> batch;
         {
@@ -568,6 +631,7 @@ namespace rpe
 
     void PropertyModel::beginLocalEdit(const QString& path)
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         auto* node = _findNode(path);
         if (!node || node->hasLocalEdit())
         {
@@ -582,6 +646,7 @@ namespace rpe
 
     void PropertyModel::resetNode(const QString& path)
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         auto* node = _findNode(path);
         if (!node || !node->hasLocalEdit())
         {
@@ -595,6 +660,7 @@ namespace rpe
 
     void PropertyModel::resetAll()
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         bool any = false;
         for (auto* node : std::as_const(_nodeByPath))
         {
@@ -785,18 +851,34 @@ namespace rpe
         {
             bool wrote = false;
             rttr::variant actual;
-            // The provider may hand back a pointer into data owned by another
-            // thread; the whole provider+write+read-back sequence runs under the
-            // guard so it can't race the owner.
-            withGuard(_writeGuard, [&] {
-                rttr::instance inst = _instanceProvider();
-                if (inst.is_valid() && bridge::setValueByPath(inst, node->path(), newVal))
-                {
-                    // Read back so the display reflects any coercion the object applied.
-                    actual = bridge::getValueByPath(inst, node->path());
-                    wrote = true;
-                }
-            });
+            bool released = false;
+            {
+                // The provider may hand back a pointer into data owned by another
+                // thread; the whole provider+write+read-back sequence runs under the
+                // guard so it can't race the owner. Leave the read section while
+                // waiting for the guard — its owner may be releasing types (a plugin
+                // unloading) and waiting for us — and take it again inside.
+                TypeUseGap gap;
+                withGuard(_writeGuard, [&] {
+                    TypeUseScope scope;
+                    if (_released.load(std::memory_order_acquire))
+                    {
+                        released = true; // the tree was emptied meanwhile
+                        return;
+                    }
+                    rttr::instance inst = _instanceProvider();
+                    if (inst.is_valid() && bridge::setValueByPath(inst, node->path(), newVal))
+                    {
+                        // Read back so the display reflects any coercion the object applied.
+                        actual = bridge::getValueByPath(inst, node->path());
+                        wrote = true;
+                    }
+                });
+            }
+            if (released || _released.load(std::memory_order_acquire))
+            {
+                return false;
+            }
             if (wrote)
             {
                 node->setLocalEdit(false);
@@ -863,6 +945,7 @@ namespace rpe
 
     QVariant PropertyModel::data(const QModelIndex& index, int role) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!index.isValid())
         {
             return {};
@@ -1043,6 +1126,7 @@ namespace rpe
 
     bool PropertyModel::setData(const QModelIndex& index, const QVariant& value, int role)
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!index.isValid() || role != Qt::EditRole || index.column() != 1)
         {
             return false;
@@ -1083,6 +1167,7 @@ namespace rpe
 
     Qt::ItemFlags PropertyModel::flags(const QModelIndex& index) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!index.isValid())
         {
             return Qt::NoItemFlags;

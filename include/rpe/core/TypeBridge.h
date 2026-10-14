@@ -136,10 +136,10 @@ namespace rpe
     //    unit, where T is complete), so the two share one lifetime.
     //  • registerType is idempotent — re-registering a type just overwrites its
     //    entry, so plugin add/remove/add cycles are harmless.
-    //  • unregisterType only removes the bridge entry; it does NOT touch RTTR's own
-    //    registration. You rarely need it: RTTR has no unregister and its property
-    //    accessors point into the defining module, so the safe pattern is to keep
-    //    RTTR + bridge registrations alive for the process (host-owned).
+    //  • Unloading a plugin: call unregisterType for each of its types FIRST. RTTR
+    //    unregisters and frees a module's types when the module unloads, so rpe
+    //    must have let go of them by then — unregisterType is that release point
+    //    (see rpe/core/TypeRelease.h). It does not touch RTTR's own registration.
     //  • SINGLE-REGISTRY REQUIREMENT: build rpe_core as a SHARED library so the host
     //    and every plugin link the same registry instance. With a static rpe_core
     //    linked separately into each module, each gets its own copy and the browser
@@ -154,7 +154,7 @@ namespace rpe
     //  down is safe (no "exception on destruction"). The one rule that remains: do
     //  not CALL a hook (wrap/clone, i.e. inspect a component) after its plugin has
     //  unloaded — the code it points at is gone. Call unregisterType() in the
-    //  plugin's unload path, or stop inspecting its components first.
+    //  plugin's unload path: it also releases everything rpe holds of the type.
     // ─────────────────────────────────────────────────────────────────────────────
     class TypeBridge
     {
@@ -228,7 +228,11 @@ namespace rpe
         // copied into the registry, so no null-termination or lifetime is assumed.
         static void registerAlias(rttr::type t, std::string_view flecsName);
 
-        // Remove only the bridge entry for `t` (RTTR registration is untouched).
+        // Remove the bridge entry for `t` AND release everything rpe holds of it —
+        // property trees, values, open editors' starting values, queued mirror
+        // data — on the calling thread, before returning. Call it before unloading
+        // the module that defines `t` (see rpe/core/TypeRelease.h). RTTR's own
+        // registration is untouched.
         static void unregisterType(rttr::type t);
         template <class T>
         static void unregisterType()

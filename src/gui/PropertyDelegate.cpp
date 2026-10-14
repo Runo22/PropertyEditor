@@ -1,5 +1,6 @@
 #include "rpe/gui/PropertyDelegate.h"
 
+#include "rpe/core/TypeRelease.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/EditorWidgets.h"
 #include "rpe/gui/PropertyModel.h"
@@ -151,6 +152,7 @@ namespace rpe
 
     QWidget* PropertyDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!index.isValid())
         {
             return nullptr;
@@ -194,6 +196,7 @@ namespace rpe
 
     void PropertyDelegate::setEditorData(QWidget* editor, const QModelIndex& index) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!editor || !index.isValid())
         {
             return;
@@ -213,6 +216,7 @@ namespace rpe
 
     void PropertyDelegate::setModelData(QWidget* editor, QAbstractItemModel* model, const QModelIndex& index) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!editor || !index.isValid())
         {
             return;

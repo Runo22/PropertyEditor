@@ -487,52 +487,81 @@ namespace rpe::varedit
     namespace
     {
         constexpr const char* kOpeningValue = "rpeOpeningValue";
-    }
+
+        // A value as plain Qt data — never an rttr::variant: the editor widget keeps
+        // it, and a variant read through a plugin's property holds pointers into the
+        // plugin's code, which may be unloaded before the editor is destroyed.
+        // Equal fingerprints ⇔ the editor would write back the same value.
+        QVariant fingerprint(const rttr::variant& v)
+        {
+            if (!v.is_valid())
+            {
+                return {};
+            }
+            const rttr::type t = v.get_type();
+            QVariant value;
+            if (t.is_enumeration())
+            {
+                // By bits: a combined flags mask has no name, so its text can't tell
+                // two different masks apart.
+                value = QVariant::fromValue<qulonglong>(static_cast<qulonglong>(TypeRenderer::enumBits(v)));
+            }
+            else if (t == rttr::type::get<bool>())
+            {
+                value = v.to_bool();
+            }
+            else if (t.is_arithmetic())
+            {
+                const rttr::type r = TypeRenderer::rawType(t);
+                if (r == rttr::type::get<float>() || r == rttr::type::get<double>() || r == rttr::type::get<long double>())
+                    value = v.to_double();
+                else if (r == rttr::type::get<unsigned char>() || r == rttr::type::get<unsigned short>()
+                         || r == rttr::type::get<unsigned int>() || r == rttr::type::get<unsigned long>()
+                         || r == rttr::type::get<unsigned long long>())
+                    value = QVariant::fromValue<qulonglong>(v.to_uint64());
+                else
+                    value = QVariant::fromValue<qlonglong>(v.to_int64());
+            }
+            else if (t == rttr::type::get<std::string>())
+            {
+                value = QString::fromStdString(v.get_value<std::string>());
+            }
+            else if (t == rttr::type::get<QString>())
+            {
+                value = v.get_value<QString>();
+            }
+            else
+            {
+                // Other types (QColor, QDateTime, paths, …): the rendered text is
+                // exact — but an empty rendering says nothing about equality.
+                const QString d = TypeRenderer::toDisplayString(v);
+                if (d.isEmpty())
+                {
+                    return {};
+                }
+                value = d;
+            }
+            return QVariantList { QString::fromStdString(t.get_name().to_string()), value };
+        }
+    } // namespace
 
     void rememberOpeningValue(QWidget* editor, rttr::type t)
     {
         if (editor)
         {
-            editor->setProperty(kOpeningValue, QVariant::fromValue(readEditorData(editor, t)));
+            editor->setProperty(kOpeningValue, fingerprint(readEditorData(editor, t)));
         }
     }
 
     bool unchangedSinceOpen(QWidget* editor, const rttr::variant& newVal)
     {
-        if (!editor || !newVal.is_valid())
+        if (!editor)
         {
             return false;
         }
-        const QVariant stored = editor->property(kOpeningValue);
-        if (!stored.isValid())
-        {
-            return false;
-        }
-        const rttr::variant before = stored.value<rttr::variant>();
-        if (!before.is_valid() || before.get_type() != newVal.get_type())
-        {
-            return false;
-        }
-        // Enums by their bits: a combined flags mask has no name, so neither ==
-        // nor the rendered text can tell two different masks apart.
-        if (newVal.get_type().is_enumeration())
-        {
-            return TypeRenderer::enumBits(before) == TypeRenderer::enumBits(newVal);
-        }
-        if (before == newVal)
-        {
-            return true;
-        }
-        // RTTR compares only types it has a comparator for; for others (QColor,
-        // QDateTime, …) the rendered text is exact. Never for numbers — their
-        // display is rounded, and == already answered for them — and never on an
-        // empty rendering, which says nothing about equality.
-        if (newVal.get_type().is_arithmetic())
-        {
-            return false;
-        }
-        const QString a = TypeRenderer::toDisplayString(before);
-        return !a.isEmpty() && a == TypeRenderer::toDisplayString(newVal);
+        const QVariant before = editor->property(kOpeningValue);
+        const QVariant now = fingerprint(newVal);
+        return before.isValid() && now.isValid() && before == now;
     }
 
     rttr::variant numberAs(double value, rttr::type t)

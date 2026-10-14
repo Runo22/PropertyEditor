@@ -113,10 +113,16 @@ nothing (and returns an invalid entity).
   TypeBridge first, before or after the browser starts. The add-component
   catalog follows registrations (and refreshes when an Add menu is about to
   open).
-- **Unloading:** call `rpe::TypeBridge::unregisterType<T>()` in the plugin's
-  unload path, *before* the DLL goes away. Afterwards rpe never calls into the
-  unloaded code: rows and pins for that component disappear, lookups stop
-  finding it. (RTTR has no unregister of its own — that side is RTTR's.)
+- **Unloading and reloading:** call `rpe::TypeBridge::unregisterType<T>()` for
+  every bridged type in the plugin's unload path, *before* the DLL goes away.
+  That call is the **release point**: before it returns, rpe drops everything it
+  holds of the type — the property tree, the editor's starting value, watch-list
+  values, queued mirror values — while the plugin's code is still loaded. It
+  runs on the calling thread (GUI or simulation) and never waits for another
+  thread to run, so a GUI thread blocked while the sim thread reloads is fine.
+  When the type is registered again, the browser rebinds the selected component
+  by name: it shows again by itself. Details and rules in
+  [pitfalls](pitfalls.md#unloading-a-plugin).
 - **Hints work from plugins** — `rttr::metadata(rpe::hint::Min, 0.0)` registered
   in a plugin DLL is found by rpe. Always use the `rpe::hint::*` constants (see
   [editor-hints](editor-hints.md#why-the-constants-and-never-strings)).

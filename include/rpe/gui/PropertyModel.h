@@ -159,6 +159,10 @@ namespace rpe
         // node was frozen, reset, or an edit released one. Lets the view enable the
         // Reset control only while there is actually something frozen to release.
         void localEditsChanged();
+        // The bound type was released (TypeBridge::unregisterType — a plugin is
+        // unloading): the model has unbound itself. `typeName` is the released type's
+        // RTTR name, for rebinding once it is registered again.
+        void boundTypeReleased(const QString& typeName);
 
     private slots:
         void _flushPending();
@@ -182,6 +186,14 @@ namespace rpe
         void _forgetNodes(PropertyNode* node); // remove node + its subtree from _nodeByPath
         PropertyNode* _findNode(const QString& path) const;
         bool _applyEdit(PropertyNode* node, const rttr::variant& newVal);
+        // Type release (rpe/core/TypeRelease.h): runs on the releasing thread, drops
+        // every reflected handle/value the tree holds, then queues _finishRelease.
+        void _onTypesReleased(const std::vector<rttr::type>& released);
+        void _finishRelease();
+
+        int _releaseHandle = 0;
+        std::atomic<bool> _released { false };
+        QString _releasedTypeName;
 
         std::unique_ptr<PropertyNode> _root;
         QHash<QString, PropertyNode*> _nodeByPath;

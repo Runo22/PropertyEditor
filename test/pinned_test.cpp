@@ -309,9 +309,8 @@ int main(int argc, char** argv)
         auto* tree = w.findChild<QTreeWidget*>();
         QTreeWidgetItem* it = tree->topLevelItem(0);
         check("path pin shows its value", it->text(2) == QStringLiteral("orig.txt"));
-        check("path leaf is a std::filesystem::path variant",
-              rpe::TypeRenderer::isFilePath(rpe::TypeRenderer::rawType(
-                  it->data(0, Qt::UserRole + 3).value<rttr::variant>().get_type())));
+        // (That the leaf is a std::filesystem::path shows below: it opens a
+        // FilePathEditor. The last value itself is private to the widget.)
 
         // Open the editor exactly as a double-click would (this arms the edit guard).
         tree->itemDoubleClicked(it, 2);

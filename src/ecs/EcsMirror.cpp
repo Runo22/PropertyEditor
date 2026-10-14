@@ -3,6 +3,7 @@
 #include "rpe/core/ReadOnly.h"
 #include "rpe/core/RttrBridge.h"
 #include "rpe/core/TypeBridge.h"
+#include "rpe/core/TypeRelease.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/ecs/ComponentScan.h"
 
@@ -482,6 +483,9 @@ namespace rpe
 
     void EcsMirror::_pumpImpl(const flecs::world& world)
     {
+        // A type release on another thread waits for the pump to finish, and the
+        // pump never starts mid-release (see rpe/core/TypeRelease.h).
+        TypeUseScope typeScope;
         // Time the whole pump (RAII — covers every early return) for pumpStats().
         struct PumpTimer
         {
