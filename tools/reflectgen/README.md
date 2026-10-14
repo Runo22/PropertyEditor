@@ -100,10 +100,12 @@ Rules that keep unload safe:
   callbacks are code in the DLL, same as component hooks.
 * **Shared types live in a module that never unloads.** RTTR records a type in
   the module that touches it first and forgets it when that module unloads.
-  Value types used by several plugins (math types, `std::string`, containers)
+  rpe_core already claims the common ones (`std::string`, `QColor`, …) at load;
+  your own value types used by several plugins (math types, containers of them)
   belong in the host or a core DLL that registers them first.
-* **Let the editor drop cached values first** (`EcsMirror` clones values; their
-  destructors are plugin code): unregister, pump once, then unload.
+* `reflect::unregister_types()` calls `TypeBridge::unregisterType`, which is
+  rpe's release point: the editor, mirror and watch list drop every value of
+  the type there, while the plugin is still loaded.
 * **One compiler for RTTR and every module.** RTTR identifies types by
   compiler-generated names; mixing compilers breaks conversions.
 * Run `reflect_generate` on the DLL/exe target itself, not a static library
