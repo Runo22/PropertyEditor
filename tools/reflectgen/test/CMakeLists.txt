@@ -27,13 +27,15 @@ add_subdirectory(${FLECS_ROOT} flecs)
 set(RPE_BUILD_DEMO OFF CACHE BOOL "" FORCE)
 add_subdirectory(${RPE_ROOT} rpe EXCLUDE_FROM_ALL)
 
-add_library(game_plugin MODULE plugin/plugin.cpp plugin/game/Components.h)
+add_library(game_plugin MODULE plugin/plugin.cpp plugin/game/Components.h plugin/game/More.h)
 target_include_directories(game_plugin PRIVATE plugin)
 target_link_libraries(game_plugin PRIVATE reflect::runtime rpe::core flecs::flecs)
 set_target_properties(game_plugin PROPERTIES CXX_VISIBILITY_PRESET hidden)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(game_plugin PRIVATE -fno-gnu-unique) # let dlclose really unload
 endif()
+# Several generated files in one translation unit must not collide.
+set_target_properties(game_plugin PROPERTIES UNITY_BUILD ON)
 reflect_generate(game_plugin)
 
 add_executable(host host_main.cpp)

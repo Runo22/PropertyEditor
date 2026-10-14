@@ -1,5 +1,6 @@
 #include <reflect/Runtime.h>
 #include "game/Components.h"
+#include "game/More.h"
 
 #ifdef _WIN32
 #define PLUGIN_API extern "C" __declspec(dllexport)
