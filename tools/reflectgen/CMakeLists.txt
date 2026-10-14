@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21) # DEPFILE with $<CONFIG>
 project(reflectgen LANGUAGES CXX)
 
 # reflectgen only needs the libclang C API. On Windows the official LLVM installer
