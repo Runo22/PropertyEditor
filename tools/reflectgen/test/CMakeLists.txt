@@ -3,7 +3,7 @@
 # sources, Qt 5 and the PropertyEditor checkout:
 #   cmake -S . -B build-rg -G Ninja -DCMAKE_PREFIX_PATH=<rttr install> \
 #         -DFLECS_ROOT=<flecs checkout> -DRPE_ROOT=<PropertyEditor>
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 project(reflectgen_test C CXX)
 if(NOT CMAKE_CXX_STANDARD)
     set(CMAKE_CXX_STANDARD 17) # RTTR 0.9.6 headers vs libstdc++ in C++20 mode don't mix
@@ -68,3 +68,15 @@ _reflect_out_name(${SCAN_LATER} ${CMAKE_CURRENT_BINARY_DIR}/reflect_gen/scan_pro
 add_test(NAME scan_build_picks_up_new_header
          COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DHEADER=${SCAN_LATER} -DGEN=${SCAN_LATER_GEN}
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/scan/scan_build_test.cmake)
+
+# game_plugin has forced includes (prelude.h, PCH <vector>): its parse PCH must exist.
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/check_pch.cmake [=[
+file(SIZE ${PCH} size)
+if(size EQUAL 0)
+    message(FATAL_ERROR "parse PCH is empty: ${PCH}")
+endif()
+message(STATUS "PASS: parse PCH ${size} bytes")
+]=])
+add_test(NAME parse_pch_built
+         COMMAND ${CMAKE_COMMAND} -DPCH=${CMAKE_CURRENT_BINARY_DIR}/reflect_gen/game_plugin/reflectgen_parse_$<CONFIG>.pch
+                 -P ${CMAKE_CURRENT_BINARY_DIR}/check_pch.cmake)
