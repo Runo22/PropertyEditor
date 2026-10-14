@@ -581,16 +581,16 @@ namespace
         };
         for (const auto& [k, v] : map)
             if (name == k)
-                return std::string("::std::string(::rpe::editor::") + v + ")";
-        return "::std::string(::rpe::editor::Default)";
+                return std::string("::rpe::editor::") + v;
+        return "::rpe::editor::Default";
     }
 
     std::vector<std::string> metadataFor(const Field& f)
     {
         std::vector<std::string> md;
         auto add = [&](const char* key, const std::string& value) {
-            // std::string key: RTTR matches const char* keys by address, which differs per DLL
-            md.push_back("::rttr::metadata(::std::string(::rpe::hint::" + std::string(key) + "), " + value + ")");
+            // rpe::hint keys are compile-time hashes, so they match across DLLs
+            md.push_back("::rttr::metadata(::rpe::hint::" + std::string(key) + ", " + value + ")");
         };
         bool flagsAdded = false;
         for (const Opt& o : f.hints)
@@ -603,10 +603,10 @@ namespace
                 add("Step", o.value);
             else if (o.key == "decimals")
                 add("Decimals", o.value);
-            else if (o.key == "label") // std::string values: RTTR can't to_string() a const char*
-                add("Label", "::std::string(" + o.value + ")");
+            else if (o.key == "label")
+                add("Label", o.value);
             else if (o.key == "tooltip")
-                add("Tooltip", "::std::string(" + o.value + ")");
+                add("Tooltip", o.value);
             else if (o.key == "readonly")
                 add("ReadOnly", o.hasValue ? o.value : "true");
             else if (o.key == "editor")
