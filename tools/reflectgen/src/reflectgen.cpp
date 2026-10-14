@@ -863,11 +863,136 @@ namespace
         return r;
     }
 
+
+    // ── compiler arguments ────────────────────────────────────────────────────────
+    //
+    // reflect_generate passes the target's include dirs, defines, COMPILE_OPTIONS
+    // and CMAKE_CXX_FLAGS. Only what changes how a header PARSES is kept; the rest
+    // (warnings, optimisation, code generation, GCC-only flags clang rejects) is
+    // dropped so a foreign flag can never break the parse.
+
+    bool startsWithAny(const std::string& a, std::initializer_list<const char*> prefixes)
+    {
+        for (const char* p : prefixes)
+            if (a.rfind(p, 0) == 0)
+                return true;
+        return false;
+    }
+
+    // Returns how many arguments starting at args[i] to keep (0 = drop args[i]).
+    // Options that may take their value as the next argument count as 2.
+    size_t keepArg(const std::vector<std::string>& args, size_t i, bool clMode)
+    {
+        const std::string& a = args[i];
+        const bool hasNext = i + 1 < args.size();
+        if (a == "--driver-mode=cl")
+            return 1;
+        if (clMode && (a[0] == '/' || a[0] == '-') && a.size() > 1)
+        {
+            const std::string o = a.substr(1); // cl accepts both /X and -X
+            static const char* const pairable[] = { "FI", "I", "D", "U", "external:I", "imsvc" };
+            for (const char* p : pairable)
+                if (o == p)
+                    return hasNext ? 2 : 0;
+            if (startsWithAny(o, { "FI", "D", "U", "I", "external:I", "imsvc", "Zc:", "std:", "EH", "GR", "Zp",
+                                   "vm", "source-charset:", "execution-charset:", "clang:" })
+                || o == "J" || o == "utf-8" || o == "permissive" || o == "permissive-" || o == "TP"
+                // runtime library: /MDd and /MTd define _DEBUG, which the headers see
+                || o == "MD" || o == "MDd" || o == "MT" || o == "MTd" || o == "LD" || o == "LDd")
+                return 1;
+            if (o == "Xclang")
+                return hasNext ? 2 : 0;
+            return 0;
+        }
+        static const char* const pairable[] = { "-I", "-D", "-U", "-isystem", "-iquote", "-idirafter",
+                                                "-include", "-imacros", "-x", "-Xclang" };
+        for (const char* p : pairable)
+            if (a == p)
+                return hasNext ? 2 : 0;
+        if (startsWithAny(a, { "-I", "-D", "-U", "-isystem", "-iquote", "-idirafter", "-std=", "--target=",
+                               "-stdlib=", "-include", "-imacros" }))
+            return 1;
+        static const char* const flags[] = { "-fms-extensions", "-fms-compatibility", "-fdeclspec", "-fchar8_t",
+                                             "-fno-char8_t", "-fsigned-char", "-funsigned-char", "-fshort-wchar",
+                                             "-frtti", "-fno-rtti", "-fexceptions", "-fno-exceptions",
+                                             "-m32", "-m64", "-nostdinc", "-nostdinc++", "-pthread" };
+        for (const char* f : flags)
+            if (a == f)
+                return 1;
+        return 0;
+    }
+
+    std::vector<std::string> filterArgs(const std::vector<std::string>& in, bool clMode, std::vector<std::string>* dropped)
+    {
+        std::vector<std::string> out;
+        for (size_t i = 0; i < in.size();)
+        {
+            if (in[i].empty())
+            {
+                ++i; // an empty genex expansion
+                continue;
+            }
+            const size_t n = keepArg(in, i, clMode);
+            if (n == 0)
+            {
+                if (dropped)
+                    dropped->push_back(in[i]);
+                ++i;
+                continue;
+            }
+            for (size_t k = 0; k < n; ++k)
+                out.push_back(in[i + k]);
+            i += n;
+        }
+        return out;
+    }
+
+    // Expand "@file" arguments: one argument per line (no quoting, so paths with
+    // spaces need nothing special). reflect_generate writes such a file per target,
+    // which also keeps long include lists clear of command-line length limits.
+    bool expandResponseFiles(std::vector<std::string>& args)
+    {
+        std::vector<std::string> out;
+        for (const auto& a : args)
+        {
+            if (a.size() < 2 || a[0] != '@')
+            {
+                out.push_back(a);
+                continue;
+            }
+            std::ifstream in(a.substr(1), std::ios::binary);
+            if (!in)
+            {
+                std::fprintf(stderr, "reflectgen: cannot read response file %s\n", a.c_str() + 1);
+                return false;
+            }
+            std::string line;
+            while (std::getline(in, line))
+            {
+                if (!line.empty() && line.back() == '\r')
+                    line.pop_back();
+                if (!line.empty())
+                    out.push_back(line);
+            }
+        }
+        args.swap(out);
+        return true;
+    }
+
+    // "<vector>" (a PRECOMPILE_HEADERS entry) → "vector"; a path stays as is.
+    std::string unbracket(const std::string& h)
+    {
+        if (h.size() > 2 && h.front() == '<' && h.back() == '>')
+            return h.substr(1, h.size() - 2);
+        return h;
+    }
+
     int usage()
     {
         std::fprintf(stderr,
                      "usage: reflectgen <header> -o <out.cpp> [--depfile <file>] [--include <spelling>]\n"
-                     "                  [--default-fields explicit|all] [--allow-errors] -- <compiler args>\n");
+                     "                  [--default-fields explicit|all] [--preinclude <header>]...\n"
+                     "                  [--allow-errors] [--verbose] -- <compiler args>\n");
         return 2;
     }
 
@@ -876,7 +1001,8 @@ namespace
 int main(int argc, char** argv)
 {
     std::string header, out, depfile, include;
-    bool allowErrors = false;
+    std::vector<std::string> preincludes;
+    bool allowErrors = false, verbose = false;
     State st;
     std::vector<std::string> cargs;
 
@@ -900,6 +1026,14 @@ int main(int argc, char** argv)
             st.defaultAll = next() == "all";
         else if (a == "--allow-errors")
             allowErrors = true;
+        else if (a == "--verbose")
+            verbose = true;
+        else if (a == "--preinclude")
+        {
+            const std::string h = unbracket(next());
+            if (!h.empty())
+                preincludes.push_back(h);
+        }
         else if (!a.empty() && a[0] == '-')
             return usage();
         else
@@ -908,7 +1042,22 @@ int main(int argc, char** argv)
     if (header.empty() || out.empty())
         return usage();
 
+    if (!expandResponseFiles(cargs))
+        return 1;
     const bool clMode = std::find(cargs.begin(), cargs.end(), "--driver-mode=cl") != cargs.end();
+    std::vector<std::string> dropped;
+    cargs = filterArgs(cargs, clMode, &dropped);
+    // A forced include given as "<vector>" (PRECOMPILE_HEADERS style) → "vector".
+    for (size_t i = 0; i + 1 < cargs.size(); ++i)
+        if (cargs[i] == "-include" || cargs[i] == "/FI" || cargs[i] == "-FI")
+            cargs[i + 1] = unbracket(cargs[i + 1]);
+    // Headers the target's sources always see first (forced includes, PCH): a
+    // header that relies on them is not self-contained but must still parse.
+    for (const auto& h : preincludes)
+    {
+        cargs.emplace_back(clMode ? "/FI" : "-include");
+        cargs.push_back(h);
+    }
     // Treat the header as C++ and switch the annotations on.
     if (clMode)
     {
@@ -924,6 +1073,20 @@ int main(int argc, char** argv)
         cargs.emplace_back("-DREFLECT_PARSE");
     }
     cargs.emplace_back("-Wno-pragma-once-outside-header");
+    if (verbose)
+    {
+        std::fprintf(stderr, "reflectgen: parsing %s with:", header.c_str());
+        for (const auto& a : cargs)
+            std::fprintf(stderr, " %s", a.c_str());
+        std::fprintf(stderr, "\n");
+        if (!dropped.empty())
+        {
+            std::fprintf(stderr, "reflectgen: ignored (no effect on parsing):");
+            for (const auto& a : dropped)
+                std::fprintf(stderr, " %s", a.c_str());
+            std::fprintf(stderr, "\n");
+        }
+    }
     std::vector<const char*> argp;
     for (const auto& s : cargs)
         argp.push_back(s.c_str());
