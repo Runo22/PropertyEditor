@@ -39,9 +39,17 @@ struct Plugin
     }
 };
 
-static double meta(const rttr::type& t, const char* prop, const char* key)
+// A metadata string as rpe's metaString reads it (const char* or std::string).
+static std::string metaText(const rttr::variant& m)
 {
-    return t.get_property(prop).get_metadata(std::string(key)).to_double(); // as rpe reads it
+    if (m.is_type<const char*>())
+        return m.get_value<const char*>();
+    return m.to_string();
+}
+
+static double meta(const rttr::type& t, const char* prop, rpe::hint::Key key)
+{
+    return t.get_property(prop).get_metadata(key).to_double();
 }
 
 int main(int, char** argv)
@@ -57,21 +65,17 @@ int main(int, char** argv)
 
         rttr::type light = rttr::type::get_by_name("game::Light");
         check("RTTR knows game::Light", light.is_valid());
-        check("intensity min/max/step", meta(light, "intensity", "rpe.min") == 0 && meta(light, "intensity", "rpe.max") == 100 && meta(light, "intensity", "rpe.step") == 0.5);
-        check("intensity uses slider", light.get_property("intensity").get_metadata(std::string("rpe.editor")).to_string() == "slider");
-        check("speed max = kMaxSpeed", meta(light, "speed", "rpe.max") == 250.0);
-        check("iconPath label", light.get_property("iconPath").get_metadata(std::string("rpe.label")).to_string() == "Icon");
-        check("damage gets flags hint automatically", light.get_property("damage").get_metadata(std::string("rpe.flags")).to_bool());
-        // Why generated code uses std::string keys: the old const char* form only
-        // matches when the key pointer comes from the same module.
-        std::printf("    info: lookup with this module's rpe::hint::Min pointer %s\n",
-                    light.get_property("intensity").get_metadata(rpe::hint::Min).is_valid() ? "found it" : "does NOT find it");
+        check("intensity min/max/step", meta(light, "intensity", rpe::hint::Min) == 0 && meta(light, "intensity", rpe::hint::Max) == 100 && meta(light, "intensity", rpe::hint::Step) == 0.5);
+        check("intensity uses slider", metaText(light.get_property("intensity").get_metadata(rpe::hint::Editor)) == "slider");
+        check("speed max = kMaxSpeed", meta(light, "speed", rpe::hint::Max) == 250.0);
+        check("iconPath label", metaText(light.get_property("iconPath").get_metadata(rpe::hint::Label)) == "Icon");
+        check("damage gets flags hint automatically", light.get_property("damage").get_metadata(rpe::hint::Flags).to_bool());
         check("non-PROP field 'cache' not registered", !light.get_property("cache").is_valid());
 
         rttr::type stats = rttr::type::get_by_name("game::Stats");
         check("all-mode: hp, shield, inventory registered", stats.get_property("hp").is_valid() && stats.get_property("shield").is_valid() && stats.get_property("inventory").is_valid());
         check("all-mode: NOPROP debugCounter skipped", !stats.get_property("debugCounter").is_valid());
-        check("private secret via REFLECT_FRIEND, readonly", stats.get_property("secret").get_metadata(std::string("rpe.readOnly")).to_bool());
+        check("private secret via REFLECT_FRIEND, readonly", stats.get_property("secret").get_metadata(rpe::hint::ReadOnly).to_bool());
 
         rttr::type shape = rttr::type::get_by_name("game::Shape");
         check("enum Shape: NOPROP Count skipped", shape.is_enumeration() && shape.get_enumeration().get_names().size() == 2);
