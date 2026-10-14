@@ -1,33 +1,64 @@
 # reflect_generate(<target>
 #     [DEFAULT_FIELDS explicit|all]   # field selection for REFLECT types without all/explicit
 #     [HEADERS h1 h2 ...]             # default: the target's .h/.hh/.hpp/.hxx sources
-#     [PREINCLUDE h1 h2 ...])         # headers the target's sources always see first
+#     [PREINCLUDE h1 h2 ...]          # headers the target's sources always see first
+#     [SCAN CONFIGURE|BUILD]          # when to look for REFLECT (default CONFIGURE)
+#     [BATCH_SIZE n]                  # compile n generated files per translation unit
+#     [MARKER text])                  # the REFLECT macro's name, if you renamed it
 #
-# Runs reflectgen on every header of <target> that contains REFLECT( and adds the
-# generated <header>.gen.cpp files to <target>. Call it on the module that OWNS the
-# types — the exe or the plugin DLL itself, never a static library shared by
-# several DLLs (each module keeps its own registration list).
+# Runs reflectgen on the target's headers and adds the generated registration
+# code to <target>. Call it on the module that OWNS the types — the exe or the
+# plugin DLL itself, never a static library shared by several DLLs (each module
+# keeps its own registration list).
 #
 #   add_subdirectory(tools/reflectgen)            # builds reflectgen + reflect::runtime
 #   add_library(game_plugin SHARED ...)
 #   target_link_libraries(game_plugin PRIVATE reflect::runtime rpe::core flecs::flecs)
-#   reflect_generate(game_plugin)
+#   reflect_generate(game_plugin SCAN BUILD BATCH_SIZE 16)
 #
-# Headers are parsed with the target's own include dirs, defines, compile options,
-# C++ standard, CMAKE_CXX_FLAGS and PRECOMPILE_HEADERS (as forced includes), so a
-# header that is only complete inside the target's build still parses; reflectgen
-# keeps just the options that affect parsing. They reach it through a response
-# file written with file(GENERATE ... TARGET), which evaluates $<COMPILE_LANGUAGE>
-# conditions as CXX (a custom command would silently drop them) and keeps long
-# include lists clear of command-line length limits.
+# Parsing: headers are parsed with the target's own include dirs, defines, compile
+# options, C++ standard, CMAKE_CXX_FLAGS and PRECOMPILE_HEADERS (as forced
+# includes), so a header that is only complete inside the target's build still
+# parses; reflectgen keeps just the options that affect parsing. They reach it
+# through a response file written with file(GENERATE ... TARGET), which evaluates
+# $<COMPILE_LANGUAGE> conditions as CXX (a custom command would silently drop
+# them) and keeps long include lists clear of command-line length limits.
 #
-# Headers are picked at CONFIGURE time (cheap text scan), so re-run CMake after
-# adding the first REFLECT to a header that had none. Edits to a header that is
-# already picked are tracked by Ninja (header + everything it includes, via the
-# depfile); an unchanged result is not rewritten, so nothing downstream rebuilds.
+# SCAN CONFIGURE: only headers that contain MARKER( when CMake runs get a step, so
+#   re-run CMake after adding the first REFLECT to a header that had none.
+# SCAN BUILD: every header gets a step; one without MARKER is answered without
+#   parsing (an empty file), so adding REFLECT to any header just works on the
+#   next build. Use it with batching: the empty files then cost nothing to compile.
+#   BATCH_SIZE defaults to 16 in this mode.
+# BATCH_SIZE n (n > 1): the generated files are compiled n at a time through
+#   reflect_batch_<k>.cpp files that #include them — fewer translation units, so
+#   RTTR's registration headers are compiled fewer times. A changed header still
+#   only re-runs its own reflectgen step; its batch recompiles.
+#
+# Either way edits are tracked by Ninja (header + everything it includes, via the
+# depfile) and an unchanged result is not rewritten, so nothing downstream rebuilds.
 
 function(reflect_generate target)
-    cmake_parse_arguments(RG "" "DEFAULT_FIELDS" "HEADERS;PREINCLUDE" ${ARGN})
+    cmake_parse_arguments(RG "" "DEFAULT_FIELDS;SCAN;BATCH_SIZE;MARKER" "HEADERS;PREINCLUDE" ${ARGN})
+    if(NOT RG_SCAN)
+        set(RG_SCAN CONFIGURE)
+    endif()
+    if(NOT RG_SCAN MATCHES "^(CONFIGURE|BUILD)$")
+        message(FATAL_ERROR "reflect_generate(${target}): SCAN must be CONFIGURE or BUILD, not '${RG_SCAN}'")
+    endif()
+    if(NOT DEFINED RG_BATCH_SIZE)
+        if(RG_SCAN STREQUAL "BUILD")
+            set(RG_BATCH_SIZE 16)
+        else()
+            set(RG_BATCH_SIZE 1)
+        endif()
+    endif()
+    if(NOT RG_BATCH_SIZE MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "reflect_generate(${target}): BATCH_SIZE must be a number, not '${RG_BATCH_SIZE}'")
+    endif()
+    if(NOT RG_MARKER)
+        set(RG_MARKER REFLECT)
+    endif()
 
     if(TARGET reflectgen)
         set(_tool $<TARGET_FILE:reflectgen>)
@@ -47,7 +78,7 @@ function(reflect_generate target)
         endforeach()
     endif()
 
-    set(_extra)
+    set(_extra --marker ${RG_MARKER})
     if(RG_DEFAULT_FIELDS)
         list(APPEND _extra --default-fields ${RG_DEFAULT_FIELDS})
     endif()
@@ -55,11 +86,14 @@ function(reflect_generate target)
     set(_outdir ${CMAKE_CURRENT_BINARY_DIR}/reflect_gen/${target})
     _reflect_write_args(${target} "${_outdir}" "${RG_PREINCLUDE}" _rsp)
 
+    set(_gen)
     foreach(_h IN LISTS RG_HEADERS)
         get_filename_component(_abs "${_h}" ABSOLUTE BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-        file(STRINGS "${_abs}" _hit REGEX "REFLECT[ \t]*\\(" LIMIT_COUNT 1)
-        if(NOT _hit)
-            continue()
+        if(RG_SCAN STREQUAL "CONFIGURE")
+            file(STRINGS "${_abs}" _hit REGEX "${RG_MARKER}[ \t]*\\(" LIMIT_COUNT 1)
+            if(NOT _hit)
+                continue()
+            endif()
         endif()
         _reflect_out_name("${_abs}" "${_outdir}" _out _rel)
         add_custom_command(
@@ -69,14 +103,46 @@ function(reflect_generate target)
             DEPFILE ${_out}.d
             COMMENT "reflectgen ${_rel}"
             VERBATIM)
-        target_sources(${target} PRIVATE ${_out})
+        list(APPEND _gen ${_out})
     endforeach()
+
+    if(RG_BATCH_SIZE LESS_EQUAL 1)
+        target_sources(${target} PRIVATE ${_gen})
+        return()
+    endif()
+
+    # Batches: the generated files stay sources of the target (so their steps run
+    # before it compiles) but are compiled only through the batch files.
+    set_source_files_properties(${_gen} PROPERTIES HEADER_FILE_ONLY ON)
+    target_sources(${target} PRIVATE ${_gen})
+    list(LENGTH _gen _count)
+    set(_batch 0)
+    set(_i 0)
+    while(_i LESS _count)
+        set(_content "// Generated by reflect_generate - DO NOT EDIT.\n")
+        math(EXPR _end "${_i} + ${RG_BATCH_SIZE}")
+        while(_i LESS _end AND _i LESS _count)
+            list(GET _gen ${_i} _g)
+            string(APPEND _content "#include \"${_g}\"\n")
+            math(EXPR _i "${_i} + 1")
+        endwhile()
+        set(_batch_file ${_outdir}/reflect_batch_${_batch}.cpp)
+        file(GENERATE OUTPUT ${_batch_file} CONTENT "${_content}")
+        target_sources(${target} PRIVATE ${_batch_file})
+        math(EXPR _batch "${_batch} + 1")
+    endwhile()
 endfunction()
 
 # <outdir>/<header path relative to the source dir>.gen.cpp, safe for headers
 # outside the source tree and on another drive.
 function(_reflect_out_name abs outdir out_var rel_var)
-    file(RELATIVE_PATH _rel ${CMAKE_CURRENT_SOURCE_DIR} ${abs})
+    string(FIND "${abs}" "${CMAKE_CURRENT_BINARY_DIR}/" _in_bin)
+    if(_in_bin EQUAL 0) # a header generated into the build tree
+        file(RELATIVE_PATH _rel ${CMAKE_CURRENT_BINARY_DIR} ${abs})
+        set(_rel "_build/${_rel}")
+    else()
+        file(RELATIVE_PATH _rel ${CMAKE_CURRENT_SOURCE_DIR} ${abs})
+    endif()
     string(REPLACE ".." "__" _rel "${_rel}")
     string(REPLACE ":" "_" _rel "${_rel}")
     set(${out_var} ${outdir}/${_rel}.gen.cpp PARENT_SCOPE)

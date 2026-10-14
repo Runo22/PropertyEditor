@@ -55,3 +55,16 @@ target_link_libraries(host PRIVATE rpe::core flecs::flecs RTTR::Core ${CMAKE_DL_
 
 enable_testing()
 add_test(NAME plugin_roundtrip COMMAND host $<TARGET_FILE:game_plugin>)
+
+# SCAN BUILD + batching: a module whose header gains REFLECT only after configure.
+set(SCAN_LATER ${CMAKE_CURRENT_BINARY_DIR}/scan/Later.h)
+file(CONFIGURE OUTPUT ${SCAN_LATER} CONTENT
+    "#pragma once\n// starts without the macro; scan_build_test.cmake adds it\nnamespace scanprobe { struct Later { int b = 0; }; }\n")
+add_library(scan_probe MODULE scan/probe.cpp scan/Always.h ${SCAN_LATER})
+target_link_libraries(scan_probe PRIVATE reflect::runtime rpe::core flecs::flecs)
+set_target_properties(scan_probe PROPERTIES CXX_VISIBILITY_PRESET hidden)
+reflect_generate(scan_probe SCAN BUILD BATCH_SIZE 2)
+_reflect_out_name(${SCAN_LATER} ${CMAKE_CURRENT_BINARY_DIR}/reflect_gen/scan_probe SCAN_LATER_GEN _rel)
+add_test(NAME scan_build_picks_up_new_header
+         COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DHEADER=${SCAN_LATER} -DGEN=${SCAN_LATER_GEN}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/scan/scan_build_test.cmake)
