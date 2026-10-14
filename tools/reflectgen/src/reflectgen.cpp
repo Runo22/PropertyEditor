@@ -991,16 +991,155 @@ namespace
     {
         std::fprintf(stderr,
                      "usage: reflectgen <header> -o <out.cpp> [--depfile <file>] [--include <spelling>]\n"
-                     "                  [--default-fields explicit|all] [--preinclude <header>]...\n"
-                     "                  [--marker <text>] [--allow-errors] [--verbose] -- <compiler args>\n");
+                     "                  [--default-fields explicit|all] [--preinclude <header>]... [--pch <file>]\n"
+                     "                  [--marker <text>] [--allow-errors] [--verbose] -- <compiler args>\n"
+                     "       reflectgen --emit-pch <out.pch> [--depfile <file>] [--preinclude <header>]...\n"
+                     "                  [--verbose] -- <compiler args>\n"
+                     "Compiler arguments may come from @file (one argument per line).\n");
         return 2;
+    }
+
+    // "-includeX" / "/FIX" → ("-include" | "/FI", "X"), and "<vector>" → "vector",
+    // so forced includes can be found (and swapped for a PCH) as plain pairs.
+    void normalizeForcedIncludes(std::vector<std::string>& args, bool clMode)
+    {
+        std::vector<std::string> out;
+        for (size_t i = 0; i < args.size(); ++i)
+        {
+            const std::string& a = args[i];
+            const bool clFi = clMode && (a.rfind("/FI", 0) == 0 || a.rfind("-FI", 0) == 0);
+            const bool gccInc = !clMode && a.rfind("-include", 0) == 0 && a.rfind("-include-pch", 0) != 0;
+            if (!clFi && !gccInc)
+            {
+                out.push_back(a);
+                continue;
+            }
+            const size_t flagLen = clFi ? 3 : 8;
+            std::string value = a.size() > flagLen ? a.substr(flagLen) : (i + 1 < args.size() ? args[++i] : "");
+            if (value.empty())
+                continue;
+            out.push_back(clFi ? "/FI" : "-include");
+            out.push_back(unbracket(value));
+        }
+        args.swap(out);
+    }
+
+    bool isForcedInclude(const std::string& a)
+    {
+        return a == "/FI" || a == "-include";
+    }
+
+    bool hasForcedIncludes(const std::vector<std::string>& args)
+    {
+        return std::any_of(args.begin(), args.end(), isForcedInclude);
+    }
+
+    // The forced includes removed and the PCH that contains them loaded instead.
+    std::vector<std::string> withPch(const std::vector<std::string>& args, const std::string& pch, bool clMode)
+    {
+        std::vector<std::string> out;
+        for (size_t i = 0; i < args.size(); ++i)
+        {
+            if (isForcedInclude(args[i]))
+            {
+                ++i; // and its value
+                continue;
+            }
+            out.push_back(args[i]);
+        }
+        if (clMode)
+            out.insert(out.end(), { "-Xclang", "-include-pch", "-Xclang", pch });
+        else
+            out.insert(out.end(), { "-include-pch", pch });
+        return out;
+    }
+
+    struct Parsed
+    {
+        CXTranslationUnit tu = nullptr;
+        int errors = 0;
+        std::vector<std::string> messages; // formatted error diagnostics
+    };
+
+    // Parse `file` (optionally with `appendText` added to its contents in memory).
+    Parsed parse(CXIndex index, const std::string& file, const std::vector<std::string>& args, unsigned flags,
+                 const std::string* replaceText = nullptr)
+    {
+        Parsed p;
+        std::vector<const char*> argp;
+        for (const auto& a : args)
+            argp.push_back(a.c_str());
+        CXUnsavedFile unsaved{};
+        if (replaceText)
+        {
+            unsaved.Filename = file.c_str();
+            unsaved.Contents = replaceText->c_str();
+            unsaved.Length = static_cast<unsigned long>(replaceText->size());
+        }
+        const CXErrorCode ec = clang_parseTranslationUnit2(index, file.c_str(), argp.data(), static_cast<int>(argp.size()),
+                                                           replaceText ? &unsaved : nullptr, replaceText ? 1 : 0, flags,
+                                                           &p.tu);
+        if (ec != CXError_Success || !p.tu)
+        {
+            p.tu = nullptr;
+            p.errors = 1;
+            p.messages.push_back("libclang could not parse " + file + " (error " + std::to_string(int(ec)) + ")");
+            return p;
+        }
+        for (unsigned i = 0, n = clang_getNumDiagnostics(p.tu); i < n; ++i)
+        {
+            CXDiagnostic d = clang_getDiagnostic(p.tu, i);
+            if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error)
+            {
+                ++p.errors;
+                p.messages.push_back(take(clang_formatDiagnostic(d, clang_defaultDiagnosticDisplayOptions())));
+            }
+            clang_disposeDiagnostic(d);
+        }
+        return p;
+    }
+
+    void release(Parsed& p)
+    {
+        if (p.tu)
+            clang_disposeTranslationUnit(p.tu);
+        p.tu = nullptr;
+    }
+
+    // Every file the TU read, for a Ninja depfile. libclang may report
+    // "/../lib/gcc/..."-style paths; Ninja would normalise those lexically into
+    // files that don't exist and rerun us forever, so resolve them for real.
+    std::vector<std::string> inclusions(CXTranslationUnit tu)
+    {
+        std::vector<std::string> deps;
+        clang_getInclusions(
+            tu,
+            [](CXFile f, CXSourceLocation*, unsigned, CXClientData d) {
+                std::error_code ec;
+                const fs::path p = fs::weakly_canonical(fs::path(take(clang_getFileName(f))), ec);
+                if (!ec && fs::exists(p, ec))
+                    static_cast<std::vector<std::string>*>(d)->push_back(p.generic_string());
+            },
+            &deps);
+        return deps;
+    }
+
+    void writeDepfile(const std::string& depfile, const std::string& out, const std::vector<std::string>& deps)
+    {
+        if (depfile.empty())
+            return;
+        std::string dep = depEscape(fs::path(out).generic_string()) + ":";
+        for (const auto& p : deps)
+            dep += " \\\n  " + depEscape(p);
+        dep += "\n";
+        writeIfChanged(depfile, dep);
     }
 
 } // namespace
 
 int main(int argc, char** argv)
 {
-    std::string header, out, depfile, include, marker = "REFLECT";
+    std::string header, out, depfile, include, pch, emitPch, marker = "REFLECT";
     std::vector<std::string> preincludes;
     bool allowErrors = false, verbose = false;
     State st;
@@ -1030,6 +1169,10 @@ int main(int argc, char** argv)
             verbose = true;
         else if (a == "--marker")
             marker = next();
+        else if (a == "--pch")
+            pch = next();
+        else if (a == "--emit-pch")
+            emitPch = next();
         else if (a == "--preinclude")
         {
             const std::string h = unbracket(next());
@@ -1041,12 +1184,14 @@ int main(int argc, char** argv)
         else
             header = a;
     }
-    if (header.empty() || out.empty())
+    if (emitPch.empty() ? (header.empty() || out.empty()) : !header.empty())
         return usage();
 
     // Fast path: a header that never mentions the marker (the REFLECT macro name)
     // cannot declare a reflected type. Write an empty result without parsing, so
     // running reflectgen on every header of a target costs next to nothing.
+    std::string headerText;
+    if (emitPch.empty())
     {
         std::ifstream in(header, std::ios::binary);
         if (!in)
@@ -1056,7 +1201,8 @@ int main(int argc, char** argv)
         }
         std::stringstream text;
         text << in.rdbuf();
-        if (!marker.empty() && text.str().find(marker) == std::string::npos)
+        headerText = text.str();
+        if (!marker.empty() && headerText.find(marker) == std::string::npos)
         {
             const fs::path hdr = fs::absolute(header);
             const std::string stub = "// Generated by reflectgen from " + hdr.filename().generic_string()
@@ -1066,22 +1212,17 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "reflectgen: cannot write %s\n", out.c_str());
                 return 1;
             }
-            if (!depfile.empty())
-                writeIfChanged(depfile, depEscape(fs::path(out).generic_string()) + ": \\\n  "
-                                            + depEscape(fs::weakly_canonical(hdr).generic_string()) + "\n");
+            writeDepfile(depfile, out, { fs::weakly_canonical(hdr).generic_string() });
             return 0;
         }
     }
 
+    // ── compiler arguments ──
     if (!expandResponseFiles(cargs))
         return 1;
     const bool clMode = std::find(cargs.begin(), cargs.end(), "--driver-mode=cl") != cargs.end();
     std::vector<std::string> dropped;
     cargs = filterArgs(cargs, clMode, &dropped);
-    // A forced include given as "<vector>" (PRECOMPILE_HEADERS style) → "vector".
-    for (size_t i = 0; i + 1 < cargs.size(); ++i)
-        if (cargs[i] == "-include" || cargs[i] == "/FI" || cargs[i] == "-FI")
-            cargs[i + 1] = unbracket(cargs[i + 1]);
     // Headers the target's sources always see first (forced includes, PCH): a
     // header that relies on them is not self-contained but must still parse.
     for (const auto& h : preincludes)
@@ -1089,6 +1230,7 @@ int main(int argc, char** argv)
         cargs.emplace_back(clMode ? "/FI" : "-include");
         cargs.push_back(h);
     }
+    normalizeForcedIncludes(cargs, clMode);
     // Treat the header as C++ and switch the annotations on.
     if (clMode)
     {
@@ -1104,57 +1246,108 @@ int main(int argc, char** argv)
         cargs.emplace_back("-DREFLECT_PARSE");
     }
     cargs.emplace_back("-Wno-pragma-once-outside-header");
-    if (verbose)
+    if (verbose && !dropped.empty())
     {
-        std::fprintf(stderr, "reflectgen: parsing %s with:", header.c_str());
-        for (const auto& a : cargs)
+        std::fprintf(stderr, "reflectgen: ignored (no effect on parsing):");
+        for (const auto& a : dropped)
             std::fprintf(stderr, " %s", a.c_str());
         std::fprintf(stderr, "\n");
-        if (!dropped.empty())
-        {
-            std::fprintf(stderr, "reflectgen: ignored (no effect on parsing):");
-            for (const auto& a : dropped)
-                std::fprintf(stderr, " %s", a.c_str());
-            std::fprintf(stderr, "\n");
-        }
     }
-    std::vector<const char*> argp;
-    for (const auto& s : cargs)
-        argp.push_back(s.c_str());
+    auto logArgs = [&](const std::string& what, const std::vector<std::string>& args) {
+        if (!verbose)
+            return;
+        std::fprintf(stderr, "reflectgen: %s with:", what.c_str());
+        for (const auto& a : args)
+            std::fprintf(stderr, " %s", a.c_str());
+        std::fprintf(stderr, "\n");
+    };
 
     CXIndex index = clang_createIndex(/*excludePCH*/ 0, /*displayDiagnostics*/ 0);
-    CXTranslationUnit tu = nullptr;
-    const unsigned flags = CXTranslationUnit_SkipFunctionBodies | CXTranslationUnit_KeepGoing;
-    const CXErrorCode ec = clang_parseTranslationUnit2(index, header.c_str(), argp.data(), static_cast<int>(argp.size()),
-                                                       nullptr, 0, flags, &tu);
-    if (ec != CXError_Success || !tu)
+    struct IndexGuard
     {
-        std::fprintf(stderr, "reflectgen: failed to parse %s (libclang error %d)\n", header.c_str(), static_cast<int>(ec));
-        return 1;
-    }
+        CXIndex i;
+        ~IndexGuard() { clang_disposeIndex(i); }
+    } indexGuard{ index };
 
-    int parseErrors = 0;
-    for (unsigned i = 0, n = clang_getNumDiagnostics(tu); i < n; ++i)
+    // ── --emit-pch: precompile the forced includes once for the whole target ──
+    if (!emitPch.empty())
     {
-        CXDiagnostic d = clang_getDiagnostic(tu, i);
-        if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error)
+        // No forced includes → nothing to precompile; an empty file tells the
+        // per-header steps to parse normally.
+        if (!hasForcedIncludes(cargs))
         {
-            ++parseErrors;
-            std::fprintf(stderr, "%s\n",
-                         take(clang_formatDiagnostic(d, clang_defaultDiagnosticDisplayOptions())).c_str());
+            writeIfChanged(emitPch, "");
+            writeDepfile(depfile, emitPch, {});
+            return 0;
         }
-        clang_disposeDiagnostic(d);
+        const std::string main = emitPch + ".hpp"; // an empty, in-memory main file
+        const std::string empty;
+        logArgs("precompiling " + emitPch, cargs);
+        Parsed p = parse(index, main, cargs,
+                         CXTranslationUnit_Incomplete | CXTranslationUnit_ForSerialization
+                             | CXTranslationUnit_SkipFunctionBodies,
+                         &empty);
+        if (p.errors || clang_saveTranslationUnit(p.tu, emitPch.c_str(), clang_defaultSaveOptions(p.tu)) != CXSaveError_None)
+        {
+            // Not fatal: the per-header steps fall back to parsing without it.
+            std::fprintf(stderr, "reflectgen: warning: could not precompile the forced includes; parsing without a PCH\n");
+            for (const auto& m : p.messages)
+                std::fprintf(stderr, "%s\n", m.c_str());
+            writeIfChanged(emitPch, "");
+        }
+        writeDepfile(depfile, emitPch, p.tu ? inclusions(p.tu) : std::vector<std::string>{});
+        release(p);
+        return 0;
     }
-    if (parseErrors && !allowErrors)
+
+    // ── parse the header (with the target's PCH when there is a usable one) ──
+    const unsigned flags = CXTranslationUnit_SkipFunctionBodies | CXTranslationUnit_KeepGoing;
+    std::error_code fsErr;
+    const bool usePch = !pch.empty() && hasForcedIncludes(cargs) && fs::file_size(pch, fsErr) > 0 && !fsErr;
+    Parsed p;
+    if (usePch)
     {
-        std::fprintf(stderr, "reflectgen: %d parse error(s) in %s (pass --allow-errors to generate anyway)\n",
-                     parseErrors, header.c_str());
+        const auto pchArgs = withPch(cargs, pch, clMode);
+        logArgs("parsing " + header, pchArgs);
+        p = parse(index, header, pchArgs, flags);
+        if (p.errors)
+        {
+            // A stale or mismatched PCH must never make the result wrong: parse
+            // again the slow way and report only what that parse says.
+            if (verbose)
+                std::fprintf(stderr, "reflectgen: %s did not parse with %s; retrying without it\n", header.c_str(),
+                             pch.c_str());
+            release(p);
+            p = Parsed{};
+        }
+    }
+    if (!p.tu)
+    {
+        logArgs("parsing " + header, cargs);
+        p = parse(index, header, cargs, flags);
+    }
+    if (!p.tu)
+    {
+        for (const auto& m : p.messages)
+            std::fprintf(stderr, "reflectgen: %s\n", m.c_str());
+        return 1;
+    }
+    if (p.errors && !allowErrors)
+    {
+        for (const auto& m : p.messages)
+            std::fprintf(stderr, "%s\n", m.c_str());
+        std::fprintf(stderr, "reflectgen: %d parse error(s) in %s (pass --allow-errors to generate anyway)\n", p.errors,
+                     header.c_str());
+        release(p);
         return 1;
     }
 
-    clang_visitChildren(clang_getTranslationUnitCursor(tu), visitTop, &st);
+    clang_visitChildren(clang_getTranslationUnitCursor(p.tu), visitTop, &st);
     if (g_errors)
+    {
+        release(p);
         return 1;
+    }
 
     const fs::path hdr = fs::absolute(header);
     if (include.empty())
@@ -1163,32 +1356,10 @@ int main(int argc, char** argv)
     if (!writeIfChanged(out, code))
     {
         std::fprintf(stderr, "reflectgen: cannot write %s\n", out.c_str());
+        release(p);
         return 1;
     }
-
-    if (!depfile.empty())
-    {
-        std::vector<std::string> deps;
-        clang_getInclusions(
-            tu,
-            [](CXFile f, CXSourceLocation*, unsigned, CXClientData d) {
-                // libclang may report "/../lib/gcc/..."-style paths; Ninja would
-                // normalise those lexically into files that don't exist and rerun
-                // us forever. Resolve them against the real filesystem instead.
-                std::error_code ec;
-                const fs::path p = fs::weakly_canonical(fs::path(take(clang_getFileName(f))), ec);
-                if (!ec && fs::exists(p, ec))
-                    static_cast<std::vector<std::string>*>(d)->push_back(p.generic_string());
-            },
-            &deps);
-        std::string dep = depEscape(fs::path(out).generic_string()) + ":";
-        for (const auto& p : deps)
-            dep += " \\\n  " + depEscape(p);
-        dep += "\n";
-        writeIfChanged(depfile, dep);
-    }
-
-    clang_disposeTranslationUnit(tu);
-    clang_disposeIndex(index);
+    writeDepfile(depfile, out, inclusions(p.tu));
+    release(p);
     return 0;
 }
