@@ -266,6 +266,7 @@ namespace
         bool component = false;
         bool meta = false;
         bool isTag = false;
+        bool readOnly = false; // REFLECT(readonly): the editor shows it but never edits it
         std::vector<Field> fields;
     };
 
@@ -876,13 +877,15 @@ namespace
                 r.component = true;
             else if (o.key == "meta")
                 r.meta = true;
+            else if (o.key == "readonly")
+                r.readOnly = true;
             else if (o.key == "name" && o.hasValue)
                 r.flecsName = o.value;
             else if (o.key == "rttr_name" && o.hasValue)
                 r.rttrName = o.value;
             else
                 error(r.loc, "unknown REFLECT key '" + o.key
-                                 + "' (use all|explicit|component|meta|nometa|name=|rttr_name=)");
+                                 + "' (use all|explicit|component|meta|nometa|readonly|name=|rttr_name=)");
         }
         // Components are described to flecs (meta) unless told not to: that is
         // what lets flecs show them, serialise them and keep them across a reload.
@@ -1107,6 +1110,8 @@ namespace
         o << "        static void rttr()\n        {\n";
         emitUsing(o, r.scope);
         o << "            ::rttr::registration::class_<" << T << ">(" << r.rttrName << ")";
+        if (r.readOnly) // class metadata: read-only wherever the type appears (rpe/core/ReadOnly.h)
+            o << "(\n                ::rttr::metadata(::rpe::hint::ReadOnly, true))";
         for (const Field& f : r.fields)
         {
             if (f.getterExpr.empty())
