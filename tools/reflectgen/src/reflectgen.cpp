@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -219,7 +220,8 @@ namespace
                 continue;
             }
             const bool named = k == CXCursor_StructDecl || k == CXCursor_ClassDecl || k == CXCursor_EnumDecl
-                               || k == CXCursor_UnionDecl;
+                               || k == CXCursor_UnionDecl
+                               || ((k == CXCursor_TypeAliasDecl || k == CXCursor_TypedefDecl) && path.empty());
             if (!named || name.empty() || clang_Cursor_isAnonymous(p))
             {
                 s.ok = false; // local / unnamed type
@@ -234,7 +236,7 @@ namespace
 
     struct Field
     {
-        std::string name;
+        std::string name; // the member's (or accessor property's) name
         Loc loc;
         std::vector<Opt> hints;
         bool flagsEnum = false;            // type is a REFLECT(flags) enum
@@ -242,6 +244,11 @@ namespace
         bool flecsMeta = false;            // flecs knows how to describe the type
         std::string metaDep;               // embedded meta struct ("::ns::Vec3"), if any
         std::string typeSpelling;
+        // A data member: "&::ns::T::x", or for a base class's member
+        // "::reflect::as_member<::ns::T>(&::ns::T::x)". Empty for an accessor.
+        std::string memberExpr;
+        // An accessor property: getter (and setter; empty → read-only).
+        std::string getterExpr, setterExpr;
     };
 
     struct Record
@@ -278,6 +285,7 @@ namespace
     struct State
     {
         bool defaultAll = false;
+        std::set<std::string> seenTypes; // canonical spellings already reflected here
         std::vector<Item> items;
     };
 
@@ -301,10 +309,47 @@ namespace
         return a && hasOpt(parseOpts(*a), "flags");
     }
 
+    // The REFLECT declaration behind a type as written: through typedefs and
+    // aliases first (a REFLECT alias of a template instantiation carries the
+    // annotation itself), then the canonical class / enum. Null if none.
+    CXCursor reflectedDecl(CXType t)
+    {
+        for (int guard = 0; guard < 16; ++guard)
+        {
+            if (t.kind == CXType_Elaborated)
+            {
+                t = clang_Type_getNamedType(t);
+                continue;
+            }
+            const CXCursor d = clang_getTypeDeclaration(t);
+            if (!clang_Cursor_isNull(d) && annotation(d, "reflect:"))
+                return d;
+            if (t.kind == CXType_Typedef && !clang_Cursor_isNull(d))
+            {
+                t = clang_getTypedefDeclUnderlyingType(d);
+                continue;
+            }
+            break;
+        }
+        const CXCursor d = clang_getTypeDeclaration(clang_getCanonicalType(t));
+        return (!clang_Cursor_isNull(d) && annotation(d, "reflect:")) ? d : clang_getNullCursor();
+    }
+
+    // Does the REFLECT type behind `t` get flecs meta (meta, or a component
+    // without nometa)?
+    bool isMetaRecord(CXType t)
+    {
+        const CXCursor d = reflectedDecl(t);
+        if (clang_Cursor_isNull(d))
+            return false;
+        const auto opts = parseOpts(*annotation(d, "reflect:"));
+        return (hasOpt(opts, "meta") || hasOpt(opts, "component")) && !hasOpt(opts, "nometa");
+    }
+
     bool flecsCanDescribe(CXType t)
     {
-        t = clang_getCanonicalType(t);
-        switch (t.kind)
+        const CXType canon = clang_getCanonicalType(t);
+        switch (canon.kind)
         {
         case CXType_Bool:
         case CXType_Char_S:
@@ -324,12 +369,9 @@ namespace
         case CXType_Enum:
             return true;
         case CXType_ConstantArray:
-            return flecsCanDescribe(clang_getArrayElementType(t));
-        case CXType_Record: // another struct reflected with `meta`
-        {
-            const auto a = annotation(clang_getTypeDeclaration(t), "reflect:");
-            return a && hasOpt(parseOpts(*a), "meta");
-        }
+            return flecsCanDescribe(clang_getArrayElementType(t.kind == CXType_ConstantArray ? t : canon));
+        case CXType_Record: // another struct described to flecs
+            return isMetaRecord(t);
         default:
             return false;
         }
@@ -337,7 +379,7 @@ namespace
 
     const std::set<std::string_view> kFieldKeys = {
         "min", "max", "step", "decimals", "label", "tooltip", "readonly", "editor",
-        "slider", "color", "file", "savefile", "dir", "text", "flags", "name",
+        "slider", "color", "file", "savefile", "dir", "text", "flags", "name", "setter",
     };
     const std::set<std::string_view> kEditorNames = { "default", "file", "savefile", "dir", "color", "text", "slider" };
 
@@ -349,7 +391,8 @@ namespace
             if (!kFieldKeys.count(o.key))
                 error(f.loc, "unknown PROP key '" + o.key + "' on field '" + f.name + "'");
             const bool needsValue = o.key == "min" || o.key == "max" || o.key == "step" || o.key == "decimals"
-                                    || o.key == "label" || o.key == "tooltip" || o.key == "editor" || o.key == "name";
+                                    || o.key == "label" || o.key == "tooltip" || o.key == "editor" || o.key == "name"
+                                    || o.key == "setter";
             if (needsValue && !o.hasValue)
                 error(f.loc, "PROP key '" + o.key + "' needs a value (" + o.key + " = ...)");
             if (o.key == "editor" && o.hasValue && !kEditorNames.count(o.value))
@@ -390,7 +433,327 @@ namespace
         return found;
     }
 
-    void handleRecord(State& st, CXCursor c, const std::string& annot)
+    // ── fields of a reflected struct: its own, its REFLECT bases', its accessors ──
+
+    // How the generated code (reflect::Access<Final>, a friend of Final when it
+    // has REFLECT_FRIEND) can reach a member.
+    enum class Reach
+    {
+        Public,      // from anywhere
+        NeedsFriend, // protected/private in Final's view: only with REFLECT_FRIEND
+        None,        // private to a base class: unreachable from Final
+    };
+
+    // `edges` are the inheritance accesses from Final down to the declaring class.
+    Reach reachOf(CX_CXXAccessSpecifier member, const std::vector<CX_CXXAccessSpecifier>& edges)
+    {
+        auto rank = [](CX_CXXAccessSpecifier a) { return a == CX_CXXPublic ? 0 : a == CX_CXXProtected ? 1 : 2; };
+        int s = rank(member); // 2 = private in the class that declares it
+        for (auto it = edges.rbegin(); it != edges.rend(); ++it)
+        {
+            if (s == 2)
+                return Reach::None;
+            s = std::max(s, rank(*it)); // public base keeps it, protected/private base narrows it
+        }
+        return s == 0 ? Reach::Public : Reach::NeedsFriend;
+    }
+
+    struct Collect
+    {
+        Record* r = nullptr;
+        State* st = nullptr;
+        std::string T;            // "::ns::Final": every member pointer is formed through it
+        std::string finalName;    // for messages
+        bool friendOk = false;    // Final has REFLECT_FRIEND
+        std::set<std::string> taken;               // names registered so far (derived hides base)
+        std::map<std::string, CXCursor> concrete;  // template alias: instantiated fields by name
+        int ownFields = 0;
+        bool hasBases = false;
+    };
+
+    // Methods of `cls` called `name`.
+    std::vector<CXCursor> methodsNamed(CXCursor cls, const std::string& name)
+    {
+        struct Ctx
+        {
+            const std::string* name;
+            std::vector<CXCursor> out;
+        } ctx{ &name, {} };
+        clang_visitChildren(
+            cls,
+            [](CXCursor m, CXCursor, CXClientData d) {
+                auto* x = static_cast<Ctx*>(d);
+                const CXCursorKind k = clang_getCursorKind(m);
+                if ((k == CXCursor_CXXMethod || k == CXCursor_FunctionTemplate) && take(clang_getCursorSpelling(m)) == *x->name)
+                    x->out.push_back(m);
+                return CXChildVisit_Continue;
+            },
+            &ctx);
+        return ctx.out;
+    }
+
+    // "getSpeed" / "get_speed" → "speed"; anything else stays as it is.
+    std::string propertyNameFromGetter(const std::string& m)
+    {
+        std::string n = m;
+        if (n.rfind("get_", 0) == 0 && n.size() > 4)
+            n = n.substr(4);
+        else if ((n.rfind("get", 0) == 0 || n.rfind("Get", 0) == 0) && n.size() > 3
+                 && std::isupper(static_cast<unsigned char>(n[3])))
+            n = n.substr(3);
+        else
+            return m;
+        n[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(n[0])));
+        return n;
+    }
+
+    std::string unquote(const std::string& v)
+    {
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"')
+            return v.substr(1, v.size() - 2);
+        return v;
+    }
+
+    // PROP on a const getter: `PROP(setter = setSpeed) float getSpeed() const;`
+    void addAccessor(Collect& k, CXCursor cls, CXCursor m, const std::string& annot, bool isTemplatePattern)
+    {
+        Field f;
+        f.loc = locOf(m);
+        const std::string getter = take(clang_getCursorSpelling(m));
+        f.hints = parseOpts(annot);
+        if (clang_getCursorKind(m) != CXCursor_CXXMethod || clang_CXXMethod_isStatic(m)
+            || clang_Cursor_getNumArguments(m) != 0 || !clang_CXXMethod_isConst(m)
+            || clang_getCursorResultType(m).kind == CXType_Void)
+        {
+            error(f.loc, "PROP on a method needs a non-static const getter without parameters ('" + getter + "')");
+            return;
+        }
+        if (clang_getCXXAccessSpecifier(m) != CX_CXXPublic && !k.friendOk)
+        {
+            error(f.loc, "getter '" + getter + "' is not public; add REFLECT_FRIEND to " + k.finalName);
+            return;
+        }
+        std::string setter;
+        for (const Opt& o : f.hints)
+        {
+            if (o.key == "setter")
+                setter = o.value;
+            if (o.key == "name" && o.hasValue)
+                f.name = unquote(o.value);
+        }
+        if (f.name.empty())
+            f.name = propertyNameFromGetter(getter);
+        if (k.taken.count(f.name))
+        {
+            error(f.loc, "property '" + f.name + "' is registered twice in " + k.finalName);
+            return;
+        }
+
+        const auto getters = methodsNamed(cls, getter);
+        if (getters.size() == 1)
+            f.getterExpr = "&" + k.T + "::" + getter;
+        else if (isTemplatePattern)
+        {
+            error(f.loc, "overloaded getter '" + getter + "' in a class template: give it a unique name");
+            return;
+        }
+        else // pick the annotated overload: R (T::*)() const
+            f.getterExpr = "static_cast<" + take(clang_getTypeSpelling(clang_getCanonicalType(clang_getCursorResultType(m))))
+                           + " (" + k.T + "::*)() const>(&" + k.T + "::" + getter + ")";
+
+        if (!setter.empty())
+        {
+            const auto setters = methodsNamed(cls, setter);
+            if (setters.size() != 1)
+            {
+                error(f.loc, setters.empty() ? "setter '" + setter + "' not found in " + k.finalName
+                                             : "setter '" + setter + "' is overloaded: give it a unique name");
+                return;
+            }
+            const CXCursor sm = setters[0];
+            if (clang_getCursorKind(sm) != CXCursor_CXXMethod || clang_CXXMethod_isStatic(sm)
+                || clang_Cursor_getNumArguments(sm) != 1 || clang_CXXMethod_isConst(sm))
+            {
+                error(f.loc, "setter '" + setter + "' must be a non-const member function taking one argument");
+                return;
+            }
+            if (clang_getCXXAccessSpecifier(sm) != CX_CXXPublic && !k.friendOk)
+            {
+                error(f.loc, "setter '" + setter + "' is not public; add REFLECT_FRIEND to " + k.finalName);
+                return;
+            }
+            f.setterExpr = "&" + k.T + "::" + setter;
+        }
+        f.typeSpelling = "accessor";
+        validateFieldHints(f);
+        k.taken.insert(f.name);
+        k.r->fields.push_back(std::move(f));
+    }
+
+    // Fields (and, for Final itself, accessors) of `cls`, then of its REFLECT bases.
+    void collectMembers(Collect& k, CXCursor cls, bool all, const std::vector<CX_CXXAccessSpecifier>& edges,
+                        bool isTemplatePattern)
+    {
+        const bool isFinal = edges.empty();
+        struct Ctx
+        {
+            Collect* k;
+            CXCursor cls;
+            bool all, isFinal, isTemplatePattern;
+            const std::vector<CX_CXXAccessSpecifier>* edges;
+            std::vector<CXCursor> bases;
+        } ctx{ &k, cls, all, isFinal, isTemplatePattern, &edges, {} };
+
+        clang_visitChildren(
+            cls,
+            [](CXCursor f, CXCursor, CXClientData d) {
+                auto* x = static_cast<Ctx*>(d);
+                Collect& k = *x->k;
+                const CXCursorKind kind = clang_getCursorKind(f);
+                if (kind == CXCursor_CXXBaseSpecifier)
+                {
+                    x->bases.push_back(f);
+                    return CXChildVisit_Continue;
+                }
+                if (kind == CXCursor_CXXMethod)
+                {
+                    if (auto a = annotation(f, "prop:"))
+                    {
+                        if (x->isFinal)
+                            addAccessor(k, x->cls, f, *a, x->isTemplatePattern);
+                        else
+                            warning(locOf(f), "accessor properties of a base class are not registered on "
+                                                  + k.finalName + "; reflect it on the base's own type");
+                    }
+                    return CXChildVisit_Continue;
+                }
+                if (kind != CXCursor_FieldDecl)
+                    return CXChildVisit_Continue;
+                if (x->isFinal)
+                    ++k.ownFields;
+
+                Field fld;
+                fld.name = take(clang_getCursorSpelling(f));
+                fld.loc = locOf(f);
+                const auto prop = annotation(f, "prop:");
+                const bool no = annotation(f, "noprop:").has_value();
+                if (prop && no)
+                {
+                    error(fld.loc, "field '" + fld.name + "' has both PROP and NOPROP");
+                    return CXChildVisit_Continue;
+                }
+                if (!(x->all ? !no : prop.has_value()))
+                    return CXChildVisit_Continue;
+
+                const Reach reach = reachOf(clang_getCXXAccessSpecifier(f), *x->edges);
+                if (reach == Reach::None)
+                {
+                    if (prop)
+                        error(fld.loc, "field '" + fld.name + "' is private to its class, so " + k.finalName
+                                           + " cannot register it; make it protected or reflect it on its own class");
+                    return CXChildVisit_Continue;
+                }
+                if (reach == Reach::NeedsFriend && !k.friendOk)
+                {
+                    if (prop) // asked for explicitly → tell the user how to fix it
+                        error(fld.loc, "field '" + fld.name + "' is not public; add REFLECT_FRIEND to " + k.finalName);
+                    return CXChildVisit_Continue; // `all` mode: non-public fields stay private
+                }
+                if (clang_Cursor_isBitField(f))
+                {
+                    if (prop)
+                        error(fld.loc, "bit-field '" + fld.name + "' cannot be reflected (no pointer-to-member)");
+                    return CXChildVisit_Continue;
+                }
+                if (k.taken.count(fld.name))
+                {
+                    if (!x->isFinal && prop)
+                        warning(fld.loc, "'" + fld.name + "' is hidden by a member of the same name in " + k.finalName);
+                    return CXChildVisit_Continue;
+                }
+
+                // In a template alias the pattern's field is dependent; the
+                // instantiated one has the real type.
+                const auto conc = k.concrete.find(fld.name);
+                const CXCursor typed = conc != k.concrete.end() ? conc->second : f;
+                const CXType t = clang_getCursorType(typed);
+                const CXType canon = clang_getCanonicalType(t);
+                fld.typeSpelling = take(clang_getTypeSpelling(t));
+                if (prop)
+                    fld.hints = parseOpts(*prop);
+                if (hasOpt(fld.hints, "setter"))
+                    error(fld.loc, "setter = is for PROP on a getter method, not on field '" + fld.name + "'");
+                fld.flagsEnum = isReflectedFlagsEnum(canon);
+                fld.flecsMeta = flecsCanDescribe(t);
+                CXType elem = t;
+                while (clang_getCanonicalType(elem).kind == CXType_ConstantArray)
+                    elem = clang_getArrayElementType(elem.kind == CXType_ConstantArray ? elem
+                                                                                      : clang_getCanonicalType(elem));
+                if (fld.flecsMeta && clang_getCanonicalType(elem).kind == CXType_Record)
+                    fld.metaDep = "::" + scopeOf(reflectedDecl(elem)).qualified; // the alias's name for an alias
+                const std::string cs = take(clang_getTypeSpelling(canon));
+                if (cs.rfind("std::optional<", 0) == 0 && clang_Type_getNumTemplateArguments(canon) == 1)
+                    fld.optionalInner = take(clang_getTypeSpelling(
+                        clang_getCanonicalType(clang_Type_getTemplateArgumentAsType(canon, 0))));
+                const std::string direct = "&" + k.T + "::" + fld.name;
+                fld.memberExpr = x->isFinal ? direct : "::reflect::as_member<" + k.T + ">(" + direct + ")";
+                validateFieldHints(fld);
+                k.taken.insert(fld.name);
+                k.r->fields.push_back(std::move(fld));
+                return CXChildVisit_Continue;
+            },
+            &ctx);
+
+        if (!ctx.bases.empty())
+            k.hasBases = true;
+        for (const CXCursor& b : ctx.bases)
+        {
+            const CXType bt = clang_getCanonicalType(clang_getCursorType(b));
+            const CXCursor bdecl = clang_getTypeDeclaration(bt);
+            const std::string bname = take(clang_getTypeSpelling(bt));
+            if (clang_Cursor_isNull(bdecl) || clang_getCursorKind(bdecl) == CXCursor_NoDeclFound)
+            {
+                warning(locOf(b), "base '" + bname + "' of " + k.finalName + " is not a concrete class here; its fields are not registered");
+                continue;
+            }
+            if (clang_isVirtualBase(b))
+            {
+                warning(locOf(b), "virtual base '" + bname + "': its fields are not registered on " + k.finalName);
+                continue;
+            }
+            const auto battr = annotation(bdecl, "reflect:");
+            if (!battr)
+            {
+                int n = 0;
+                clang_visitChildren(
+                    bdecl,
+                    [](CXCursor c, CXCursor, CXClientData d) {
+                        if (clang_getCursorKind(c) == CXCursor_FieldDecl)
+                            ++*static_cast<int*>(d);
+                        return CXChildVisit_Continue;
+                    },
+                    &n);
+                if (n)
+                    warning(locOf(b), "base '" + bname + "' is not REFLECT: its fields are not registered on " + k.finalName);
+                continue;
+            }
+            bool baseAll = k.st->defaultAll;
+            for (const Opt& o : parseOpts(*battr))
+            {
+                if (o.key == "all" || (o.key == "fields" && o.value == "all"))
+                    baseAll = true;
+                else if (o.key == "explicit" || (o.key == "fields" && o.value == "explicit"))
+                    baseAll = false;
+            }
+            auto chain = edges;
+            chain.push_back(clang_getCXXAccessSpecifier(b));
+            collectMembers(k, bdecl, baseAll, chain, false);
+        }
+    }
+
+    // `c` is the struct's definition, or (concrete != nullptr) a REFLECT alias of a
+    // class template instantiation whose type is `*concrete`.
+    void handleRecord(State& st, CXCursor c, const std::string& annot, const CXType* concrete = nullptr)
     {
         Record r;
         r.loc = locOf(c);
@@ -400,6 +763,14 @@ namespace
             error(r.loc, "REFLECT type must be nameable from another file (no anonymous namespace / local / unnamed type)");
             return;
         }
+        const CXType self = concrete ? *concrete : clang_getCanonicalType(clang_getCursorType(c));
+        const std::string canon = take(clang_getTypeSpelling(clang_getCanonicalType(self)));
+        if (!st.seenTypes.insert(canon).second)
+        {
+            error(r.loc, "'" + canon + "' is reflected twice in this header (an alias and the type, or two aliases)");
+            return;
+        }
+
         bool all = st.defaultAll;
         bool noMeta = false;
         r.rttrName = cppString(r.scope.qualified);
@@ -435,81 +806,34 @@ namespace
             error(r.loc, "REFLECT: both meta and nometa");
         r.meta = (r.meta || r.component) && !noMeta;
 
-        const bool friendOk = hasReflectFriend(c);
-        int fieldCount = 0;
-        bool hasBases = false;
-
-        struct Ctx
+        // Where the members come from: the struct, or for an alias the class
+        // template's pattern (annotations, access, methods) with the field types
+        // of the instantiation.
+        CXCursor members = c;
+        bool isPattern = false;
+        Collect k;
+        if (concrete)
         {
-            Record* r;
-            bool all, friendOk;
-            int* fieldCount;
-            bool* hasBases;
-        } ctx{ &r, all, friendOk, &fieldCount, &hasBases };
+            const CXCursor spec = clang_getTypeDeclaration(*concrete);
+            const CXCursor pattern = clang_getSpecializedCursorTemplate(spec);
+            members = clang_Cursor_isNull(pattern) ? spec : pattern;
+            isPattern = !clang_Cursor_isNull(pattern);
+            clang_Type_visitFields(
+                *concrete,
+                [](CXCursor f, CXClientData d) {
+                    static_cast<std::map<std::string, CXCursor>*>(d)->emplace(take(clang_getCursorSpelling(f)), f);
+                    return CXVisit_Continue;
+                },
+                &k.concrete);
+        }
+        k.r = &r;
+        k.st = &st;
+        k.T = "::" + r.scope.qualified;
+        k.finalName = r.scope.qualified;
+        k.friendOk = hasReflectFriend(members);
+        collectMembers(k, members, all, {}, isPattern);
 
-        clang_visitChildren(
-            c,
-            [](CXCursor f, CXCursor, CXClientData d) {
-                auto* x = static_cast<Ctx*>(d);
-                const CXCursorKind k = clang_getCursorKind(f);
-                if (k == CXCursor_CXXBaseSpecifier)
-                    *x->hasBases = true;
-                if (k != CXCursor_FieldDecl)
-                    return CXChildVisit_Continue;
-                ++*x->fieldCount;
-
-                Field fld;
-                fld.name = take(clang_getCursorSpelling(f));
-                fld.loc = locOf(f);
-                const auto prop = annotation(f, "prop:");
-                const bool no = annotation(f, "noprop:").has_value();
-                if (prop && no)
-                {
-                    error(fld.loc, "field '" + fld.name + "' has both PROP and NOPROP");
-                    return CXChildVisit_Continue;
-                }
-                if (!(x->all ? !no : prop.has_value()))
-                    return CXChildVisit_Continue;
-
-                const bool isPublic = clang_getCXXAccessSpecifier(f) == CX_CXXPublic;
-                if (!isPublic && !x->friendOk)
-                {
-                    if (prop) // asked for explicitly → tell the user how to fix it
-                        error(fld.loc, "field '" + fld.name + "' is not public; add REFLECT_FRIEND to the class");
-                    return CXChildVisit_Continue; // `all` mode: private fields stay private
-                }
-                if (clang_Cursor_isBitField(f))
-                {
-                    if (prop)
-                        error(fld.loc, "bit-field '" + fld.name + "' cannot be reflected (no pointer-to-member)");
-                    return CXChildVisit_Continue;
-                }
-
-                const CXType t = clang_getCursorType(f);
-                const CXType canon = clang_getCanonicalType(t);
-                fld.typeSpelling = take(clang_getTypeSpelling(t));
-                if (prop)
-                    fld.hints = parseOpts(*prop);
-                fld.flagsEnum = isReflectedFlagsEnum(canon);
-                fld.flecsMeta = flecsCanDescribe(t);
-                CXType elem = canon;
-                while (elem.kind == CXType_ConstantArray)
-                    elem = clang_getCanonicalType(clang_getArrayElementType(elem));
-                if (fld.flecsMeta && elem.kind == CXType_Record)
-                    fld.metaDep = "::" + scopeOf(clang_getTypeDeclaration(elem)).qualified;
-                const std::string cs = take(clang_getTypeSpelling(canon));
-                if (cs.rfind("std::optional<", 0) == 0 && clang_Type_getNumTemplateArguments(canon) == 1)
-                    fld.optionalInner = take(clang_getTypeSpelling(
-                        clang_getCanonicalType(clang_Type_getTemplateArgumentAsType(canon, 0))));
-                validateFieldHints(fld);
-                x->r->fields.push_back(std::move(fld));
-                return CXChildVisit_Continue;
-            },
-            &ctx);
-
-        if (hasBases)
-            warning(r.loc, "base-class fields of '" + r.scope.qualified + "' are not registered; reflect the base separately");
-        r.isTag = fieldCount == 0 && !hasBases;
+        r.isTag = k.ownFields == 0 && !k.hasBases && !concrete;
         if (r.isTag)
             r.meta = false; // nothing to describe
         Item it;
@@ -574,7 +898,21 @@ namespace
             return CXChildVisit_Continue;
         case CXCursor_ClassTemplate:
             if (annotation(c, "reflect:"))
-                error(locOf(c), "REFLECT on a class template is not supported; reflect a concrete type instead");
+                error(locOf(c), "REFLECT on a class template is not supported; reflect an instantiation through an "
+                                "alias instead: using Vec3f REFLECT() = Vec3<float>;");
+            return CXChildVisit_Continue;
+        case CXCursor_TypeAliasDecl:
+        case CXCursor_TypedefDecl:
+            if (auto a = annotation(c, "reflect:"))
+            {
+                const CXType u = clang_getCanonicalType(clang_getTypedefDeclUnderlyingType(c));
+                if (u.kind != CXType_Record)
+                    error(locOf(c), "a REFLECT alias must name a class type");
+                else if (clang_Type_getSizeOf(u) < 0)
+                    error(locOf(c), "'" + take(clang_getTypeSpelling(u)) + "' could not be instantiated here");
+                else
+                    handleRecord(*st, c, *a, &u);
+            }
             return CXChildVisit_Continue;
         case CXCursor_EnumDecl:
             if (clang_isCursorDefinition(c))
@@ -687,7 +1025,12 @@ namespace
         o << "            ::rttr::registration::class_<" << T << ">(" << r.rttrName << ")";
         for (const Field& f : r.fields)
         {
-            o << "\n                .property(" << propName(f) << ", &" << T << "::" << f.name << ")";
+            if (f.getterExpr.empty())
+                o << "\n                .property(" << propName(f) << ", " << f.memberExpr << ")";
+            else if (f.setterExpr.empty())
+                o << "\n                .property_readonly(" << propName(f) << ", " << f.getterExpr << ")";
+            else
+                o << "\n                .property(" << propName(f) << ", " << f.getterExpr << ", " << f.setterExpr << ")";
             const auto md = metadataFor(f);
             if (!md.empty())
             {
@@ -734,8 +1077,10 @@ namespace
                 o << "#ifdef FLECS_META\n            if (::reflect::flecs_needs_members(c))\n            {\n";
                 for (const Field& f : r.fields)
                 {
-                    if (f.flecsMeta)
-                        o << "                c.member(" << cppString(f.name) << ", &" << T << "::" << f.name << ");\n";
+                    if (f.flecsMeta && !f.memberExpr.empty())
+                        o << "                c.member(" << cppString(f.name) << ", " << f.memberExpr << ");\n";
+                    else if (!f.getterExpr.empty())
+                        o << "                // skipped " << f.name << ": an accessor, not a data member\n";
                     else
                         o << "                // skipped " << f.name << ": flecs has no description for '" << f.typeSpelling
                           << "'\n";
@@ -1074,6 +1419,7 @@ namespace
     {
         CXTranslationUnit tu = nullptr;
         int errors = 0;
+        bool usedFallback = false; // parsed without the PCH after it failed
         std::vector<std::string> messages; // formatted error diagnostics
     };
 
@@ -1341,6 +1687,7 @@ int main(int argc, char** argv)
     {
         logArgs("parsing " + header, cargs);
         p = parse(index, header, cargs, flags);
+        p.usedFallback = usePch;
     }
     if (!p.tu)
     {
@@ -1356,6 +1703,51 @@ int main(int argc, char** argv)
                      header.c_str());
         release(p);
         return 1;
+    }
+
+    // A REFLECT alias of a class template instantiation (using Vec3f REFLECT() =
+    // Vec3<float>;) has no members until something needs the type complete:
+    // parse once more with a sizeof() of each such alias appended (in memory).
+    {
+        std::vector<std::string> aliases;
+        clang_visitChildren(
+            clang_getTranslationUnitCursor(p.tu),
+            [](CXCursor c, CXCursor, CXClientData d) {
+                if (!clang_Location_isFromMainFile(clang_getCursorLocation(c)))
+                    return CXChildVisit_Continue;
+                const CXCursorKind k = clang_getCursorKind(c);
+                if (k == CXCursor_Namespace || k == CXCursor_LinkageSpec || k == CXCursor_StructDecl
+                    || k == CXCursor_ClassDecl)
+                    return CXChildVisit_Recurse;
+                if ((k == CXCursor_TypeAliasDecl || k == CXCursor_TypedefDecl) && annotation(c, "reflect:"))
+                {
+                    const CXType u = clang_getCanonicalType(clang_getTypedefDeclUnderlyingType(c));
+                    const Scope sc = scopeOf(c);
+                    if (u.kind == CXType_Record && clang_Type_getSizeOf(u) < 0 && sc.ok)
+                        static_cast<std::vector<std::string>*>(d)->push_back(sc.qualified);
+                }
+                return CXChildVisit_Continue;
+            },
+            &aliases);
+        if (!aliases.empty())
+        {
+            std::string text = headerText + "\n// reflectgen: complete the REFLECT aliases\n";
+            for (const auto& a : aliases)
+                text += "static_assert(sizeof(::" + a + ") > 0, \"\");\n";
+            const auto args = usePch && !p.usedFallback ? withPch(cargs, pch, clMode) : cargs;
+            Parsed again = parse(index, header, args, flags, &text);
+            if (!again.tu || (again.errors && !allowErrors))
+            {
+                for (const auto& m : again.messages)
+                    std::fprintf(stderr, "%s\n", m.c_str());
+                std::fprintf(stderr, "reflectgen: %s: could not instantiate the REFLECT aliases\n", header.c_str());
+                release(again);
+                release(p);
+                return 1;
+            }
+            release(p);
+            p = again;
+        }
     }
 
     clang_visitChildren(clang_getTranslationUnitCursor(p.tu), visitTop, &st);

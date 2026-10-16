@@ -82,6 +82,14 @@ namespace reflect
         TypeEntry* next = nullptr;
     };
 
+    // &Derived::baseField has the type `M Base::*`; RTTR and flecs need it as a
+    // member of the class being registered: `M Derived::*` (same offset).
+    template <class D, class M, class B>
+    constexpr M D::*as_member(M B::*p) noexcept
+    {
+        return static_cast<M D::*>(p);
+    }
+
     namespace detail
     {
         inline TypeEntry*& head()
