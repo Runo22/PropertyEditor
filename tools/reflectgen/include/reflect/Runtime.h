@@ -29,6 +29,7 @@
 
 // Standard headers first: RTTR 0.9.6's variant.h uses std::string without
 // including <string>, which recent MSVC STLs no longer pull in transitively.
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <cstdint>
@@ -124,12 +125,20 @@ namespace reflect
         }
 
 #if REFLECT_WITH_FLECS
-        // flecs types this module registered beyond its components (vectors of
-        // its own types); removed by unregister_world like the components.
+        // flecs types this module registers beyond its components (vectors of its
+        // own types), as "remove from a world" functions; unregister_world runs
+        // them all for its world. Kept for the module's lifetime and free of
+        // duplicates, so every world the module registered into is cleaned.
         inline std::vector<void (*)(flecs::world&)>& ownedFlecsTypes()
         {
             static std::vector<void (*)(flecs::world&)> v;
             return v;
+        }
+        inline void ownFlecsType(void (*remove)(flecs::world&))
+        {
+            auto& v = ownedFlecsTypes();
+            if (std::find(v.begin(), v.end(), remove) == v.end())
+                v.push_back(remove);
         }
 
         // Once per module and type: a member skipped because the host has not
@@ -346,28 +355,64 @@ namespace reflect
         };
     } // namespace detail
 
+    namespace detail
+    {
+        // "reflect::std::vector<i32>" → (reflect::std::type_of, <the component>):
+        // a marker entity per shared std type, so a module finds the host's type
+        // by a stable name whatever name flecs gave the component itself (the
+        // host may have registered it earlier, under its own spelling).
+        inline flecs::entity_t stdTypeOf(flecs::world& w)
+        {
+            return w.entity("reflect::std::type_of").id();
+        }
+
+        template <class T>
+        void markStdType(flecs::world& w, flecs::entity_t component)
+        {
+            w.entity(StdName<T>::get().c_str()).add(stdTypeOf(w), component);
+        }
+
+        template <class T>
+        flecs::entity_t findStdType(flecs::world& w)
+        {
+            const flecs::entity_t marker =
+                ecs_lookup_path_w_sep(w.c_ptr(), 0, StdName<T>::get().c_str(), "::", "::", false);
+            const flecs::entity_t rel = ecs_lookup_path_w_sep(w.c_ptr(), 0, "reflect::std::type_of", "::", "::", false);
+            if (marker == 0 || rel == 0)
+                return 0;
+            const flecs::entity_t id = ecs_get_target(w.c_ptr(), marker, rel, 0);
+            return (id != 0 && ecs_is_alive(w.c_ptr(), id) && ecs_has_id(w.c_ptr(), id, ecs_id(EcsType))) ? id : 0;
+        }
+    } // namespace detail
+
     // Register one more shared std::vector<E> from the host (E: an integer type,
     // float, double or std::string; register_std_types does all of them).
     template <class E>
     void register_std_vector(flecs::world& w)
     {
-        const std::string name = detail::StdName<std::vector<E>>::get();
-        if (!ecs_lookup_path_w_sep(w.c_ptr(), 0, name.c_str(), "::", "::", false))
-            w.component<std::vector<E>>(name.c_str()).opaque(detail::stdVectorSupport<E>);
+        if (detail::findStdType<std::vector<E>>(w))
+            return;
+        flecs::component<std::vector<E>> c = w.component<std::vector<E>>();
+        if (!c.has(ecs_id(EcsType)))
+            c.opaque(detail::stdVectorSupport<E>);
+        detail::markStdType<std::vector<E>>(w, c.id());
     }
 
     inline void register_std_types(flecs::world& w)
     {
-        const std::string name = detail::StdName<std::string>::get();
-        if (!ecs_lookup_path_w_sep(w.c_ptr(), 0, name.c_str(), "::", "::", false))
+        if (!detail::findStdType<std::string>(w))
         {
-            w.component<std::string>(name.c_str())
-                .opaque(flecs::String)
-                .serialize([](const flecs::serializer* s, const std::string* data) {
-                    const char* str = data->c_str();
-                    return s->value(flecs::String, &str);
-                })
-                .assign_string([](std::string* data, const char* value) { *data = value ? value : ""; });
+            flecs::component<std::string> c = w.component<std::string>();
+            if (!c.has(ecs_id(EcsType)))
+            {
+                c.opaque(flecs::String)
+                    .serialize([](const flecs::serializer* s, const std::string* data) {
+                        const char* str = data->c_str();
+                        return s->value(flecs::String, &str);
+                    })
+                    .assign_string([](std::string* data, const char* value) { *data = value ? value : ""; });
+            }
+            detail::markStdType<std::string>(w, c.id());
         }
         register_std_vector<std::int8_t>(w);
         register_std_vector<std::int16_t>(w);
@@ -389,9 +434,8 @@ namespace reflect
     template <class T>
     bool flecs_use_std(flecs::world& w)
     {
-        const std::string name = detail::StdName<T>::get();
-        const flecs::entity_t id = ecs_lookup_path_w_sep(w.c_ptr(), 0, name.c_str(), "::", "::", false);
-        if (id == 0 || !ecs_has_id(w.c_ptr(), id, ecs_id(EcsType)))
+        const flecs::entity_t id = detail::findStdType<T>(w);
+        if (id == 0)
             return false;
         flecs_component_ids_set(w.c_ptr(), flecs::_::type<T>::index(), id);
         return true;
@@ -408,7 +452,7 @@ namespace reflect
         if (!flecs_has_type<E>(w))
             return false;
         w.component<std::vector<E>>().opaque(detail::stdVectorSupport<E>);
-        detail::ownedFlecsTypes().push_back(&flecs_unregister<std::vector<E>>);
+        detail::ownFlecsType(&flecs_unregister<std::vector<E>>);
         return true;
     }
 
@@ -472,13 +516,13 @@ namespace reflect
         {
             (*it)->unflecs(w);
         }
-        // Then the vector types it registered for its own element types.
-        auto& owned = detail::ownedFlecsTypes();
+        // Then the vector types it registered for its own element types (each
+        // removal does nothing in a world that does not have the type).
+        const auto& owned = detail::ownedFlecsTypes();
         for (auto it = owned.rbegin(); it != owned.rend(); ++it)
         {
             (*it)(w);
         }
-        owned.clear();
     }
 
 #if defined(FLECS_META) && defined(FLECS_JSON)

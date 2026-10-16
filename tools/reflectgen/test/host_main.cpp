@@ -95,6 +95,9 @@ int main(int argc, char** argv)
     flecs::world world;
     // std::string / std::vector descriptions belong to a module that never
     // unloads: the host, before any plugin.
+    // Something in the host registered std::string first, under its own name:
+    // register_std_types must cope, and plugins must still find it.
+    world.component<std::string>();
     reflect::register_std_types(world);
     std::string snapshot; // what the host keeps while a plugin build is unloaded
     const char* builds[] = { argv[1], argv[2], argv[1] };
