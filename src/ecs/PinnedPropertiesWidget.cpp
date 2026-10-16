@@ -491,8 +491,7 @@ namespace rpe
                     continue;
                 }
                 it->setText(kValueColumn, TypeRenderer::toDisplayString(u.value));
-                TypeUseScope scope;
-                _lastValues.insert(it, u.value);
+                _lastValues.insert(it, u.value); // under pollNow's read section
             }
         }
         _updating = false;
