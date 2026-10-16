@@ -56,7 +56,7 @@ add_game_plugin(game_plugin)
 add_game_plugin(game_plugin_v2 GAME_PLUGIN_V2)
 
 add_executable(host host_main.cpp)
-target_link_libraries(host PRIVATE rpe::core flecs::flecs RTTR::Core ${CMAKE_DL_LIBS})
+target_link_libraries(host PRIVATE reflect::runtime rpe::core flecs::flecs RTTR::Core ${CMAKE_DL_LIBS})
 
 enable_testing()
 add_test(NAME plugin_roundtrip COMMAND host $<TARGET_FILE:game_plugin> $<TARGET_FILE:game_plugin_v2>)
