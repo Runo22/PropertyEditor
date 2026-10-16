@@ -2,6 +2,7 @@
 #include "game/Components.h"
 #include "game/More.h"
 #include "game/NeedsPrelude.h"
+#include "game/Advanced.h"
 
 #ifdef _WIN32
 #define PLUGIN_API extern "C" __declspec(dllexport)

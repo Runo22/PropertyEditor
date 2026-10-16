@@ -31,7 +31,7 @@ add_subdirectory(${RPE_ROOT} rpe EXCLUDE_FROM_ALL)
 # hot-reload v1 → v2 → v1 and check the component data survives.
 function(add_game_plugin name)
     add_library(${name} MODULE plugin/plugin.cpp plugin/game/Components.h plugin/game/More.h
-        plugin/game/NeedsPrelude.h)
+        plugin/game/NeedsPrelude.h plugin/game/Advanced.h)
     target_include_directories(${name} PRIVATE plugin)
     target_link_libraries(${name} PRIVATE reflect::runtime rpe::core flecs::flecs)
     set_target_properties(${name} PROPERTIES CXX_VISIBILITY_PRESET hidden)
@@ -85,3 +85,10 @@ message(STATUS "PASS: parse PCH ${size} bytes")
 add_test(NAME parse_pch_built
          COMMAND ${CMAKE_COMMAND} -DPCH=${CMAKE_CURRENT_BINARY_DIR}/reflect_gen/game_plugin/reflectgen_parse_$<CONFIG>.pch
                  -P ${CMAKE_CURRENT_BINARY_DIR}/check_pch.cmake)
+
+# Misuse is a build error with a message that says what to fix.
+add_test(NAME generator_diagnostics
+         COMMAND ${CMAKE_COMMAND} -DREFLECTGEN=$<TARGET_FILE:reflectgen>
+                 -DHEADER=${CMAKE_CURRENT_SOURCE_DIR}/diag/Bad.h -DOUT=${CMAKE_CURRENT_BINARY_DIR}/Bad.gen.cpp
+                 "-DARGS=$<IF:$<BOOL:${MSVC}>,--driver-mode=cl;/I,-I>${CMAKE_CURRENT_SOURCE_DIR}/../include"
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/diag/expect.cmake)
