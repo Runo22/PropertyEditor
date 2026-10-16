@@ -2,6 +2,7 @@
 #include <reflect/Reflect.h>
 
 #include <string>
+#include <vector>
 
 namespace game
 {
@@ -33,6 +34,7 @@ namespace game
         void setPower(float v) { power_ = v; }
         PROP(name = "label") const std::string& getLabel() const { return label_; }
         PROP() Vec2f pos;
+        PROP() std::vector<Vec2f> path; // vector of a module type: owned by the plugin in flecs
 
     private:
         float power_ = 5;

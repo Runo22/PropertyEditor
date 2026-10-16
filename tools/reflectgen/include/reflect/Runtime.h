@@ -31,7 +31,9 @@
 // including <string>, which recent MSVC STLs no longer pull in transitively.
 #include <cstddef>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
+#include <set>
 #include <string>
 #include <utility>
 #include <type_traits>
@@ -120,6 +122,28 @@ namespace reflect
             static bool done = false;
             return done;
         }
+
+#if REFLECT_WITH_FLECS
+        // flecs types this module registered beyond its components (vectors of
+        // its own types); removed by unregister_world like the components.
+        inline std::vector<void (*)(flecs::world&)>& ownedFlecsTypes()
+        {
+            static std::vector<void (*)(flecs::world&)> v;
+            return v;
+        }
+
+        // Once per module and type: a member skipped because the host has not
+        // described a std type to flecs.
+        inline void missingStdType(const char* type, const char* member)
+        {
+            static std::set<std::string> told;
+            if (told.insert(type).second)
+                std::fprintf(stderr,
+                             "reflect: %s is not described to flecs, so members like %s are left out of flecs "
+                             "meta (and of save_world). Call reflect::register_std_types(world) in the host.\n",
+                             type, member);
+        }
+#endif
     } // namespace detail
 
     // RTTR + rpe bridges for every type of this module. Safe to call again: RTTR is
@@ -241,6 +265,155 @@ namespace reflect
         ecs_delete(w.c_ptr(), id);
     }
 
+#ifdef FLECS_META
+
+    // T is known to flecs with a description (meta struct, enum, opaque, ...).
+    template <class T>
+    bool flecs_has_type(flecs::world& w)
+    {
+        const flecs::entity_t id = flecs_find<T>(w);
+        return id != 0 && ecs_has_id(w.c_ptr(), id, ecs_id(EcsType));
+    }
+
+    namespace detail
+    {
+        // flecs opaque support for std::vector<E> (as in flecs' ser_std_vector).
+        template <class E>
+        flecs::opaque<std::vector<E>, E> stdVectorSupport(flecs::world& w)
+        {
+            using V = std::vector<E>;
+            return flecs::opaque<V, E>()
+                .as_type(w.vector<E>())
+                .serialize([](const flecs::serializer* s, const V* data) {
+                    for (const auto& el : *data)
+                        s->value(el);
+                    return 0;
+                })
+                .count([](const V* data) { return data->size(); })
+                .resize([](V* data, size_t size) { data->resize(size); })
+                .ensure_element([](V* data, size_t i) {
+                    if (data->size() <= i)
+                        data->resize(i + 1);
+                    return &(*data)[i];
+                });
+        }
+    } // namespace detail
+
+    // ── std types in flecs meta ───────────────────────────────────────────────────
+    //
+    // flecs describes std::string / std::vector through "opaque" callbacks, and a
+    // component's ctor/dtor/move hooks are code too — all of it lives in whichever
+    // module registers the type first. Shared std types must therefore be
+    // registered by a module that never unloads: call register_std_types() from
+    // the HOST, before loading plugins. Generated plugin code only USES them (a
+    // member whose std type the host has not registered is left out of flecs meta
+    // with a warning, never registered with the plugin's code).
+    //
+    // They are found by a name chosen here ("reflect::std::vector<i32>"), not by
+    // flecs' C++ type name: compilers spell the same instantiation differently in
+    // different modules (GCC: "std::vector<int>" here, "std::vector<int,
+    // std::allocator<int> >" there), so a plugin would not find the host's type
+    // and flecs would register a second one with the plugin's hooks.
+
+    namespace detail
+    {
+        template <class E>
+        std::string stdElemName()
+        {
+            if constexpr (std::is_same_v<E, std::string>)
+                return "string";
+            else if constexpr (std::is_floating_point_v<E>)
+                return sizeof(E) == 4 ? "f32" : "f64";
+            else
+            {
+                static_assert(std::is_integral_v<E> && !std::is_same_v<E, bool>,
+                              "shared std::vector elements: integers, floating point, std::string");
+                return (std::is_signed_v<E> ? "i" : "u") + std::to_string(sizeof(E) * 8);
+            }
+        }
+
+        template <class T>
+        struct StdName;
+        template <>
+        struct StdName<std::string>
+        {
+            static std::string get() { return "reflect::std::string"; }
+        };
+        template <class E>
+        struct StdName<std::vector<E>>
+        {
+            static std::string get() { return "reflect::std::vector<" + stdElemName<E>() + ">"; }
+        };
+    } // namespace detail
+
+    // Register one more shared std::vector<E> from the host (E: an integer type,
+    // float, double or std::string; register_std_types does all of them).
+    template <class E>
+    void register_std_vector(flecs::world& w)
+    {
+        const std::string name = detail::StdName<std::vector<E>>::get();
+        if (!ecs_lookup_path_w_sep(w.c_ptr(), 0, name.c_str(), "::", "::", false))
+            w.component<std::vector<E>>(name.c_str()).opaque(detail::stdVectorSupport<E>);
+    }
+
+    inline void register_std_types(flecs::world& w)
+    {
+        const std::string name = detail::StdName<std::string>::get();
+        if (!ecs_lookup_path_w_sep(w.c_ptr(), 0, name.c_str(), "::", "::", false))
+        {
+            w.component<std::string>(name.c_str())
+                .opaque(flecs::String)
+                .serialize([](const flecs::serializer* s, const std::string* data) {
+                    const char* str = data->c_str();
+                    return s->value(flecs::String, &str);
+                })
+                .assign_string([](std::string* data, const char* value) { *data = value ? value : ""; });
+        }
+        register_std_vector<std::int8_t>(w);
+        register_std_vector<std::int16_t>(w);
+        register_std_vector<std::int32_t>(w);
+        register_std_vector<std::int64_t>(w);
+        register_std_vector<std::uint8_t>(w);
+        register_std_vector<std::uint16_t>(w);
+        register_std_vector<std::uint32_t>(w);
+        register_std_vector<std::uint64_t>(w);
+        register_std_vector<float>(w);
+        register_std_vector<double>(w);
+        register_std_vector<std::string>(w);
+    }
+
+    // Use the host's flecs type for a shared std type T in THIS module: found by
+    // its stable name and bound to this module's flecs type cache, so member<T>()
+    // refers to it instead of registering T again (with this module's hooks).
+    // False if the host has not registered it.
+    template <class T>
+    bool flecs_use_std(flecs::world& w)
+    {
+        const std::string name = detail::StdName<T>::get();
+        const flecs::entity_t id = ecs_lookup_path_w_sep(w.c_ptr(), 0, name.c_str(), "::", "::", false);
+        if (id == 0 || !ecs_has_id(w.c_ptr(), id, ecs_id(EcsType)))
+            return false;
+        flecs_component_ids_set(w.c_ptr(), flecs::_::type<T>::index(), id);
+        return true;
+    }
+
+    // std::vector<E> of one of this module's types: registered (and owned) by the
+    // module if nobody has yet, so unregister_world() removes it with the
+    // components. False if E itself is not described to flecs.
+    template <class E>
+    bool flecs_ensure_vector(flecs::world& w)
+    {
+        if (flecs_has_type<std::vector<E>>(w))
+            return true;
+        if (!flecs_has_type<E>(w))
+            return false;
+        w.component<std::vector<E>>().opaque(detail::stdVectorSupport<E>);
+        detail::ownedFlecsTypes().push_back(&flecs_unregister<std::vector<E>>);
+        return true;
+    }
+
+#endif // FLECS_META
+
     // Register every flecs component of this module in `w` (sim thread).
     // Structs embedding other meta structs wait until those are described; a
     // dependency that never shows up (e.g. its module is not loaded) cannot block
@@ -299,6 +472,13 @@ namespace reflect
         {
             (*it)->unflecs(w);
         }
+        // Then the vector types it registered for its own element types.
+        auto& owned = detail::ownedFlecsTypes();
+        for (auto it = owned.rbegin(); it != owned.rend(); ++it)
+        {
+            (*it)(w);
+        }
+        owned.clear();
     }
 
 #if defined(FLECS_META) && defined(FLECS_JSON)
