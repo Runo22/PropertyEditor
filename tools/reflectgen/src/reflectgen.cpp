@@ -249,6 +249,12 @@ namespace
         std::string memberExpr;
         // An accessor property: getter (and setter; empty → read-only).
         std::string getterExpr, setterExpr;
+        // A std::string / std::vector member in flecs meta:
+        //   "shared" — the host registers the type (register_std_types),
+        //   "owned"  — std::vector of one of the module's own types.
+        std::string stdUse;  // "", "shared", "owned"
+        std::string stdType; // "::std::string", "::std::vector<int>", ...
+        std::string stdElem; // owned: the element type expression
     };
 
     struct Record
@@ -344,6 +350,77 @@ namespace
             return false;
         const auto opts = parseOpts(*annotation(d, "reflect:"));
         return (hasOpt(opts, "meta") || hasOpt(opts, "component")) && !hasOpt(opts, "nometa");
+    }
+
+    // std::string / std::vector<E> as flecs meta can handle them (see Field::stdUse).
+    // `elem` receives E for a vector. False for anything else.
+    bool classifyStd(CXType t, Field& f, CXType* elem)
+    {
+        const CXType canon = clang_getCanonicalType(t);
+        if (canon.kind != CXType_Record)
+            return false;
+        const CXCursor decl = clang_getTypeDeclaration(canon);
+        const Scope sc = scopeOf(decl); // skips inline namespaces (__cxx11, __1)
+        const std::string name = take(clang_getCursorSpelling(decl));
+        if (!sc.ok || sc.nsParts.empty() || sc.nsParts[0] != "std" || sc.nsParts.size() != 1)
+            return false;
+        if (clang_Type_getNumTemplateArguments(canon) < 1)
+            return false;
+        const CXType arg = clang_getCanonicalType(clang_Type_getTemplateArgumentAsType(canon, 0));
+        if (name == "basic_string" && arg.kind == CXType_Char_S)
+        {
+            f.stdUse = "shared";
+            f.stdType = "::std::string";
+            return true;
+        }
+        if (name != "vector")
+            return false;
+        // Element types the host registers vectors of (register_std_types).
+        switch (arg.kind)
+        {
+        case CXType_SChar:
+        case CXType_UChar:
+        case CXType_Short:
+        case CXType_UShort:
+        case CXType_Int:
+        case CXType_UInt:
+        case CXType_Long:
+        case CXType_ULong:
+        case CXType_LongLong:
+        case CXType_ULongLong:
+        case CXType_Float:
+        case CXType_Double:
+            f.stdUse = "shared";
+            f.stdType = "::std::vector<" + take(clang_getTypeSpelling(arg)) + ">";
+            return true;
+        default:
+            break;
+        }
+        Field inner;
+        if (classifyStd(clang_Type_getTemplateArgumentAsType(canon, 0), inner, nullptr) && inner.stdType == "::std::string")
+        {
+            f.stdUse = "shared";
+            f.stdType = "::std::vector<::std::string>";
+            return true;
+        }
+        // A vector of the module's own reflected struct or enum: module-owned.
+        const CXType written = clang_Type_getTemplateArgumentAsType(t.kind == CXType_Elaborated ? clang_Type_getNamedType(t) : t, 0);
+        const CXType e = written.kind == CXType_Invalid ? arg : written;
+        const CXCursor ed = reflectedDecl(e);
+        const bool isEnum = arg.kind == CXType_Enum;
+        if (!isEnum && clang_Cursor_isNull(ed))
+            return false;
+        if (!isEnum && !isMetaRecord(e))
+            return false;
+        const std::string ename = isEnum && clang_Cursor_isNull(ed)
+                                      ? "::" + scopeOf(clang_getTypeDeclaration(arg)).qualified
+                                      : "::" + scopeOf(ed).qualified;
+        f.stdUse = "owned";
+        f.stdElem = ename;
+        f.stdType = "::std::vector<" + ename + ">";
+        if (elem)
+            *elem = e;
+        return true;
     }
 
     bool flecsCanDescribe(CXType t)
@@ -685,11 +762,18 @@ namespace
                     error(fld.loc, "setter = is for PROP on a getter method, not on field '" + fld.name + "'");
                 fld.flagsEnum = isReflectedFlagsEnum(canon);
                 fld.flecsMeta = flecsCanDescribe(t);
+                CXType vecElem{};
+                if (!fld.flecsMeta && classifyStd(t, fld, &vecElem))
+                {
+                    fld.flecsMeta = true;
+                    if (fld.stdUse == "owned" && clang_getCanonicalType(vecElem).kind == CXType_Record)
+                        fld.metaDep = "::" + scopeOf(reflectedDecl(vecElem)).qualified;
+                }
                 CXType elem = t;
                 while (clang_getCanonicalType(elem).kind == CXType_ConstantArray)
                     elem = clang_getArrayElementType(elem.kind == CXType_ConstantArray ? elem
                                                                                       : clang_getCanonicalType(elem));
-                if (fld.flecsMeta && clang_getCanonicalType(elem).kind == CXType_Record)
+                if (fld.flecsMeta && fld.stdUse.empty() && clang_getCanonicalType(elem).kind == CXType_Record)
                     fld.metaDep = "::" + scopeOf(reflectedDecl(elem)).qualified; // the alias's name for an alias
                 const std::string cs = take(clang_getTypeSpelling(canon));
                 if (cs.rfind("std::optional<", 0) == 0 && clang_Type_getNumTemplateArguments(canon) == 1)
@@ -1077,7 +1161,16 @@ namespace
                 o << "#ifdef FLECS_META\n            if (::reflect::flecs_needs_members(c))\n            {\n";
                 for (const Field& f : r.fields)
                 {
-                    if (f.flecsMeta && !f.memberExpr.empty())
+                    if (f.flecsMeta && !f.memberExpr.empty() && f.stdUse == "shared")
+                        o << "                if (::reflect::flecs_use_std<" << f.stdType << ">(w))\n"
+                          << "                    c.member(" << cppString(f.name) << ", " << f.memberExpr << ");\n"
+                          << "                else\n"
+                          << "                    ::reflect::detail::missingStdType(" << cppString(f.stdType) << ", "
+                          << cppString(r.scope.qualified + "::" + f.name) << ");\n";
+                    else if (f.flecsMeta && !f.memberExpr.empty() && f.stdUse == "owned")
+                        o << "                if (::reflect::flecs_ensure_vector<" << f.stdElem << ">(w))\n"
+                          << "                    c.member(" << cppString(f.name) << ", " << f.memberExpr << ");\n";
+                    else if (f.flecsMeta && !f.memberExpr.empty())
                         o << "                c.member(" << cppString(f.name) << ", " << f.memberExpr << ");\n";
                     else if (!f.getterExpr.empty())
                         o << "                // skipped " << f.name << ": an accessor, not a data member\n";

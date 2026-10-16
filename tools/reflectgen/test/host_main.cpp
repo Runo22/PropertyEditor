@@ -2,6 +2,7 @@
 // argv[1] = game_plugin (v1), argv[2] = game_plugin_v2 (Light gains `extra`,
 // `speed` becomes float). Component values the host changed must survive each
 // reload through reflect::save_world / load_world.
+#include <reflect/Runtime.h> // register_std_types: the host owns the shared std types
 #include <rpe/core/TypeBridge.h>
 #include <rttr/type>
 #include <flecs.h>
@@ -91,6 +92,9 @@ int main(int argc, char** argv)
         return 2;
     }
     flecs::world world;
+    // std::string / std::vector descriptions belong to a module that never
+    // unloads: the host, before any plugin.
+    reflect::register_std_types(world);
     std::string snapshot; // what the host keeps while a plugin build is unloaded
     const char* builds[] = { argv[1], argv[2], argv[1] };
     for (int round = 1; round <= 3; ++round)
@@ -188,6 +192,22 @@ int main(int argc, char** argv)
             check("edit intensity → 77", setProp(world, lamp, "game::Light", "game::Light", "intensity", 77.f));
             check("edit speed → 33.5", setProp(world, lamp, "game::Light", "game::Light", "speed", 33.5));
             check("edit Orc hp → 55", setProp(world, orc, "ai::Stats", "game::Stats", "hp", 55));
+            check("edit iconPath (std::string)",
+                  setProp(world, lamp, "game::Light", "game::Light", "iconPath", std::string("icons/lamp.png")));
+            {
+                // std::vector members, written through flecs JSON like a level file would.
+                flecs::entity soldier = world.entity("Soldier");
+                flecs::entity unitComp = world.lookup("game::Unit");
+                soldier.add(unitComp);
+                const char* r1 = ecs_ptr_from_json(world.c_ptr(), unitComp, ecs_get_mut_id(world.c_ptr(), soldier, unitComp),
+                                                   "{\"path\":[{\"x\":1, \"y\":2}, {\"x\":3, \"y\":4}]}", nullptr);
+                ecs_modified_id(world.c_ptr(), soldier, unitComp);
+                flecs::entity statsComp = world.lookup("ai::Stats");
+                const char* r2 = ecs_ptr_from_json(world.c_ptr(), statsComp, ecs_get_mut_id(world.c_ptr(), orc, statsComp),
+                                                   "{\"inventory\":[5, 6, 7]}", nullptr);
+                ecs_modified_id(world.c_ptr(), orc, statsComp);
+                check("flecs JSON writes std::vector<Vec2f> (module-owned) and std::vector<int> (host)", r1 && r2);
+            }
             lamp.remove(selected);
             orc.add(selected);
         }
@@ -199,6 +219,25 @@ int main(int argc, char** argv)
                   getProp(world, lamp, "game::Light", "game::Light", "speed").to_double() == 33.5);
             check("hot reload: Orc hp is still 55", getProp(world, orc, "ai::Stats", "game::Stats", "hp").to_int() == 55);
             check("hot reload: the Selected tag moved to Orc stays there", orc.has(selected) && !lamp.has(selected));
+            check("hot reload: iconPath (std::string) is still set",
+                  getProp(world, lamp, "game::Light", "game::Light", "iconPath").to_string() == "icons/lamp.png");
+            {
+                flecs::entity soldier = world.lookup("Soldier");
+                flecs::entity unitComp = world.lookup("game::Unit");
+                flecs::entity statsComp = world.lookup("ai::Stats");
+                auto json = [&](flecs::entity e, flecs::entity c) {
+                    char* j = (e && c && e.has(c)) ? ecs_ptr_to_json(world.c_ptr(), c, ecs_get_id(world.c_ptr(), e, c)) : nullptr;
+                    std::string out = j ? j : "";
+                    ecs_os_free(j);
+                    return out;
+                };
+                const std::string u = json(soldier, unitComp), st = json(orc, statsComp);
+                check("hot reload: std::vector<Vec2f> path survived",
+                      u.find("\"path\":[{\"x\":1, \"y\":2}, {\"x\":3, \"y\":4}]") != std::string::npos);
+                check("hot reload: std::vector<int> inventory survived", st.find("\"inventory\":[5, 6, 7]") != std::string::npos);
+                if (round == 2)
+                    std::printf("    Soldier: %s\n    Orc stats: %s\n", u.c_str(), st.c_str());
+            }
             if (v2)
                 check("hot reload: v2's new member `extra` has its default 5",
                       getProp(world, lamp, "game::Light", "game::Light", "extra").to_int() == 5);
@@ -217,10 +256,7 @@ int main(int argc, char** argv)
             p.save(&world, &snapshot, &notSaved);
             for (const auto& m : notSaved)
                 std::printf("    not saved: %s\n", m.c_str());
-            // game::Named has only std::string / std::vector members, which flecs
-            // cannot describe yet, so it is the one component not saved.
-            check("save_world: every describable component saved (only game::Named reported)",
-                  notSaved.size() == 1 && notSaved[0].rfind("game::Named:", 0) == 0);
+            check("save_world: every component of the module saved", notSaved.empty());
         }
         p.unload(&world);
         check("after unload: flecs component deleted", !world.lookup("game::Light").is_valid() && !world.lookup("ai::Stats").is_valid());
@@ -229,6 +265,22 @@ int main(int argc, char** argv)
         check("library unloaded", closeLib(p.h));
         check("after unload: RTTR forgot game::Light", !rttr::type::get_by_name("game::Light").is_valid());
         world.progress();
+    }
+    {
+        // Plugins only USE the host's std types: one std::vector<int> component in
+        // the world, however often plugins were loaded; and the module-owned
+        // std::vector<Vec2f> left with the plugin.
+        int vecInt = 0, vecVec2 = 0;
+        world.each([&](flecs::entity c, flecs::Component&) {
+            const char* sym = ecs_get_symbol(world.c_ptr(), c);
+            const std::string s = sym ? sym : "";
+            if (s.rfind("std.vector<int", 0) == 0)
+                ++vecInt;
+            if (s.find("vector<game.Vec2T") != std::string::npos)
+                ++vecVec2;
+        });
+        check("one std::vector<int> component in the world (host's)", vecInt == 1);
+        check("module-owned std::vector<Vec2f> removed with the plugin", vecVec2 == 0);
     }
     std::printf("%s (%d failure(s))\n", fails ? "FAILED" : "ALL PASSED", fails);
     return fails ? 1 : 0;
