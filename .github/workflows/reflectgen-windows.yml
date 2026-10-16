@@ -65,5 +65,8 @@ jobs:
       - name: Run plugin load / unload / reload test
         shell: cmd
         run: |
+          rem scan_build_test.cmake builds again, so the MSVC environment is needed here too
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set VSDIR=%%i
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           set "PATH=%CD%\..\rttr-inst\bin;%CD%\..\Qt\5.15.2\msvc2019_64\bin;%PATH%"
           ctest --test-dir build-rg --output-on-failure -V
