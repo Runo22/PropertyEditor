@@ -27,34 +27,39 @@ add_subdirectory(${FLECS_ROOT} flecs)
 set(RPE_BUILD_DEMO OFF CACHE BOOL "" FORCE)
 add_subdirectory(${RPE_ROOT} rpe EXCLUDE_FROM_ALL)
 
-add_library(game_plugin MODULE plugin/plugin.cpp plugin/game/Components.h plugin/game/More.h
-    plugin/game/NeedsPrelude.h)
-target_include_directories(game_plugin PRIVATE plugin)
-target_link_libraries(game_plugin PRIVATE reflect::runtime rpe::core flecs::flecs)
-set_target_properties(game_plugin PROPERTIES CXX_VISIBILITY_PRESET hidden)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(game_plugin PRIVATE -fno-gnu-unique) # let dlclose really unload
-endif()
-# NeedsPrelude.h only parses with the target's forced include, its PCH header and
-# a language-conditioned define; reflectgen must see all three. -fno-gnu-unique
-# (GCC only) is an option clang rejects, which reflectgen must drop.
-if(MSVC)
-    target_compile_options(game_plugin PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/plugin/prelude.h)
-else()
-    target_compile_options(game_plugin PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/plugin/prelude.h)
-endif()
-target_compile_definitions(game_plugin PRIVATE $<$<COMPILE_LANGUAGE:CXX>:GAME_CXX_ONLY>)
-target_precompile_headers(game_plugin PRIVATE <vector>)
-
-# Several generated files in one translation unit must not collide.
-set_target_properties(game_plugin PROPERTIES UNITY_BUILD ON)
-reflect_generate(game_plugin)
+# The same plugin built twice: v2 (GAME_PLUGIN_V2) changes Light, so the host can
+# hot-reload v1 → v2 → v1 and check the component data survives.
+function(add_game_plugin name)
+    add_library(${name} MODULE plugin/plugin.cpp plugin/game/Components.h plugin/game/More.h
+        plugin/game/NeedsPrelude.h)
+    target_include_directories(${name} PRIVATE plugin)
+    target_link_libraries(${name} PRIVATE reflect::runtime rpe::core flecs::flecs)
+    set_target_properties(${name} PROPERTIES CXX_VISIBILITY_PRESET hidden)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(${name} PRIVATE -fno-gnu-unique) # let dlclose really unload
+    endif()
+    # NeedsPrelude.h only parses with the target's forced include, its PCH header
+    # and a language-conditioned define; reflectgen must see all three.
+    # -fno-gnu-unique (GCC only) is an option clang rejects, which reflectgen drops.
+    if(MSVC)
+        target_compile_options(${name} PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/plugin/prelude.h)
+    else()
+        target_compile_options(${name} PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/plugin/prelude.h)
+    endif()
+    target_compile_definitions(${name} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:GAME_CXX_ONLY> ${ARGN})
+    target_precompile_headers(${name} PRIVATE <vector>)
+    # Several generated files in one translation unit must not collide.
+    set_target_properties(${name} PROPERTIES UNITY_BUILD ON)
+    reflect_generate(${name})
+endfunction()
+add_game_plugin(game_plugin)
+add_game_plugin(game_plugin_v2 GAME_PLUGIN_V2)
 
 add_executable(host host_main.cpp)
 target_link_libraries(host PRIVATE rpe::core flecs::flecs RTTR::Core ${CMAKE_DL_LIBS})
 
 enable_testing()
-add_test(NAME plugin_roundtrip COMMAND host $<TARGET_FILE:game_plugin>)
+add_test(NAME plugin_roundtrip COMMAND host $<TARGET_FILE:game_plugin> $<TARGET_FILE:game_plugin_v2>)
 
 # SCAN BUILD + batching: a module whose header gains REFLECT only after configure.
 set(SCAN_LATER ${CMAKE_CURRENT_BINARY_DIR}/scan/Later.h)

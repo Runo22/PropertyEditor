@@ -401,10 +401,16 @@ namespace
             return;
         }
         bool all = st.defaultAll;
+        bool noMeta = false;
         r.rttrName = cppString(r.scope.qualified);
         r.flecsName = "nullptr";
         for (const Opt& o : parseOpts(annot))
         {
+            if (o.key == "nometa")
+            {
+                noMeta = true;
+                continue;
+            }
             if (o.key == "all")
                 all = true;
             else if (o.key == "explicit")
@@ -420,8 +426,14 @@ namespace
             else if (o.key == "rttr_name" && o.hasValue)
                 r.rttrName = o.value;
             else
-                error(r.loc, "unknown REFLECT key '" + o.key + "' (use all|explicit|component|meta|name=|rttr_name=)");
+                error(r.loc, "unknown REFLECT key '" + o.key
+                                 + "' (use all|explicit|component|meta|nometa|name=|rttr_name=)");
         }
+        // Components are described to flecs (meta) unless told not to: that is
+        // what lets flecs show them, serialise them and keep them across a reload.
+        if (noMeta && r.meta)
+            error(r.loc, "REFLECT: both meta and nometa");
+        r.meta = (r.meta || r.component) && !noMeta;
 
         const bool friendOk = hasReflectFriend(c);
         int fieldCount = 0;
@@ -498,6 +510,8 @@ namespace
         if (hasBases)
             warning(r.loc, "base-class fields of '" + r.scope.qualified + "' are not registered; reflect the base separately");
         r.isTag = fieldCount == 0 && !hasBases;
+        if (r.isTag)
+            r.meta = false; // nothing to describe
         Item it;
         it.rec = std::move(r);
         st.items.push_back(std::move(it));
@@ -648,7 +662,7 @@ namespace
     struct EntryFns
     {
         std::string rttr, bridge = "nullptr", unbridge = "nullptr";
-        std::string flecs = "nullptr", unflecs = "nullptr", ready = "nullptr";
+        std::string flecs = "nullptr", unflecs = "nullptr", ready = "nullptr", id = "nullptr";
     };
 
     // `id` is unique per generated file AND per header (see fileTag), so several
@@ -657,7 +671,7 @@ namespace
     {
         o << "namespace\n{\n    ::reflect::TypeEntry s_entry_" << id << "{ " << cppString(name) << ", " << f.rttr << ", "
           << f.bridge << ", " << f.unbridge << ",\n#if REFLECT_WITH_FLECS\n        " << f.flecs << ", " << f.unflecs
-          << ", " << f.ready << ",\n#endif\n    };\n    ::reflect::detail::AutoLink s_link_" << id << "{ s_entry_" << id
+          << ", " << f.ready << ", " << f.id << ",\n#endif\n    };\n    ::reflect::detail::AutoLink s_link_" << id << "{ s_entry_" << id
           << " };\n}\n\n";
     }
 
@@ -755,6 +769,7 @@ namespace
         {
             fns.flecs = A + "flecs";
             fns.unflecs = A + "unflecs";
+            fns.id = "&::reflect::flecs_find<" + T + ">";
             if (!deps.empty())
                 fns.ready = A + "ready";
         }
@@ -793,6 +808,7 @@ namespace
         {
             fns.flecs = A + "flecs";
             fns.unflecs = A + "unflecs";
+            fns.id = "&::reflect::flecs_find<" + T + ">";
         }
         emitEntry(o, id, e.scope.qualified, fns);
     }

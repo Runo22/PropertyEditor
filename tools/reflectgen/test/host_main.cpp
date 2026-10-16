@@ -1,4 +1,7 @@
-// Host side of the plugin test: load → inspect → unload → reload.
+// Host side of the plugin test: load → inspect → hot reload v1 → v2 → v1.
+// argv[1] = game_plugin (v1), argv[2] = game_plugin_v2 (Light gains `extra`,
+// `speed` becomes float). Component values the host changed must survive each
+// reload through reflect::save_world / load_world.
 #include <rpe/core/TypeBridge.h>
 #include <rttr/type>
 #include <flecs.h>
@@ -18,6 +21,7 @@ static bool closeLib(void* h) { return dlclose(h) == 0; }
 static const char* libError() { return dlerror(); }
 #endif
 #include <string>
+#include <vector>
 
 static int fails = 0;
 static void check(const char* what, bool ok) { std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", what); fails += !ok; }
@@ -28,6 +32,8 @@ struct Plugin
     void (*load)(flecs::world*) = nullptr;
     void (*unload)(flecs::world*) = nullptr;
     std::size_t (*count)() = nullptr;
+    void (*save)(flecs::world*, std::string*, std::vector<std::string>*) = nullptr;
+    std::size_t (*restore)(flecs::world*, const std::string*, std::vector<std::string>*) = nullptr;
     bool open(const char* path)
     {
         h = openLib(path);
@@ -35,7 +41,9 @@ struct Plugin
         load = reinterpret_cast<void (*)(flecs::world*)>(sym(h, "plugin_load"));
         unload = reinterpret_cast<void (*)(flecs::world*)>(sym(h, "plugin_unload"));
         count = reinterpret_cast<std::size_t (*)()>(sym(h, "plugin_type_count"));
-        return load && unload && count;
+        save = reinterpret_cast<decltype(save)>(sym(h, "plugin_save"));
+        restore = reinterpret_cast<decltype(restore)>(sym(h, "plugin_restore"));
+        return load && unload && count && save && restore;
     }
 };
 
@@ -52,16 +60,55 @@ static double meta(const rttr::type& t, const char* prop, rpe::hint::Key key)
     return t.get_property(prop).get_metadata(key).to_double();
 }
 
-int main(int, char** argv)
+// Read / write a component member through the editor's path (bridge + RTTR).
+static rttr::variant getProp(flecs::world& w, flecs::entity e, const char* comp, const char* type, const char* prop)
 {
-    flecs::world world;
-    for (int round = 1; round <= 2; ++round)
+    rttr::type t = rttr::type::get_by_name(type);
+    flecs::entity c = w.lookup(comp);
+    if (!t.is_valid() || !c || !e.has(c))
+        return {};
+    rttr::variant v = rpe::TypeBridge::wrap(t, ecs_get_mut_id(w.c_ptr(), e, c));
+    return t.get_property(prop).get_value(v);
+}
+static bool setProp(flecs::world& w, flecs::entity e, const char* comp, const char* type, const char* prop,
+                    rttr::variant value)
+{
+    rttr::type t = rttr::type::get_by_name(type);
+    flecs::entity c = w.lookup(comp);
+    if (!t.is_valid() || !c || !e.has(c))
+        return false;
+    rttr::variant v = rpe::TypeBridge::wrap(t, ecs_get_mut_id(w.c_ptr(), e, c));
+    const bool ok = t.get_property(prop).set_value(v, value);
+    ecs_modified_id(w.c_ptr(), e, c);
+    return ok;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc < 3)
     {
-        std::printf("── round %d\n", round);
+        std::printf("usage: host <game_plugin> <game_plugin_v2>\n");
+        return 2;
+    }
+    flecs::world world;
+    std::string snapshot; // what the host keeps while a plugin build is unloaded
+    const char* builds[] = { argv[1], argv[2], argv[1] };
+    for (int round = 1; round <= 3; ++round)
+    {
+        const bool v2 = round == 2;
+        std::printf("── round %d (%s)\n", round, v2 ? "v2" : "v1");
         Plugin p;
-        check("plugin loads", p.open(argv[1]));
+        check("plugin loads", p.open(builds[round - 1]));
         check("9 reflected types linked in the plugin's own list", p.count() == 9);
         p.load(&world);
+        if (!snapshot.empty())
+        {
+            std::vector<std::string> problems;
+            const std::size_t n = p.restore(&world, &snapshot, &problems);
+            for (const auto& m : problems)
+                std::printf("    restore note: %s\n", m.c_str());
+            check("hot reload: snapshot restored without problems", n > 0 && problems.empty());
+        }
 
         rttr::type light = rttr::type::get_by_name("game::Light");
         check("RTTR knows game::Light", light.is_valid());
@@ -94,10 +141,32 @@ int main(int, char** argv)
         check("flecs component game.Light exists", lightComp.is_valid());
         check("flecs custom-named ai.Stats exists", world.lookup("ai::Stats").is_valid());
         check("Lamp has Light", lamp.has(lightComp));
+        flecs::entity orc = world.lookup("Orc");
+        flecs::entity selected = world.lookup("game::Selected");
+        if (round == 1)
         {
-            const void* ptr = lamp.get(lightComp);
-            rttr::variant v = rpe::TypeBridge::wrap(light, const_cast<void*>(ptr));
-            check("editor reads intensity = 42 through the bridge", light.get_property("intensity").get_value(v).to_float() == 42.f);
+            check("editor reads intensity = 42 through the bridge",
+                  getProp(world, lamp, "game::Light", "game::Light", "intensity").to_float() == 42.f);
+            // The host edits values and moves a tag; all of it must survive reloads.
+            check("edit intensity → 77", setProp(world, lamp, "game::Light", "game::Light", "intensity", 77.f));
+            check("edit speed → 33.5", setProp(world, lamp, "game::Light", "game::Light", "speed", 33.5));
+            check("edit Orc hp → 55", setProp(world, orc, "ai::Stats", "game::Stats", "hp", 55));
+            lamp.remove(selected);
+            orc.add(selected);
+        }
+        else
+        {
+            check("hot reload: intensity is still 77",
+                  getProp(world, lamp, "game::Light", "game::Light", "intensity").to_float() == 77.f);
+            check("hot reload: speed is still 33.5 (double ↔ float across builds)",
+                  getProp(world, lamp, "game::Light", "game::Light", "speed").to_double() == 33.5);
+            check("hot reload: Orc hp is still 55", getProp(world, orc, "ai::Stats", "game::Stats", "hp").to_int() == 55);
+            check("hot reload: the Selected tag moved to Orc stays there", orc.has(selected) && !lamp.has(selected));
+            if (v2)
+                check("hot reload: v2's new member `extra` has its default 5",
+                      getProp(world, lamp, "game::Light", "game::Light", "extra").to_int() == 5);
+            else
+                check("hot reload: back on v1, `extra` is gone", !light.get_property("extra").is_valid());
         }
 #ifdef FLECS_META
         check("flecs meta: Light has members", lightComp.has<flecs::Struct>());
@@ -106,6 +175,16 @@ int main(int, char** argv)
         ecs_os_free(json);
 #endif
 
+        {
+            std::vector<std::string> notSaved;
+            p.save(&world, &snapshot, &notSaved);
+            for (const auto& m : notSaved)
+                std::printf("    not saved: %s\n", m.c_str());
+            // game::Named has only std::string / std::vector members, which flecs
+            // cannot describe yet, so it is the one component not saved.
+            check("save_world: every describable component saved (only game::Named reported)",
+                  notSaved.size() == 1 && notSaved[0].rfind("game::Named:", 0) == 0);
+        }
         p.unload(&world);
         check("after unload: flecs component deleted", !world.lookup("game::Light").is_valid() && !world.lookup("ai::Stats").is_valid());
         check("after unload: Lamp kept, only its name left", lamp.is_alive() && std::string(lamp.type().str().c_str()) == "(Identifier,Name)");

@@ -22,15 +22,22 @@ namespace game
     };
 
     // explicit mode (default): only PROP fields are registered
-    struct REFLECT(component, meta) Light
+    struct REFLECT(component) Light // components are meta by default
     {
         PROP(min = 0, max = 100, step = 0.5, decimals = 2, slider) float intensity = 1.f;
         PROP(file, label = "Icon", tooltip = "Shown in the outliner") std::string iconPath;
+#ifndef GAME_PLUGIN_V2
         PROP(max = kMaxSpeed) double speed = 1.0;   // constant from the namespace
+#else
+        PROP(max = kMaxSpeed) float speed = 1.0f;   // v2 changed the type (hot reload test)
+#endif
         PROP() Shape shape = Shape::Circle;
         PROP() Damage damage = Damage::None;        // flags hint added automatically
         PROP() Vec3 offset;
         float cache = 0;                            // no PROP → not registered
+#ifdef GAME_PLUGIN_V2
+        PROP() int extra = 5;                       // v2 added a member (hot reload test)
+#endif
     };
 
     // all mode: every public field, PROP adds hints, NOPROP opts out

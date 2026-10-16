@@ -16,10 +16,13 @@
 //      reflect::register_types();          // RTTR + rpe bridges (process level)
 //      reflect::register_world(world);     // flecs components   (per world, sim thread)
 //      ...
+//      std::string keep = reflect::save_world(world); // (hot reload) component data
 //      reflect::unregister_world(world);   // remove + delete components (sim thread,
 //                                          //   outside world.progress())
 //      reflect::unregister_types();        // drop rpe bridges (GUI stops inspecting)
 //      FreeLibrary                          // RTTR undoes this module's registrations
+//      ... rebuild, LoadLibrary, register_types(), register_world(world) ...
+//      reflect::load_world(world, keep);   // the values are back, by member name
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "reflect/Reflect.h"
@@ -27,7 +30,10 @@
 // Standard headers first: RTTR 0.9.6's variant.h uses std::string without
 // including <string>, which recent MSVC STLs no longer pull in transitively.
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <utility>
 #include <type_traits>
 #include <vector>
 
@@ -71,6 +77,7 @@ namespace reflect
         void (*unflecs)(flecs::world&); // may be null
         bool (*flecsReady)(flecs::world&); // null = no dependencies; else true once
                                            //   the meta types it embeds are described
+        flecs::entity_t (*flecsId)(flecs::world&); // its component in a world, or 0
 #endif
         TypeEntry* next = nullptr;
     };
@@ -285,6 +292,225 @@ namespace reflect
             (*it)->unflecs(w);
         }
     }
+
+#if defined(FLECS_META) && defined(FLECS_JSON)
+
+    // ── hot reload: keep component data across unload / reload ─────────────────
+    //
+    // save_world() writes every value of this module's components (and which
+    // entities carry its tags) to a string, keyed by component symbol, entity id
+    // and MEMBER NAME (flecs meta JSON). The host keeps the string while the module
+    // is unloaded — it holds no pointer into the module. After the new build is
+    // loaded and registered, load_world() puts the values back:
+    //   * members that still exist get their old value (by name, converted if the
+    //     type changed compatibly, e.g. int → float),
+    //   * new members keep their default, removed members are ignored,
+    //   * a component that no longer exists, or an entity deleted meanwhile, is
+    //     skipped and reported.
+    // Only components flecs can describe (meta) are saved; the others are reported
+    // in `notSaved`. Run both on the sim thread, outside world.progress().
+
+    namespace detail
+    {
+        // Split a JSON object's top-level members: {"a":1,"b":{"x":2}} →
+        // ("a","1"), ("b","{\"x\":2}"). False if `json` is not an object.
+        inline bool splitJsonObject(const std::string& json, std::vector<std::pair<std::string, std::string>>& out)
+        {
+            size_t i = json.find('{');
+            if (i == std::string::npos)
+                return false;
+            ++i;
+            while (i < json.size())
+            {
+                while (i < json.size() && (json[i] == ' ' || json[i] == ',' || json[i] == '\n' || json[i] == '\t'))
+                    ++i;
+                if (i >= json.size() || json[i] == '}')
+                    return true;
+                if (json[i] != '"')
+                    return false;
+                const size_t keyEnd = json.find('"', i + 1);
+                if (keyEnd == std::string::npos)
+                    return false;
+                std::string key = json.substr(i + 1, keyEnd - i - 1);
+                i = json.find(':', keyEnd);
+                if (i == std::string::npos)
+                    return false;
+                const size_t valueStart = ++i;
+                int depth = 0;
+                bool inString = false;
+                for (; i < json.size(); ++i)
+                {
+                    const char c = json[i];
+                    if (inString)
+                    {
+                        if (c == '\\')
+                            ++i;
+                        else if (c == '"')
+                            inString = false;
+                        continue;
+                    }
+                    if (c == '"')
+                        inString = true;
+                    else if (c == '{' || c == '[')
+                        ++depth;
+                    else if (c == '}' || c == ']')
+                    {
+                        if (depth == 0)
+                            break; // the object's own closing brace
+                        --depth;
+                    }
+                    else if (c == ',' && depth == 0)
+                        break;
+                }
+                out.emplace_back(std::move(key), json.substr(valueStart, i - valueStart));
+            }
+            return false;
+        }
+    } // namespace detail
+
+    inline std::string save_world(flecs::world& w, std::vector<std::string>* notSaved = nullptr)
+    {
+        ecs_world_t* world = w.c_ptr();
+        std::string out = "reflect-snapshot 1\n";
+        for (TypeEntry* e = detail::head(); e; e = e->next)
+        {
+            if (!e->flecsId)
+                continue;
+            const flecs::entity_t id = e->flecsId(w);
+            if (id == 0 || !ecs_is_alive(world, id))
+                continue;
+            const char* symbol = ecs_get_symbol(world, id);
+            if (!symbol)
+                continue;
+            const ecs_type_info_t* ti = ecs_get_type_info(world, id);
+            const bool tag = !ti || ti->size == 0;
+            if (!tag && !ecs_has_id(world, id, ecs_id(EcsType)))
+            {
+                if (notSaved)
+                    notSaved->push_back(std::string(e->name) + ": flecs has no description (meta) for it");
+                continue;
+            }
+            out += "C\t";
+            out += symbol;
+            out += tag ? "\ttag\n" : "\n";
+            ecs_iter_t it = ecs_each_id(world, id);
+            while (ecs_each_next(&it))
+            {
+                char* base = tag ? nullptr : static_cast<char*>(ecs_field_w_size(&it, static_cast<size_t>(ti->size), 0));
+                for (int32_t i = 0; i < it.count; ++i)
+                {
+                    out += "E\t" + std::to_string(static_cast<unsigned long long>(it.entities[i]));
+                    if (!tag)
+                    {
+                        char* json = ecs_ptr_to_json(world, id, base + static_cast<size_t>(i) * ti->size);
+                        out += '\t';
+                        if (json)
+                        {
+                            // flecs escapes control characters in strings, so a value
+                            // never spans lines; strip any raw one defensively.
+                            for (const char* c = json; *c; ++c)
+                                out += (*c == '\n' || *c == '\r') ? ' ' : *c;
+                            ecs_os_free(json);
+                        }
+                    }
+                    out += '\n';
+                }
+            }
+        }
+        return out;
+    }
+
+    // Returns how many component values / tags were restored.
+    inline std::size_t load_world(flecs::world& w, const std::string& snapshot,
+                                  std::vector<std::string>* problems = nullptr)
+    {
+        ecs_world_t* world = w.c_ptr();
+        auto report = [&](std::string msg) {
+            if (problems)
+                problems->push_back(std::move(msg));
+        };
+        if (snapshot.rfind("reflect-snapshot 1\n", 0) != 0)
+        {
+            report("not a reflect snapshot (or an unknown version)");
+            return 0;
+        }
+        std::size_t restored = 0;
+        flecs::entity_t comp = 0;
+        bool tag = false;
+        size_t size = 0;
+        std::string compName;
+        size_t pos = snapshot.find('\n') + 1;
+        while (pos < snapshot.size())
+        {
+            size_t end = snapshot.find('\n', pos);
+            if (end == std::string::npos)
+                end = snapshot.size();
+            const std::string line = snapshot.substr(pos, end - pos);
+            pos = end + 1;
+            if (line.rfind("C\t", 0) == 0)
+            {
+                const size_t tab = line.find('\t', 2);
+                compName = line.substr(2, tab == std::string::npos ? std::string::npos : tab - 2);
+                comp = ecs_lookup_symbol(world, compName.c_str(), false, false);
+                tag = tab != std::string::npos;
+                if (comp == 0)
+                {
+                    report(compName + ": component no longer exists; its values are dropped");
+                    continue;
+                }
+                const ecs_type_info_t* ti = ecs_get_type_info(world, comp);
+                size = ti ? static_cast<size_t>(ti->size) : 0;
+                if (!tag && size == 0)
+                {
+                    report(compName + ": is a tag now; restoring presence only");
+                    tag = true;
+                }
+                continue;
+            }
+            if (line.rfind("E\t", 0) != 0 || comp == 0)
+                continue;
+            const size_t tab = line.find('\t', 2);
+            const flecs::entity_t entity = std::strtoull(line.c_str() + 2, nullptr, 10);
+            if (!ecs_is_alive(world, entity))
+            {
+                report(compName + ": entity " + std::to_string(static_cast<unsigned long long>(entity))
+                       + " no longer exists");
+                continue;
+            }
+            if (tag)
+            {
+                ecs_add_id(world, entity, comp);
+                ++restored;
+                continue;
+            }
+            if (tab == std::string::npos)
+                continue;
+            const std::string json = line.substr(tab + 1);
+            void* ptr = ecs_ensure_id(world, entity, comp, size);
+            if (!ptr)
+                continue;
+            if (!ecs_ptr_from_json(world, comp, ptr, json.c_str(), nullptr))
+            {
+                // A member whose type changed incompatibly fails the whole object:
+                // restore member by member and keep every one that still fits.
+                std::vector<std::pair<std::string, std::string>> members;
+                detail::splitJsonObject(json, members);
+                for (const auto& [name, value] : members)
+                {
+                    const std::string one = "{\"" + name + "\":" + value + "}";
+                    if (!ecs_ptr_from_json(world, comp, ptr, one.c_str(), nullptr))
+                        report(compName + "." + name + " on entity "
+                               + std::to_string(static_cast<unsigned long long>(entity))
+                               + ": old value does not fit the new type; default kept");
+                }
+            }
+            ecs_modified_id(world, entity, comp);
+            ++restored;
+        }
+        return restored;
+    }
+
+#endif // FLECS_META && FLECS_JSON
 
 #endif // REFLECT_WITH_FLECS
 
