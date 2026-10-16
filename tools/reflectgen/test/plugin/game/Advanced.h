@@ -41,4 +41,10 @@ namespace game
         std::string label_ = "unit";
         REFLECT_FRIEND
     };
+
+    // A component the editor shows but never edits.
+    struct REFLECT(component, readonly) Config
+    {
+        PROP() int level = 1;
+    };
 }

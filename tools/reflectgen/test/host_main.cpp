@@ -7,6 +7,7 @@
 #include <rttr/type>
 #include <flecs.h>
 #include <rpe/core/EditorHints.h>
+#include <rpe/core/ReadOnly.h>
 #include <cstdio>
 #ifdef _WIN32
 #include <windows.h>
@@ -103,7 +104,7 @@ int main(int argc, char** argv)
         std::printf("── round %d (%s)\n", round, v2 ? "v2" : "v1");
         Plugin p;
         check("plugin loads", p.open(builds[round - 1]));
-        check("12 reflected types linked in the plugin's own list", p.count() == 12);
+        check("13 reflected types linked in the plugin's own list", p.count() == 13);
         p.load(&world);
         if (!snapshot.empty())
         {
@@ -168,6 +169,14 @@ int main(int argc, char** argv)
                     std::printf("    Unit json: %s\n", j.c_str());
             }
             e.destruct();
+        }
+
+        {
+            rttr::type config = rttr::type::get_by_name("game::Config");
+            check("REFLECT(readonly): class metadata set and rpe reports it read-only",
+                  config.get_metadata(rpe::hint::ReadOnly).to_bool()
+                      && !rpe::readOnlyReason(config, QStringLiteral("level")).isEmpty()
+                      && rpe::readOnlyReason(rttr::type::get_by_name("game::Unit"), QStringLiteral("speed")).isEmpty());
         }
 
         rttr::type shape = rttr::type::get_by_name("game::Shape");
