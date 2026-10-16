@@ -99,7 +99,7 @@ int main(int argc, char** argv)
         std::printf("── round %d (%s)\n", round, v2 ? "v2" : "v1");
         Plugin p;
         check("plugin loads", p.open(builds[round - 1]));
-        check("9 reflected types linked in the plugin's own list", p.count() == 9);
+        check("12 reflected types linked in the plugin's own list", p.count() == 12);
         p.load(&world);
         if (!snapshot.empty())
         {
@@ -128,6 +128,43 @@ int main(int argc, char** argv)
 
         check("non-self-contained header parsed with the target's options: game::Named",
               metaText(rttr::type::get_by_name("game::Named").get_property("name").get_metadata(rpe::hint::Label)) == "Name");
+
+        {
+            // Template alias, base fields, accessors (Advanced.h).
+            rttr::type vec2 = rttr::type::get_by_name("game::Vec2f");
+            check("template alias game::Vec2f: x, y registered, notProp not",
+                  vec2.get_property("x").is_valid() && vec2.get_property("y").is_valid()
+                      && !vec2.get_property("notProp").is_valid() && meta(vec2, "x", rpe::hint::Step) == 0.5);
+            rttr::type unit = rttr::type::get_by_name("game::Unit");
+            check("base fields on Unit: hp (public) and armor (protected, via REFLECT_FRIEND)",
+                  unit.get_property("hp").is_valid() && unit.get_property("armor").is_valid()
+                      && meta(unit, "hp", rpe::hint::Min) == 0);
+            check("accessor: power is read/write, label is read-only",
+                  unit.get_property("power").is_valid() && !unit.get_property("power").is_readonly()
+                      && unit.get_property("label").is_readonly() && meta(unit, "power", rpe::hint::Max) == 100);
+            // Through a flecs entity, the way the editor writes values.
+            flecs::entity e = world.entity();
+            e.add(world.lookup("game::Unit"));
+            const bool wrote = setProp(world, e, "game::Unit", "game::Unit", "power", 42.f)
+                               && setProp(world, e, "game::Unit", "game::Unit", "hp", 7);
+            check("accessor setter and base field write through the editor path",
+                  wrote && getProp(world, e, "game::Unit", "game::Unit", "power").to_float() == 42.f
+                      && getProp(world, e, "game::Unit", "game::Unit", "hp").to_int() == 7
+                      && getProp(world, e, "game::Unit", "game::Unit", "armor").to_int() == 2
+                      && getProp(world, e, "game::Unit", "game::Unit", "label").to_string() == "unit");
+            {
+                flecs::entity uc = world.lookup("game::Unit");
+                char* json = ecs_ptr_to_json(world.c_ptr(), uc, ecs_get_id(world.c_ptr(), e, uc));
+                const std::string j = json ? json : "";
+                ecs_os_free(json);
+                check("flecs meta of Unit: base members and the alias-typed member",
+                      j.find("\"hp\":7") != std::string::npos && j.find("\"armor\":2") != std::string::npos
+                          && j.find("\"pos\":{\"x\":0, \"y\":0}") != std::string::npos);
+                if (round == 1)
+                    std::printf("    Unit json: %s\n", j.c_str());
+            }
+            e.destruct();
+        }
 
         rttr::type shape = rttr::type::get_by_name("game::Shape");
         check("enum Shape: NOPROP Count skipped", shape.is_enumeration() && shape.get_enumeration().get_names().size() == 2);
