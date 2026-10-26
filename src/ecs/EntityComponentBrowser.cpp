@@ -48,6 +48,9 @@ namespace rpe
         _mirrorTimer->setInterval(33); // ~30 Hz GUI poll of the mirror
         connect(_mirrorTimer, &QTimer::timeout, this, &EntityComponentBrowser::_onMirrorPoll);
 
+        // The user flipped drag-to-scrub in the property menu: keep settings() true.
+        connect(_propertyEditor, &PropertyEditor::dragToScrubToggled, this, [this](bool on) { _settings.dragToScrub = on; });
+
         // Search all components (scope button + list counts).
         _propertyEditor->setSearchAllAvailable(true);
         connect(_propertyEditor, &PropertyEditor::filterTextChanged, this, &EntityComponentBrowser::_onSearchChanged);
@@ -511,6 +514,8 @@ namespace rpe
         }
         setEditPolicy(s.editPolicy);
         setComponentEditingEnabled(s.allowComponentEditing);
+        _componentList->setPreferredComponents(s.preferredComponents);
+        _propertyEditor->setDragToScrubEnabled(s.dragToScrub);
         _applyEntityFilter();
         _updateAddable(); // hiddenAddNamespaces may have changed
     }
@@ -521,15 +526,23 @@ namespace rpe
         _updateAddable();
     }
 
+    void EntityComponentBrowser::setPreferredComponents(const QStringList& names)
+    {
+        _settings.preferredComponents = names;
+        _componentList->setPreferredComponents(names);
+    }
+
+    void EntityComponentBrowser::setDragToScrubEnabled(bool on)
+    {
+        _settings.dragToScrub = on;
+        _propertyEditor->setDragToScrubEnabled(on);
+    }
+
     void EntityComponentBrowser::_onWriteToggled(bool on)
     {
         _propertyEditor->setEditPolicy(on ? EditPolicy::WriteBack : EditPolicy::LocalEdit);
     }
 
-    // NOTE: touches the world; callers must already hold the world guard (the
-    // model's write path holds it when invoking the instance provider, and the
-    // browser's own call sites wrap it explicitly). Not guarded here so that
-    // guards never nest — a plain mutex stays sufficient.
     EntityComponentBrowser::~EntityComponentBrowser()
     {
         removeTypeReleaseHandler(_releaseHandle);
@@ -853,6 +866,10 @@ namespace rpe
         }
     }
 
+    // NOTE: touches the world; callers must already hold the world guard (the
+    // model's write path holds it when invoking the instance provider, and the
+    // browser's own call sites wrap it explicitly). Not guarded here so that
+    // guards never nest — a plain mutex stays sufficient.
     void* EntityComponentBrowser::_liveComponentPtr() const
     {
         if (!_world || !_selectedEntity.is_alive() || !_selectedComponent.rttrType.is_valid())
@@ -1379,6 +1396,7 @@ namespace rpe
             return; // direct mode uses _onEntitySelected
         }
         _mirrorEntity = id;
+        _componentList->beginEntitySwitch(); // its listing may lack the current component
         _onSearchChanged(); // search the new entity (and keep the grouped view on it)
         emit entityIdSelected(id); // mode-independent selection notification (GUI thread)
         _refreshPinnedTint();      // the pin set is per entity+component

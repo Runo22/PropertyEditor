@@ -56,6 +56,8 @@ st.requiredComponentEnabled = true;       // …only entities carrying it are li
 st.snapshotOpenFieldsOnly = true;         // mirror only the expanded rows
 st.editPolicy = rpe::EditPolicy::LocalEdit;
 st.allowComponentEditing = true;          // "+ Add" button and per-row trash
+st.preferredComponents = { "game::Player", "Transform" }; // auto-selected component (see Selection)
+st.dragToScrub = true;                    // drag a number's name to change it
 st.mirrorPollIntervalMs = 33;             // GUI poll cadence (mirror mode)
 st.liveUpdateIntervalMs = 20;             // value refresh cadence (direct mode)
 browser.setSettings(st);
@@ -85,6 +87,18 @@ QMetaObject::invokeMethod(&browser, "selectEntity",
 
 If the requested entity is not in the list yet (mirror still loading), the
 request is remembered and applied when it appears.
+
+**Which component is selected** when an entity is selected:
+
+1. the component you were on, if the new entity has it (or one with the same
+   short name in another namespace);
+2. otherwise the first of `Settings::preferredComponents` the entity has — names
+   as full path (`game.Player` / `game::Player`) or a trailing part (`Player`);
+   `browser.setPreferredComponents({...})` sets just this;
+3. otherwise the default: direct mode the first row, mirror mode nothing.
+
+A component **removed from the entity you're on** hands the selection to the row
+that took its place — the preference is for arriving at an entity, not for that.
 
 `entitySelected(flecs::entity)` additionally fires in **direct mode only**
 (mirror mode has no world handle on the GUI thread).

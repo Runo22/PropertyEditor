@@ -15,6 +15,7 @@
 #include <functional>
 
 class QListWidget;
+class QListWidgetItem;
 class QLineEdit;
 class QToolButton;
 class QStyledItemDelegate;
@@ -68,6 +69,21 @@ namespace rpe
         // property tree to the same component after an entity switch (the list keeps
         // its selection but doesn't re-emit when the component set is unchanged).
         QString currentComponentName() const;
+
+        // Components to select when a listing has no previous selection to keep —
+        // the first entity, or one that lacks the component you were on. The first
+        // name (in this order) the entity has wins; none → the default behaviour.
+        // Names as everywhere: full path ("game.Player" / "game::Player") or a
+        // trailing part of it ("Player").
+        void setPreferredComponents(const QStringList& names);
+        QStringList preferredComponents() const
+        {
+            return _preferred;
+        }
+        // Mirror mode: the next listing is ANOTHER entity's, so a selection it lacks
+        // falls to the preferred components (not to its old row's neighbour, which
+        // is right only when the component was removed from the same entity).
+        void beginEntitySwitch();
 
         // ── Search all components (driven by EntityComponentBrowser) ─────────────
         // Match counts per component selection key: a count pill on matching rows,
@@ -148,6 +164,11 @@ namespace rpe
         QToolButton* _addBtn = nullptr;
         QStyledItemDelegate* _rowDelegate = nullptr; // actually a RemoveButtonDelegate
         QVector<ComponentInfo> _components;
+        QStringList _preferred;
+        bool _entitySwitch = false;
+        qulonglong _listedEntity = 0; // direct mode: the entity setEntity last listed
+        // The first preferred component among `items` (in preference order), or nullptr.
+        QListWidgetItem* _preferredItem(const QVector<QListWidgetItem*>& items) const;
         int _releaseHandle = 0; // rpe/core/TypeRelease.h
         QVector<MirrorChannel::ComponentRow> _mirrorRows; // last externally-fed set (dedup)
         QVector<MirrorChannel::CatalogEntry> _addable;    // "+" picker entries

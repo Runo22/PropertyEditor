@@ -122,7 +122,10 @@ value; the cursor turns into a ↔ over names that scrub.
 A plain click still just selects the row — nothing changes until the mouse
 moves past the platform drag distance, and the value starts from where you
 crossed it, so it never jumps. Read-only values never scrub. Turn it off with
-`editor->setDragToScrubEnabled(false)`.
+`editor->setDragToScrubEnabled(false)` (in the browser: `Settings::dragToScrub`).
+Users can flip it themselves: **Drag names to change values** in the property
+right-click menu (on a row or on empty space); `PropertyEditor::dragToScrubToggled`
+reports it, e.g. to persist the choice.
 
 Each step is a normal edit: under `LocalEdit` the row becomes a draft, under
 `WriteBack`/mirror the value is written as you drag.

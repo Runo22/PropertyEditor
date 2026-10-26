@@ -871,6 +871,11 @@ namespace rpe
         // rebuild — e.g. after a sibling component is removed, or when switching to an
         // entity that also has it — instead of snapping back to the first row.
         const QString prevSelName = _list->currentItem() ? _list->currentItem()->text() : QString();
+        const int prevSelRow = _list->currentRow();
+        // Same entity re-listed (a component was added/removed) vs another entity.
+        const qulonglong entityId = e.is_valid() ? static_cast<qulonglong>(e.id()) : 0;
+        const bool sameEntity = entityId != 0 && entityId == _listedEntity;
+        _listedEntity = entityId;
 
         _list->blockSignals(true);
         _list->clear();
@@ -912,7 +917,28 @@ namespace rpe
         }
         else if (!names.isEmpty())
         {
-            _list->setCurrentRow(0); // auto-select first DATA row → drives the editor
+            // The host's preferred component if present, else the first DATA row
+            // (the data rows are the first names.size() items).
+            QVector<QListWidgetItem*> dataRows;
+            for (int i = 0; i < names.size(); ++i)
+            {
+                dataRows.append(_list->item(i));
+            }
+            QListWidgetItem* preferred = _preferredItem(dataRows);
+            if (sameEntity && !prevSelName.isEmpty())
+            {
+                // The selected component was removed from this entity → the row that
+                // took its place (else the last), as in mirror mode — not a jump away.
+                _list->setCurrentRow(std::min(std::max(prevSelRow, 0), static_cast<int>(names.size()) - 1));
+            }
+            else if (preferred)
+            {
+                _list->setCurrentItem(preferred);
+            }
+            else
+            {
+                _list->setCurrentRow(0); // auto-select first DATA row → drives the editor
+            }
         }
         else
         {
@@ -946,7 +972,8 @@ namespace rpe
 
         if (rows == _mirrorRows)
         {
-            return; // unchanged → keep selection, no flicker
+            _entitySwitch = false; // same composition: the selection simply stays
+            return;                // unchanged → keep selection, no flicker
         }
         // Drop a pending delete-confirm (keyed on the display text) if its row is
         // no longer shown.
@@ -1026,6 +1053,12 @@ namespace rpe
             // (correctly-typed) component instead of carrying over the old namespace.
             _list->setCurrentItem(leafMatch);
         }
+        else if (QListWidgetItem* preferred = (prevSelPath.isEmpty() || _entitySwitch) ? _preferredItem(selectables) : nullptr)
+        {
+            // Nothing to carry over (first entity, or the new one lacks the component
+            // you were on): the host's preferred component, if this entity has one.
+            _list->setCurrentItem(preferred);
+        }
         else if (!prevSelPath.isEmpty() && !selectables.isEmpty())
         {
             // A component WAS selected but is gone (deleted) → select its neighbour:
@@ -1047,6 +1080,7 @@ namespace rpe
         {
             emit componentDeselected();
         }
+        _entitySwitch = false;
         _applyFilter(); // re-apply over the rebuilt rows
         _ensureSelectionVisible();
     }
@@ -1104,6 +1138,44 @@ namespace rpe
         d->matchCounts = active ? countsByKey : QHash<QString, int>();
         d->matchActive = active;
         _list->viewport()->update();
+    }
+
+    void ComponentListWidget::setPreferredComponents(const QStringList& names)
+    {
+        _preferred.clear();
+        for (const QString& n : names)
+        {
+            const QString t = n.trimmed();
+            if (!t.isEmpty())
+            {
+                _preferred.append(t);
+            }
+        }
+    }
+
+    void ComponentListWidget::beginEntitySwitch()
+    {
+        _entitySwitch = true;
+    }
+
+    QListWidgetItem* ComponentListWidget::_preferredItem(const QVector<QListWidgetItem*>& items) const
+    {
+        // "game::Player" and "game.Player" are the same name; a trailing part
+        // ("Player", "npc.Guard") matches at a scope boundary only.
+        auto norm = [](QString s) { return s.replace(QStringLiteral("::"), QStringLiteral(".")); };
+        for (const QString& want : _preferred)
+        {
+            const QString w = norm(want);
+            for (QListWidgetItem* it : items)
+            {
+                const QString key = norm(it->data(CompKeyRole).toString());
+                if (key.compare(w, Qt::CaseSensitive) == 0 || key.endsWith(QLatin1Char('.') + w))
+                {
+                    return it;
+                }
+            }
+        }
+        return nullptr;
     }
 
     int ComponentListWidget::matchCount(const QString& key) const
@@ -1185,6 +1257,7 @@ namespace rpe
 
     void ComponentListWidget::clearEntity()
     {
+        _listedEntity = 0;
         _components.clear();
         _mirrorRows.clear();
         _list->clear();

@@ -397,6 +397,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     target_compile_definitions(rpe_plugin_reload_test PRIVATE
         RPE_RELOAD_PLUGIN_PATH="$<TARGET_FILE:rpe_test_reload_plugin>")
 
+    add_executable(rpe_preferred_component_test test/preferred_component_test.cpp)
+    target_link_libraries(rpe_preferred_component_test PRIVATE rpe_gui)
+
     add_executable(rpe_search_all_test test/search_all_test.cpp)
     target_link_libraries(rpe_search_all_test PRIVATE rpe_gui)
 

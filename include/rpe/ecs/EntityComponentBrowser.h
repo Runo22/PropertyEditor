@@ -78,6 +78,15 @@ namespace rpe
             // for world-wide configuration components that are never added per
             // entity. Clear the list to offer everything.
             QStringList hiddenAddNamespaces { QStringLiteral("settings") };
+            // Components to select when an entity is selected and there's no
+            // previous component selection to keep (the first entity, or one that
+            // lacks the component you were on): the first of these the entity has.
+            // None of them → the default (direct mode: the first row; mirror mode:
+            // nothing). Full path ("game.Player", "game::Player") or a trailing part.
+            QStringList preferredComponents;
+            // Drag a number's NAME to change its value (PropertyEditor's drag to
+            // scrub). Users can also flip it from the property right-click menu.
+            bool dragToScrub = true;
             // Panel arrangement.
             Layout layout = Layout::Wide;
             // GUI poll cadence (ms) for the mirror and the direct-mode live refresh.
@@ -207,6 +216,9 @@ namespace rpe
         // Top-level namespaces hidden from the "Add component" picker — see
         // Settings::hiddenAddNamespaces (default: "settings").
         void setHiddenAddNamespaces(const QStringList& namespaces);
+        // Settings::preferredComponents / Settings::dragToScrub on their own.
+        void setPreferredComponents(const QStringList& names);
+        void setDragToScrubEnabled(bool on);
 
         Settings settings() const
         {

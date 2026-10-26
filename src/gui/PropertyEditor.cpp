@@ -857,14 +857,24 @@ namespace rpe
 
     void PropertyEditor::_onContextMenu(const QPoint& pos)
     {
+        QMenu menu(this);
+        // A preference, not a row action: offered on empty space too.
+        const auto addScrubToggle = [this, &menu] {
+            QAction* a = menu.addAction(tr("Drag names to change values"));
+            a->setCheckable(true);
+            a->setChecked(_scrubEnabled);
+            a->setToolTip(tr("Drag a number's name left/right to change it (Shift = fine, Ctrl = coarse)."));
+            connect(a, &QAction::toggled, this, [this](bool on) {
+                setDragToScrubEnabled(on);
+                emit dragToScrubToggled(on);
+            });
+        };
         const QModelIndex proxyIdx = _view->indexAt(pos);
-        if (!proxyIdx.isValid())
-        {
-            return;
-        }
-        const QModelIndex srcIdx = _proxy->mapToSource(proxyIdx);
+        const QModelIndex srcIdx = proxyIdx.isValid() ? _proxy->mapToSource(proxyIdx) : QModelIndex();
         if (!srcIdx.isValid())
         {
+            addScrubToggle();
+            menu.exec(_view->viewport()->mapToGlobal(pos));
             return;
         }
 
@@ -873,7 +883,6 @@ namespace rpe
         const QString name = srcIdx.siblingAtColumn(0).data(Qt::DisplayRole).toString();
         const QString value = srcIdx.siblingAtColumn(1).data(Qt::DisplayRole).toString();
 
-        QMenu menu(this);
         // Copy the row's text to the clipboard — available regardless of read-only /
         // pinning, since it never mutates anything.
         connect(menu.addAction(tr("Copy value")), &QAction::triggered, this,
@@ -908,6 +917,8 @@ namespace rpe
             menu.addSeparator();
         }
         connect(menu.addAction(tr("Reset All")), &QAction::triggered, this, &PropertyEditor::_onResetAll);
+        menu.addSeparator();
+        addScrubToggle();
         menu.exec(_view->viewport()->mapToGlobal(pos));
     }
 
