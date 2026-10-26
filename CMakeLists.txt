@@ -97,6 +97,7 @@ set(RPE_CORE_SOURCES
     src/core/RttrVariantWrapper.cpp
     src/core/TypeBridge.cpp
     src/core/TypeRelease.cpp
+    src/core/PropertySearch.cpp
     src/core/ReadOnly.cpp
     src/core/OptionalSupport.cpp
     src/core/FlagsSupport.cpp)
@@ -395,6 +396,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_dependencies(rpe_plugin_reload_test rpe_test_reload_plugin)
     target_compile_definitions(rpe_plugin_reload_test PRIVATE
         RPE_RELOAD_PLUGIN_PATH="$<TARGET_FILE:rpe_test_reload_plugin>")
+
+    add_executable(rpe_search_all_test test/search_all_test.cpp)
+    target_link_libraries(rpe_search_all_test PRIVATE rpe_gui)
 
     add_executable(rpe_type_release_test test/type_release_test.cpp)
     target_link_libraries(rpe_type_release_test PRIVATE rpe_core)

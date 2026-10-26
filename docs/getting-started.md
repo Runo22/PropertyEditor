@@ -137,7 +137,7 @@ For an editor without the ECS browser (owned copy or in place), see
 
 | Policy | What a committed edit does |
 |---|---|
-| `EditPolicy::LocalEdit` (default) | kept as a **local draft**: the row shows your value (amber) and stops following live updates until *Reset to live* / *Reset All*. The object/world is never written |
+| `EditPolicy::LocalEdit` (default) | kept as a **local draft**: the row shows your value (amber) and stops following live updates until *Reset to live* / *Reset All*. The object/world is never written. The toolbar's **Reset** button appears only while something is frozen |
 | `EditPolicy::WriteBack` | written straight into the bound object through the instance provider (optionally under `setWriteGuard` for objects another thread owns) |
 
 In **mirror mode** the browser sends edits to the simulation thread regardless
@@ -159,7 +159,9 @@ watch list*.
 
 The toolbar **filter** matches a row's **value** as well as its name, so typing
 `7.5`, `true`, or a struct's `[1, 2]` summary narrows the tree. It only re-runs
-when the filter text changes, so live values cost nothing at steady state.
+when the filter text changes, so live values cost nothing at steady state. Matched text is highlighted in the names. In
+the [browser](ecs-browser.md#search-all-components) the filter also searches the
+entity's other components (a count per component, and an all-components view).
 
 ## Where next
 

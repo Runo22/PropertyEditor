@@ -172,6 +172,30 @@ namespace rpe
             rttr::variant value;
         };
 
+        // ── Search all components ────────────────────────────────────────────────
+        // While a search is set, the producer searches every bridged component of
+        // `entity` for rows whose name or value text contains `text` (the property
+        // filter's rule — see rpe/core/PropertySearch.h) and publishes the hits:
+        // a round every ~250 ms, sliced across pumps so no single frame pays for it.
+        struct SearchHit
+        {
+            QString component; // the component's selection key
+            QString path;      // row path inside it
+            rttr::variant value;
+        };
+        struct SearchResults
+        {
+            qulonglong entity = 0;
+            QString text;
+            std::vector<SearchHit> hits;
+        };
+        // Empty text (or entity 0) stops searching.
+        void setSearch(qulonglong entity, const QString& text);
+        // Start a round now (e.g. right after an edit, to echo it promptly).
+        void requestSearchRefresh();
+        // The latest complete round, if one finished since the last poll.
+        bool pollSearchResults(SearchResults& out);
+
         // ── GUI thread: intent ───────────────────────────────────────────────────
         void setRequiredComponent(const QString& componentName);
         void setInterest(qulonglong entity, const QString& componentName, const QStringList& leafPaths);
@@ -271,6 +295,9 @@ namespace rpe
             std::vector<std::pair<PinKey, rttr::variant>> pinEdits; // drained
             bool resync = false; // consumer reset its view → resend everything
             bool catalogRefresh = false; // rescan catalog + prefabs now
+            qulonglong searchEntity = 0; // search all components (see setSearch)
+            QString searchText;
+            bool searchNow = false;
         };
         Intent takeIntent();
         void publishEntities(const QVector<EntityEntry>& entities);
@@ -284,6 +311,7 @@ namespace rpe
         void publishCatalog(const QStringList& catalog); // legacy → non-tag entries
         void publishCatalogEntries(const QVector<CatalogEntry>& entries);
         void publishPrefabs(const QVector<PrefabEntry>& prefabs);
+        void publishSearchResults(SearchResults&& results);
         void markProducerGone()
         {
             _producerAlive.store(false, std::memory_order_release);
@@ -303,6 +331,9 @@ namespace rpe
         QVector<PinKey> _pins;
         std::vector<std::pair<PinKey, rttr::variant>> _pinEdits;
         bool _resync = false; // set by requestResync(), drained by takeIntent()
+        qulonglong _searchEntity = 0;
+        QString _searchText;
+        bool _searchNow = false;
         bool _catalogRefresh = false;
 
         // sim -> GUI
@@ -321,6 +352,8 @@ namespace rpe
         QHash<QString, PinValue> _outPinValues;
         // Pins whose target vanished, coalesced by the same key (drained by the GUI).
         QHash<QString, PinKey> _outDeadPins;
+        SearchResults _outSearch; // latest complete search round
+        bool _outSearchDirty = false;
 
         std::atomic<bool> _producerAlive { true };
 

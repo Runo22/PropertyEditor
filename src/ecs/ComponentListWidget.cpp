@@ -18,7 +18,9 @@
 #include <QListWidgetItem>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QApplication>
 #include <QPainter>
+#include <QSignalBlocker>
 #include <QPixmap>
 #include <QScreen>
 #include <QStyledItemDelegate>
@@ -170,6 +172,10 @@ namespace rpe
             using QStyledItemDelegate::QStyledItemDelegate;
 
             bool enabled = false;
+            // Search matches per component key (setMatchCounts): a count pill on
+            // matching rows, the others dimmed. Off while no search is active.
+            QHash<QString, int> matchCounts;
+            bool matchActive = false;
             QString confirmName;       // component currently armed for delete
             QListWidget* list = nullptr;
             std::function<void(const QString&, int kind, qulonglong rawId)> onRemove;
@@ -215,7 +221,49 @@ namespace rpe
                 {
                     o.rect.adjust(0, 0, -o.rect.height() - 30, 0);
                 }
+                const int matches = matchActive ? matchCounts.value(index.data(CompKeyRole).toString(), 0) : 0;
+                const QString pill = matches > 0 ? QString::number(matches) : QString();
+                QFont pillFont = opt.font;
+                pillFont.setBold(true);
+                pillFont.setPointSizeF(pillFont.pointSizeF() * 0.85);
+                const int pillW = pill.isEmpty() ? 0 : QFontMetrics(pillFont).horizontalAdvance(pill) + 12;
+                if (matchActive)
+                {
+                    o.rect.adjust(0, 0, -(pillW + 8), 0);
+                    // No match here: dim the row, so the eye goes to the ones that have.
+                    if (matches == 0 && !(opt.state & QStyle::State_Selected))
+                    {
+                        QColor dim = o.palette.color(QPalette::Text);
+                        dim.setAlpha(90);
+                        o.palette.setColor(QPalette::Text, dim);
+                    }
+                }
+                if (o.rect != opt.rect)
+                {
+                    // The row's background (selection / hover) spans the full width,
+                    // under the pill and the trash too; the item itself paints in
+                    // the narrower rect so its text stops short of them.
+                    QStyleOptionViewItem full(opt);
+                    initStyleOption(&full, index);
+                    const QWidget* w = full.widget;
+                    (w ? w->style() : QApplication::style())->drawPrimitive(QStyle::PE_PanelItemViewItem, &full, p, w);
+                }
                 QStyledItemDelegate::paint(p, o, index);
+                if (!pill.isEmpty())
+                {
+                    const int reserve = enabled ? opt.rect.height() : 0;
+                    const QRect r(opt.rect.right() - reserve - pillW - 6, opt.rect.center().y() - 8, pillW, 16);
+                    const bool sel = opt.state & QStyle::State_Selected;
+                    p->save();
+                    p->setRenderHint(QPainter::Antialiasing, true);
+                    p->setPen(Qt::NoPen);
+                    p->setBrush(sel ? opt.palette.color(QPalette::HighlightedText) : opt.palette.color(QPalette::Highlight));
+                    p->drawRoundedRect(r, 8, 8);
+                    p->setPen(sel ? opt.palette.color(QPalette::Highlight) : opt.palette.color(QPalette::HighlightedText));
+                    p->setFont(pillFont);
+                    p->drawText(r, Qt::AlignCenter, pill);
+                    p->restore();
+                }
 
                 if (kind != 0)
                 {
@@ -1043,6 +1091,82 @@ namespace rpe
         {
             QListWidgetItem* it = _list->item(i);
             it->setHidden(!f.isEmpty() && !it->text().contains(f, Qt::CaseInsensitive));
+        }
+    }
+
+    void ComponentListWidget::setMatchCounts(const QHash<QString, int>& countsByKey, bool active)
+    {
+        auto* d = static_cast<RemoveButtonDelegate*>(_rowDelegate);
+        if (d->matchActive == active && d->matchCounts == countsByKey)
+        {
+            return;
+        }
+        d->matchCounts = active ? countsByKey : QHash<QString, int>();
+        d->matchActive = active;
+        _list->viewport()->update();
+    }
+
+    int ComponentListWidget::matchCount(const QString& key) const
+    {
+        return static_cast<RemoveButtonDelegate*>(_rowDelegate)->matchCounts.value(key, 0);
+    }
+
+    bool ComponentListWidget::matchCountsActive() const
+    {
+        return static_cast<RemoveButtonDelegate*>(_rowDelegate)->matchActive;
+    }
+
+    QVector<QPair<QString, QString>> ComponentListWidget::dataComponents() const
+    {
+        QVector<QPair<QString, QString>> out;
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            const QListWidgetItem* it = _list->item(i);
+            if (it->flags() & Qt::ItemIsSelectable)
+            {
+                out.append({ it->data(CompKeyRole).toString(), it->text() });
+            }
+        }
+        return out;
+    }
+
+    ComponentInfo ComponentListWidget::componentInfo(const QString& key) const
+    {
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            const QListWidgetItem* it = _list->item(i);
+            const QVariant ud = it->data(Qt::UserRole);
+            if (it->data(CompKeyRole).toString() == key && ud.type() == QVariant::Int)
+            {
+                const int idx = ud.toInt();
+                if (idx >= 0 && idx < _components.size())
+                {
+                    return _components[idx];
+                }
+            }
+        }
+        ComponentInfo none;
+        none.rttrType = rttr::type::get_by_name(std::string());
+        return none;
+    }
+
+    QString ComponentListWidget::currentComponentKey() const
+    {
+        const QListWidgetItem* it = _list->currentItem();
+        return it ? it->data(CompKeyRole).toString() : QString();
+    }
+
+    void ComponentListWidget::setCurrentKeySilently(const QString& key)
+    {
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            if (_list->item(i)->data(CompKeyRole).toString() == key)
+            {
+                const QSignalBlocker block(_list);
+                _list->setCurrentRow(i);
+                _list->viewport()->update();
+                return;
+            }
         }
     }
 

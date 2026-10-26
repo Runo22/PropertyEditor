@@ -97,7 +97,7 @@ int main(int argc, char** argv)
     check("resetAll snaps mp to live (8)", displayOf(model, QStringLiteral("mp")) == QStringLiteral("8"));
     check("resetAll leaves no local edits", !model.hasAnyLocalEdit());
 
-    // ── The Reset button is enabled ONLY while something is frozen ─────────────
+    // ── The Reset button is shown (and enabled) ONLY while something is frozen ─
     {
         rpe::PropertyEditor editor;
         editor.bindType(rttr::type::get<Comp>());
@@ -112,11 +112,13 @@ int main(int argc, char** argv)
         check("Reset button found", resetBtn != nullptr);
 
         auto* m = editor.findChild<rpe::PropertyModel*>();
-        check("Reset disabled when nothing is frozen", resetBtn && !resetBtn->isEnabled());
+        check("Reset hidden and disabled when nothing is frozen",
+              resetBtn && resetBtn->isHidden() && !resetBtn->isEnabled());
         m->beginLocalEdit(QStringLiteral("hp"));
-        check("Reset enabled once a value is frozen", resetBtn && resetBtn->isEnabled());
+        check("Reset shown and enabled once a value is frozen",
+              resetBtn && !resetBtn->isHidden() && resetBtn->isEnabled());
         m->resetAll();
-        check("Reset disabled again after releasing the freeze", resetBtn && !resetBtn->isEnabled());
+        check("Reset hidden again after releasing the freeze", resetBtn && resetBtn->isHidden());
     }
 
     // ── Pressing Reset while an inline editor is OPEN must be safe ──────────────

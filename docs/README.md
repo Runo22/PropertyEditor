@@ -22,7 +22,7 @@
 | [registering-types.md](registering-types.md) | RTTR vs TypeBridge, how a flecs name finds its type, namespaces and aliases (`registerType<T>("ns::")`, `bindComponent`), plugins, **move-only types**, value types, special types (`optional`, flags, maps, pairs, …) |
 | [editor-hints.md](editor-hints.md) | Every `rpe::hint::*` key and `rpe::editor::*` value, the editor each type gets, quick-edit helpers (inline vector row, drag to scrub, colour swatch), **read-only values** (getter-only, `ReadOnly` hint, locked types), hint edge cases |
 | [standalone-editors.md](standalone-editors.md) | `VariantEditor`: owned-copy editing with a callback, in-place (write-through) editing |
-| [ecs-browser.md](ecs-browser.md) | `EntityComponentBrowser`: direct vs mirror mode, settings, selection, keyboard, tags & pairs, add/remove components, spawning prefabs, deleting, custom menus |
+| [ecs-browser.md](ecs-browser.md) | `EntityComponentBrowser`: direct vs mirror mode, settings, selection, keyboard, **search all components**, tags & pairs, add/remove components, spawning prefabs, deleting, custom menus |
 | [threading-mirror.md](threading-mirror.md) | `EcsMirror`: **which thread does what**, pump modes, rate cap and scan settings, diagnostics, how edits travel, guard mode |
 | [pinned-properties.md](pinned-properties.md) | The cross-entity watch list: pinning, live values, in-row editing |
 | [health-checks.md](health-checks.md) | On-demand diagnostics: every check, its severity and fix; `explainResolve`; recipes |

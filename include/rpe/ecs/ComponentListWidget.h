@@ -69,6 +69,22 @@ namespace rpe
         // its selection but doesn't re-emit when the component set is unchanged).
         QString currentComponentName() const;
 
+        // ── Search all components (driven by EntityComponentBrowser) ─────────────
+        // Match counts per component selection key: a count pill on matching rows,
+        // the rest dimmed. `active == false` clears both.
+        void setMatchCounts(const QHash<QString, int>& countsByKey, bool active);
+        int matchCount(const QString& key) const;
+        bool matchCountsActive() const;
+        // The selectable DATA rows: selection key + the label shown.
+        QVector<QPair<QString, QString>> dataComponents() const;
+        // Direct mode: the component behind a key (invalid rttrType if none).
+        ComponentInfo componentInfo(const QString& key) const;
+        // Select the row with this key WITHOUT emitting a selection signal (keeps
+        // the list in step with a row picked elsewhere).
+        void setCurrentKeySilently(const QString& key);
+        // The current row's selection key (both modes), empty if none.
+        QString currentComponentKey() const;
+
         // Show the add/remove controls (a "+" button and a per-row "×"). Off by
         // default — inspection is read-only unless the host opts in.
         void setComponentEditingEnabled(bool on);

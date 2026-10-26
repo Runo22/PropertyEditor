@@ -10,6 +10,7 @@ is selected automatically so the panels are never blank.
 - [Settings](#settings)
 - [Selection](#selection)
 - [Keyboard](#keyboard)
+- [Search all components](#search-all-components)
 - [Tags & pairs](#tags--pairs)
 - [Add / remove components](#add--remove-components)
 - [Health checks](#health-checks)
@@ -133,6 +134,44 @@ than picking something else. `Home` / `End` stay with the text caret.
 
 Across the browser, `Tab` runs **write-back checkbox → entity filter →
 component filter → property grid**.
+
+## Search all components
+
+The property filter (above the grid) searches the **selected entity's other
+components too**:
+
+- **While the filter has text**, the component list shows a **match count** on
+  every component with a match and dims the ones without — so "it's in Weapon"
+  is visible without leaving the component you're on. The grid itself still
+  filters only the selected component.
+- **The scope button** (the layers icon beside the filter, or `Ctrl+Shift+F`)
+  switches the grid to **all components**: every match, grouped under a header
+  per component (with its count), live values, matched text highlighted.
+- **Rows there edit in place**, with the usual editors, and the edit goes to that
+  row's own component. Pinning works too.
+- **Picking a row** follows its component in the list. **Turning the scope off**
+  goes back to one component — the one you picked — with the filter kept and
+  the row selected. Picking a component in the list while the scope is on just
+  scrolls to its group.
+
+A row matches by its **name** (the label shown) or its **value** text, like the
+filter always did; a nested struct matching by name shows as one row, and a
+container matches by its name or any element. A row whose value stops matching
+drops out.
+
+**Cost.** Nothing runs while the filter is empty. With text, mirror mode searches
+on the simulation thread a round every ~250 ms, **sliced across pumps with a
+~0.2 ms budget each**, so no frame pays for a whole round. Measured on an entity
+with 40 components (~1000 fields, 40 arrays of 64 floats, Release build): the
+99.9th-percentile pump went from 0.20 ms to 0.30 ms for a name search like
+`speed`, 0.34 ms for a number like `1.25` (the worst case: every number is
+rendered to text — skipped entirely when the text can't occur in a number).
+Direct mode searches on the GUI thread on the same timer.
+
+`PropertyEditor` on its own has no scope button; `setSearchAllAvailable(true)`
+shows it, and a host feeds the results with `bindGroups()` (see
+`PropertyModel::bindGroups`). The search itself is `rpe::searchProperties`
+(`rpe/core/PropertySearch.h`).
 
 ## Tags & pairs
 

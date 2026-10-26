@@ -1,5 +1,6 @@
 #include "rpe/ecs/EcsMirror.h"
 
+#include "rpe/core/PropertySearch.h"
 #include "rpe/core/ReadOnly.h"
 #include "rpe/core/RttrBridge.h"
 #include "rpe/core/TypeBridge.h"
@@ -81,10 +82,20 @@ namespace rpe
         : _ch(std::make_shared<MirrorChannel>())
         , _alive(std::make_shared<MirrorLiveToken>())
     {
+        // A plugin unloading: a search round in flight holds its types and values.
+        // Runs while no pump is (the pump is a TypeUseScope); the round restarts.
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>&) {
+            const qulonglong entity = _search.entity;
+            const QString text = _search.text;
+            _search = {};
+            _search.entity = entity;
+            _search.text = text;
+        });
     }
 
     EcsMirror::~EcsMirror()
     {
+        removeTypeReleaseHandler(_releaseHandle);
         // Mark dead under the pump lock: this blocks until any in-flight pump on the
         // sim thread finishes (so it never touches this soon-to-be-freed object),
         // and makes every later pump / deferred install no-op. Only then do we tear
@@ -479,6 +490,100 @@ namespace rpe
         }
         ptr = e.try_get_mut(compId); // nullptr, not a panic, if it's gone
         return ptr != nullptr;
+    }
+
+    void EcsMirror::_pumpSearch(const flecs::world& world, const MirrorChannel::Intent& in)
+    {
+        using clock = std::chrono::steady_clock;
+        // A round at most every 250 ms, and each pump spends at most ~0.2 ms of it:
+        // a search over many big components is spread over a few frames instead of
+        // costing one frame milliseconds. Nothing at all runs without a search.
+        constexpr auto kRoundGap = std::chrono::milliseconds(250);
+        constexpr auto kSliceBudget = std::chrono::microseconds(200);
+
+        if (in.searchEntity == 0 || in.searchText.isEmpty())
+        {
+            if (_search.entity != 0)
+            {
+                _search = {};
+            }
+            return;
+        }
+        const auto now = clock::now();
+        if (in.searchEntity != _search.entity || in.searchText != _search.text)
+        {
+            _search = {};
+            _search.entity = in.searchEntity;
+            _search.text = in.searchText;
+            _search.due = now;
+        }
+        if (in.searchNow && !_search.running)
+        {
+            _search.due = now;
+        }
+        if (!_search.running)
+        {
+            // The components come from the selected-entity listing; another entity
+            // (the selection is moving) waits for its listing.
+            if (now < _search.due || _search.entity != _compsEntity)
+            {
+                return;
+            }
+            _search.running = true;
+            _search.next = 0;
+            _search.hits.clear();
+            _search.comps.clear();
+            for (int i = 0; i < _selComps.size(); ++i)
+            {
+                const rttr::type t = _selTypes[static_cast<size_t>(i)];
+                if (t.is_valid() && t != rttr::type::get<void>())
+                {
+                    _search.comps.push_back({ _selComps[i], _selCompIds[i], t });
+                }
+            }
+        }
+
+        const flecs::entity e = world.entity(static_cast<flecs::entity_t>(_search.entity));
+        if (!e.is_alive())
+        {
+            _search = {};
+            return;
+        }
+        const auto deadline = now + kSliceBudget;
+        std::vector<PropertyHit> found;
+        while (_search.next < _search.comps.size())
+        {
+            const SearchComp& c = _search.comps[_search.next++];
+            void* ptr = e.try_get_mut(c.id); // read only; nullptr if removed meanwhile
+            if (ptr)
+            {
+                const rttr::variant access = TypeBridge::wrap(c.type, ptr);
+                if (access.is_valid())
+                {
+                    found.clear();
+                    searchProperties(rttr::instance(access), c.type, _search.text, found);
+                    for (PropertyHit& h : found)
+                    {
+                        _search.hits.push_back({ c.key, std::move(h.path), std::move(h.value) });
+                    }
+                }
+            }
+            if (clock::now() >= deadline)
+            {
+                break;
+            }
+        }
+        if (_search.next >= _search.comps.size())
+        {
+            MirrorChannel::SearchResults r;
+            r.entity = _search.entity;
+            r.text = _search.text;
+            r.hits = std::move(_search.hits);
+            _ch->publishSearchResults(std::move(r));
+            _search.running = false;
+            _search.hits.clear();
+            _search.due = clock::now() + kRoundGap;
+        }
     }
 
     void EcsMirror::_pumpImpl(const flecs::world& world)
@@ -1515,6 +1620,8 @@ namespace rpe
             _lastCompRows = _selRows;
             _ch->publishComponentRows(_selRows);
         }
+
+        _pumpSearch(world, in); // uses the listing just refreshed
 
         const int selIdx = _selComps.indexOf(component);
         if (selIdx < 0)

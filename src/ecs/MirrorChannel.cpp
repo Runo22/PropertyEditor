@@ -62,7 +62,52 @@ namespace rpe
         _outPinValues.clear();
         _edits.clear();
         _pinEdits.clear();
+        _outSearch = {};
+        _outSearchDirty = false;
         _resync = true;
+    }
+
+    void MirrorChannel::setSearch(qulonglong entity, const QString& text)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _searchEntity = text.isEmpty() ? 0 : entity;
+        _searchText = _searchEntity ? text : QString();
+        if (!_searchEntity)
+        {
+            _outSearch = {};
+            _outSearchDirty = false;
+        }
+    }
+
+    void MirrorChannel::requestSearchRefresh()
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _searchNow = true;
+    }
+
+    bool MirrorChannel::pollSearchResults(SearchResults& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outSearchDirty)
+        {
+            return false;
+        }
+        out = std::move(_outSearch);
+        _outSearch = {};
+        _outSearchDirty = false;
+        return true;
+    }
+
+    void MirrorChannel::publishSearchResults(SearchResults&& results)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        // A round for a search the GUI has since changed or stopped is stale.
+        if (results.entity != _searchEntity || results.text != _searchText)
+        {
+            return;
+        }
+        _outSearch = std::move(results);
+        _outSearchDirty = true;
     }
 
     void MirrorChannel::requestResync()
@@ -264,6 +309,10 @@ namespace rpe
         _resync = false;
         in.catalogRefresh = _catalogRefresh;
         _catalogRefresh = false;
+        in.searchEntity = _searchEntity;
+        in.searchText = _searchText;
+        in.searchNow = _searchNow;
+        _searchNow = false;
         return in;
     }
 

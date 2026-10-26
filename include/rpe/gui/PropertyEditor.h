@@ -104,6 +104,32 @@ namespace rpe
             return _view;
         }
 
+        // ── Search scope ─────────────────────────────────────────────────────────
+        // A scope button beside the filter: "this object" (off) or "all of them"
+        // (on). The editor only shows it and reports it; a host that can search
+        // further (EntityComponentBrowser: all components of the entity) feeds the
+        // results through bindGroups. Hidden unless made available. Ctrl+Shift+F
+        // turns it on and focuses the filter.
+        void setSearchAllAvailable(bool on);
+        bool isSearchAllAvailable() const
+        {
+            return _searchAllAvailable;
+        }
+        void setSearchAll(bool on);
+        bool isSearchAll() const;
+        QString filterText() const;
+        void setFilterText(const QString& text);
+
+        // Grouped view (see PropertyModel::bindGroups): one header per group, the
+        // filter applying across all of them; headers show their match count.
+        void bindGroups(const QVector<PropertyModel::Group>& groups);
+        void setGroupInstanceProvider(std::function<rttr::instance(const QString& key)> provider);
+
+        // Expand to, scroll to and select the row at `path` (false if it's absent
+        // or filtered out). revealGroup scrolls a group's header to the top.
+        bool revealPath(const QString& path);
+        void revealGroup(const QString& key);
+
         // Drag a number's NAME left/right to change it (on by default) — the
         // pointer shows a horizontal-resize cursor over such names. Shift = fine,
         // Ctrl = coarse; Esc during the drag restores the starting value. The
@@ -127,6 +153,11 @@ namespace rpe
         // rpe/core/TypeRelease.h) — and the editor unbound itself. Rebind once the
         // type is registered again (EntityComponentBrowser does this by itself).
         void boundTypeReleased(const QString& typeName);
+        // The filter text / the scope button changed (see setSearchAllAvailable).
+        void filterTextChanged(const QString& text);
+        void searchAllToggled(bool on);
+        // The current row changed: its path (PropertyPathRole), empty when none.
+        void currentPathChanged(const QString& path);
 
     private slots:
         void _onFilterChanged(const QString& text);
@@ -167,6 +198,12 @@ namespace rpe
         QWidget* _toolbar = nullptr;
         QLineEdit* _filter = nullptr;
         QToolButton* _resetBtn = nullptr;
+        QToolButton* _scopeBtn = nullptr;
+        bool _searchAllAvailable = false;
+        // Grouped view: recount each header's visible matches (coalesced).
+        void _scheduleGroupCounts();
+        void _updateGroupCounts();
+        bool _groupCountsPending = false;
         // Explains an empty panel when the bound type reflects no properties, instead
         // of leaving a silent blank (see _updateEmptyHint).
         QLabel* _emptyHint = nullptr;

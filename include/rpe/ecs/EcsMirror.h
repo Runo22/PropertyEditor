@@ -336,6 +336,29 @@ namespace rpe
         // name (a findComponentEntity walk / registry lookup otherwise — per pump);
         // the display-string dedup is cleared whenever the pin set changes so new
         // pins publish immediately.
+        // Search all components (see MirrorChannel::setSearch): one round is a list
+        // of the entity's components, worked through a slice per pump under a time
+        // budget, its hits published when the last component is done.
+        struct SearchComp
+        {
+            QString key;
+            uint64_t id = 0;
+            rttr::type type = rttr::type::get<void>();
+        };
+        struct SearchState
+        {
+            qulonglong entity = 0;
+            QString text;
+            bool running = false;
+            size_t next = 0;
+            std::vector<SearchComp> comps;
+            std::vector<MirrorChannel::SearchHit> hits;
+            std::chrono::steady_clock::time_point due {};
+        };
+        SearchState _search;
+        int _releaseHandle = 0; // rpe/core/TypeRelease.h
+        void _pumpSearch(const flecs::world& world, const MirrorChannel::Intent& in);
+
         struct PinResolve
         {
             uint64_t compId = 0;

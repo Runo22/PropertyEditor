@@ -14,8 +14,14 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPolygonF>
 #include <QScopedValueRollback>
+#include <QShortcut>
 #include <QSortFilterProxyModel>
+#include <QStyledItemDelegate>
+#include <QTextDocument>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
@@ -61,6 +67,97 @@ namespace rpe
         private:
             QString _text;
         };
+
+        // The NAME column while a filter is active: the matched part of each name in
+        // the highlight colour, and a group header's match count after its label.
+        // Without a filter (and outside the grouped view) it paints exactly like the
+        // default delegate.
+        class NameDelegate : public QStyledItemDelegate
+        {
+        public:
+            NameDelegate(std::function<QString()> needle, QObject* parent)
+                : QStyledItemDelegate(parent)
+                , _needle(std::move(needle))
+            {
+            }
+
+            void paint(QPainter* p, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            {
+                const QString needle = _needle();
+                const bool group = index.data(IsGroupRole).toBool();
+                if (needle.isEmpty() && !group)
+                {
+                    QStyledItemDelegate::paint(p, option, index);
+                    return;
+                }
+                QStyleOptionViewItem o(option);
+                initStyleOption(&o, index);
+                const QString text = o.text;
+                o.text.clear();
+                const QWidget* w = o.widget;
+                QStyle* style = w ? w->style() : QApplication::style();
+                style->drawControl(QStyle::CE_ItemViewItem, &o, p, w);
+                const QRect r = style->subElementRect(QStyle::SE_ItemViewItemText, &o, w).adjusted(2, 0, -2, 0);
+
+                const bool selected = o.state & QStyle::State_Selected;
+                const QColor base = o.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
+                // On a selected row the highlight colour IS the background: mark the
+                // match by weight there instead.
+                const QColor mark = selected ? base : o.palette.color(QPalette::Highlight).lighter(150);
+                QString html;
+                const int at = needle.isEmpty() ? -1 : text.indexOf(needle, 0, Qt::CaseInsensitive);
+                if (at >= 0)
+                {
+                    html = text.left(at).toHtmlEscaped()
+                        + QStringLiteral("<b style='color:%1'>").arg(mark.name())
+                        + text.mid(at, needle.size()).toHtmlEscaped() + QStringLiteral("</b>")
+                        + text.mid(at + needle.size()).toHtmlEscaped();
+                }
+                else
+                {
+                    html = text.toHtmlEscaped();
+                }
+                if (group)
+                {
+                    html = QStringLiteral("<b>%1</b>").arg(html);
+                    const int n = index.data(GroupCountRole).toInt();
+                    if (n > 0)
+                    {
+                        const QColor muted = selected ? base : o.palette.color(QPalette::PlaceholderText);
+                        html += QStringLiteral("&nbsp;&nbsp;<span style='color:%1'>&middot; %2</span>").arg(muted.name()).arg(n);
+                    }
+                }
+                QTextDocument doc;
+                doc.setDefaultFont(o.font);
+                doc.setDocumentMargin(0);
+                doc.setHtml(QStringLiteral("<span style='color:%1; white-space:pre'>%2</span>").arg(base.name(), html));
+                p->save();
+                p->setClipRect(r);
+                p->translate(r.left(), r.top() + (r.height() - doc.size().height()) / 2.0);
+                doc.drawContents(p);
+                p->restore();
+            }
+
+        private:
+            std::function<QString()> _needle;
+        };
+
+        // The scope button's glyph: three stacked layers.
+        QIcon layersIcon(const QColor& c)
+        {
+            QPixmap pm(32, 32);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(QPen(c, 2.2));
+            p.setBrush(Qt::NoBrush);
+            for (int i = 0; i < 3; ++i)
+            {
+                const double y = 9 + i * 6;
+                p.drawPolygon(QPolygonF({ QPointF(16, y - 5), QPointF(27, y), QPointF(16, y + 5), QPointF(5, y) }));
+            }
+            return QIcon(pm);
+        }
     } // namespace
 
 
@@ -76,7 +173,7 @@ namespace rpe
             emit boundTypeReleased(typeName);
         });
         connect(_model, &PropertyModel::localEditsChanged, this, &PropertyEditor::_updateResetEnabled);
-        _updateResetEnabled(); // start disabled — nothing is frozen yet
+        _updateResetEnabled(); // start hidden — nothing is frozen yet
     }
 
     void PropertyEditor::_setupUi()
@@ -95,6 +192,35 @@ namespace rpe
         _filter->setPlaceholderText(tr("Filter properties…"));
         _filter->setClearButtonEnabled(true);
         tb->addWidget(_filter, 1);
+
+        // Search scope: this object / all of them (the host decides what "all" is).
+        _scopeBtn = new QToolButton(_toolbar);
+        _scopeBtn->setCheckable(true);
+        _scopeBtn->setToolTip(tr("Search all components of this entity (Ctrl+Shift+F)"));
+        _scopeBtn->setStyleSheet(QStringLiteral(
+            "QToolButton:checked { background: palette(highlight); color: palette(highlighted-text);"
+            " border: 1px solid palette(highlight); border-radius: 3px; padding: 1px 6px; }"));
+        _scopeBtn->setVisible(false);
+        tb->addWidget(_scopeBtn);
+        connect(_scopeBtn, &QToolButton::toggled, this, [this](bool on) {
+            _scopeBtn->setIcon(layersIcon(on ? palette().color(QPalette::HighlightedText) : palette().color(QPalette::Text)));
+            _scopeBtn->setText(on ? tr("All") : QString());
+            _scopeBtn->setToolButtonStyle(on ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
+            _filter->setPlaceholderText(on ? tr("Search all components…") : tr("Filter properties…"));
+            emit searchAllToggled(on);
+        });
+        _scopeBtn->setIcon(layersIcon(palette().color(QPalette::Text)));
+        auto* scopeKey = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F), this);
+        scopeKey->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(scopeKey, &QShortcut::activated, this, [this] {
+            if (!_searchAllAvailable)
+            {
+                return;
+            }
+            setSearchAll(!isSearchAll());
+            _filter->setFocus();
+            _filter->selectAll();
+        });
 
         _resetBtn = new QToolButton(_toolbar);
         _resetBtn->setText(tr("Reset"));
@@ -124,6 +250,7 @@ namespace rpe
         _view = new QTreeView(this);
         _view->setModel(_proxy);
         _view->setItemDelegateForColumn(1, _delegate);
+        _view->setItemDelegateForColumn(0, new NameDelegate([this] { return _filter->text().trimmed(); }, this));
         _view->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::SelectedClicked | QAbstractItemView::EditKeyPressed);
         // Drag-to-scrub watches the viewport (hover cursor, press/drag/release) and
         // the view (Esc mid-drag).
@@ -142,6 +269,14 @@ namespace rpe
         connect(_filter, &QLineEdit::textChanged, this, &PropertyEditor::_onFilterChanged);
         connect(_resetBtn, &QToolButton::clicked, this, &PropertyEditor::_onResetAll);
         connect(_view, &QTreeView::customContextMenuRequested, this, &PropertyEditor::_onContextMenu);
+        connect(_view->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& cur) {
+            emit currentPathChanged(cur.isValid() ? cur.siblingAtColumn(0).data(PropertyPathRole).toString() : QString());
+        });
+        // Grouped view: a header's count is what its rows show after filtering.
+        connect(_proxy, &QAbstractItemModel::rowsInserted, this, &PropertyEditor::_scheduleGroupCounts);
+        connect(_proxy, &QAbstractItemModel::rowsRemoved, this, &PropertyEditor::_scheduleGroupCounts);
+        connect(_proxy, &QAbstractItemModel::modelReset, this, &PropertyEditor::_scheduleGroupCounts);
+        connect(_proxy, &QAbstractItemModel::layoutChanged, this, &PropertyEditor::_scheduleGroupCounts);
 
         // Keep the model's notion of expansion in sync with the view, so collapsed
         // struct rows can show a "[a, b]" summary that disappears on expand.
@@ -206,6 +341,129 @@ namespace rpe
         _updateEmptyHint(type);
     }
 
+    void PropertyEditor::bindGroups(const QVector<PropertyModel::Group>& groups)
+    {
+        _boundTypeName.clear(); // no per-type expansion memory for a mixed view
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
+        _model->bindGroups(groups);
+        _view->expandAll();
+        _pushExpansionState();
+        _updateResetEnabled();
+        _emptyHint->setVisible(false);
+        _scheduleGroupCounts();
+    }
+
+    void PropertyEditor::setGroupInstanceProvider(std::function<rttr::instance(const QString&)> provider)
+    {
+        _model->setGroupInstanceProvider(std::move(provider));
+    }
+
+    void PropertyEditor::_scheduleGroupCounts()
+    {
+        if (!_model->isGrouped() || _groupCountsPending)
+        {
+            return;
+        }
+        _groupCountsPending = true;
+        QTimer::singleShot(0, this, [this] {
+            _groupCountsPending = false;
+            _updateGroupCounts();
+        });
+    }
+
+    void PropertyEditor::_updateGroupCounts()
+    {
+        if (!_model->isGrouped())
+        {
+            return;
+        }
+        // A header's count = its visible rows that have no visible children (the
+        // matches themselves, not the structs leading to them).
+        QHash<QString, int> counts;
+        for (int g = 0; g < _proxy->rowCount({}); ++g)
+        {
+            const QModelIndex header = _proxy->index(g, 0, {});
+            int n = 0;
+            QList<QModelIndex> stack;
+            for (int r = 0; r < _proxy->rowCount(header); ++r)
+                stack.append(_proxy->index(r, 0, header));
+            while (!stack.isEmpty())
+            {
+                const QModelIndex i = stack.takeLast();
+                const int rows = _proxy->rowCount(i);
+                if (rows == 0)
+                {
+                    ++n;
+                }
+                for (int r = 0; r < rows; ++r)
+                    stack.append(_proxy->index(r, 0, i));
+            }
+            counts.insert(header.data(GroupKeyRole).toString(), _filter->text().trimmed().isEmpty() ? 0 : n);
+        }
+        _model->setGroupCounts(counts);
+    }
+
+    bool PropertyEditor::revealPath(const QString& path)
+    {
+        const QModelIndex src = _model->indexForPath(path);
+        const QModelIndex idx = src.isValid() ? _proxy->mapFromSource(src) : QModelIndex();
+        if (!idx.isValid())
+        {
+            return false;
+        }
+        for (QModelIndex p = idx.parent(); p.isValid(); p = p.parent())
+        {
+            _view->expand(p);
+        }
+        _view->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+        _view->setCurrentIndex(idx);
+        return true;
+    }
+
+    void PropertyEditor::revealGroup(const QString& key)
+    {
+        const QModelIndex src = _model->groupIndex(key);
+        const QModelIndex idx = src.isValid() ? _proxy->mapFromSource(src) : QModelIndex();
+        if (idx.isValid())
+        {
+            _view->expand(idx);
+            _view->scrollTo(idx, QAbstractItemView::PositionAtTop);
+            _view->setCurrentIndex(idx);
+        }
+    }
+
+    // ── search scope ──────────────────────────────────────────────────────────────
+
+    void PropertyEditor::setSearchAllAvailable(bool on)
+    {
+        _searchAllAvailable = on;
+        _scopeBtn->setVisible(on);
+        if (!on)
+        {
+            setSearchAll(false);
+        }
+    }
+
+    void PropertyEditor::setSearchAll(bool on)
+    {
+        _scopeBtn->setChecked(on && _searchAllAvailable);
+    }
+
+    bool PropertyEditor::isSearchAll() const
+    {
+        return _scopeBtn->isChecked();
+    }
+
+    QString PropertyEditor::filterText() const
+    {
+        return _filter->text().trimmed();
+    }
+
+    void PropertyEditor::setFilterText(const QString& text)
+    {
+        _filter->setText(text);
+    }
+
     void PropertyEditor::unbind()
     {
         _model->unbind();
@@ -257,7 +515,12 @@ namespace rpe
     // rather than an always-lit button that looks like "reset to defaults".
     void PropertyEditor::_updateResetEnabled()
     {
-        _resetBtn->setEnabled(!isReadOnly() && _model->hasAnyLocalEdit());
+        // Shown only while there is something to release: frozen values are rare
+        // (LocalEdit drafts, "Local edit" from the context menu), so a permanently
+        // visible — and almost always disabled — button was just clutter.
+        const bool needed = !isReadOnly() && _model->hasAnyLocalEdit();
+        _resetBtn->setEnabled(needed);
+        _resetBtn->setVisible(needed);
     }
     bool PropertyEditor::isReadOnly() const
     {
@@ -573,6 +836,7 @@ namespace rpe
     {
         const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
         static_cast<PropertyFilterProxy*>(_proxy)->setFilterText(text);
+        _view->viewport()->update(); // the name column highlights the new text
         if (text.isEmpty())
         {
             _view->expandToDepth(0);
@@ -582,6 +846,8 @@ namespace rpe
             _view->expandAll();
         }
         _pushExpansionState();
+        _scheduleGroupCounts();
+        emit filterTextChanged(text.trimmed());
     }
 
     void PropertyEditor::_onResetAll()

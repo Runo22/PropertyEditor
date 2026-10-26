@@ -10,6 +10,7 @@
 
 #include <QBrush>
 #include <QColor>
+#include <QFont>
 #include <QMetaObject>
 
 #include <algorithm>
@@ -26,6 +27,10 @@ namespace rpe
 
         // RTTR has no public default/invalid property constructor; querying a missing
         // property on `void` yields a copyable invalid property we use as a sentinel.
+        // Joins a group key to a row path (grouped view). A control character: it can't
+        // occur in a component key or a property path.
+        constexpr QChar kGroupSep(0x1F);
+
         rttr::property invalidProperty()
         {
             return rttr::type::get<void>().get_property(std::string());
@@ -174,6 +179,9 @@ namespace rpe
         beginResetModel();
         _roCache.clear();
         _resetRoot();
+        _grouped = false;
+        _groupKeys.clear();
+        _groupCounts.clear();
         _boundType = type;
         _expandedPaths.clear();
         if (type.is_valid())
@@ -190,9 +198,117 @@ namespace rpe
         beginResetModel();
         _roCache.clear();
         _resetRoot();
+        _grouped = false;
+        _groupKeys.clear();
+        _groupCounts.clear();
         _boundType = rttr::type::get<void>();
         _expandedPaths.clear();
         endResetModel();
+    }
+
+    // ── grouped view ────────────────────────────────────────────────────────────────
+
+    QString PropertyModel::groupPath(const QString& key, const QString& relPath)
+    {
+        return key + kGroupSep + relPath;
+    }
+
+    bool PropertyModel::splitGroupPath(const QString& path, QString* key, QString* relPath)
+    {
+        const int at = path.indexOf(kGroupSep);
+        if (at < 0)
+        {
+            if (key)
+                key->clear();
+            if (relPath)
+                *relPath = path;
+            return false;
+        }
+        if (key)
+            *key = path.left(at);
+        if (relPath)
+            *relPath = path.mid(at + 1);
+        return true;
+    }
+
+    void PropertyModel::bindGroups(const QVector<Group>& groups)
+    {
+        TypeUseScope scope;
+        _released.store(false);
+        beginResetModel();
+        _roCache.clear();
+        _resetRoot();
+        _boundType = rttr::type::get<void>();
+        _expandedPaths.clear();
+        _grouped = true;
+        _groupKeys.clear();
+        _groupCounts.clear();
+        for (const Group& g : groups)
+        {
+            // The header's path is "key<sep>", so its rows' paths come out as
+            // groupPath(key, "position.x").
+            auto* header = new PropertyNode(g.label, g.key + kGroupSep, g.type, invalidProperty(), _root.get());
+            header->setExpandable(true);
+            _root->children().append(header);
+            _groupKeys.insert(header, g.key);
+            if (g.type.is_valid() && g.type != rttr::type::get<void>())
+            {
+                _buildTree(header, g.type, header->path());
+            }
+        }
+        _collectNodes(_root.get(), _nodeByPath);
+        endResetModel();
+    }
+
+    void PropertyModel::setGroupInstanceProvider(std::function<rttr::instance(const QString&)> provider)
+    {
+        _groupInstanceProvider = std::move(provider);
+    }
+
+    void PropertyModel::setGroupCounts(const QHash<QString, int>& counts)
+    {
+        if (counts == _groupCounts)
+        {
+            return;
+        }
+        _groupCounts = counts;
+        for (int r = 0; _grouped && r < _root->children().size(); ++r)
+        {
+            const QModelIndex i = createIndex(r, 0, _root->children()[r]);
+            emit dataChanged(i, i, { Qt::DisplayRole, GroupCountRole });
+        }
+    }
+
+    QModelIndex PropertyModel::groupIndex(const QString& key) const
+    {
+        for (int r = 0; _grouped && r < _root->children().size(); ++r)
+        {
+            PropertyNode* n = _root->children()[r];
+            if (_groupKeys.value(n) == key)
+            {
+                return createIndex(r, 0, n);
+            }
+        }
+        return {};
+    }
+
+    QModelIndex PropertyModel::indexForPath(const QString& path) const
+    {
+        PropertyNode* n = _findNode(path);
+        return n ? _indexFromNode(n, 0) : QModelIndex();
+    }
+
+    const PropertyNode* PropertyModel::_groupOf(const PropertyNode* node) const
+    {
+        if (!_grouped || !node || node == _root.get())
+        {
+            return nullptr;
+        }
+        while (node->parent() && node->parent() != _root.get())
+        {
+            node = node->parent();
+        }
+        return node;
     }
 
     void PropertyModel::_buildTree(PropertyNode* parent, rttr::type type, const QString& prefix)
@@ -200,7 +316,9 @@ namespace rpe
         for (auto& prop : TypeRenderer::rawType(type).get_properties())
         {
             const QString name = QString::fromStdString(prop.get_name().to_string());
-            const QString path = prefix.isEmpty() ? name : prefix + QLatin1Char('.') + name;
+            // A group header's path ends in the separator: its rows join without a dot.
+            const QString path = (prefix.isEmpty() || prefix.endsWith(kGroupSep)) ? prefix + name
+                                                                                   : prefix + QLatin1Char('.') + name;
             const rttr::type pt = prop.get_type();
 
             auto* node = new PropertyNode(name, path, pt, prop, parent);
@@ -249,7 +367,8 @@ namespace rpe
     void PropertyModel::refresh(const rttr::instance& obj)
     {
         TypeUseScope scope; // see rpe/core/TypeRelease.h
-        if (!obj.is_valid() || !_root)
+        if (!obj.is_valid() || !_root || _grouped) // a grouped view is fed by path
+
         {
             return;
         }
@@ -828,7 +947,16 @@ namespace rpe
         {
             return it.value();
         }
-        const QString why = readOnlyReason(_boundType, path);
+        QString why;
+        if (const PropertyNode* g = _groupOf(node))
+        {
+            // Grouped: the rule asks about the row's own component, by its own path.
+            why = (g == node) ? QString() : readOnlyReason(g->type(), path.mid(g->path().size()));
+        }
+        else
+        {
+            why = readOnlyReason(_boundType, path);
+        }
         _roCache.insert(path, why);
         return why;
     }
@@ -847,7 +975,10 @@ namespace rpe
             return true;
         }
 
-        if (_editPolicy == EditPolicy::WriteBack && _instanceProvider)
+        // Grouped: the row's own component, addressed by its key, at its own path.
+        QString groupKey, relPath = node->path();
+        const bool grouped = _grouped && splitGroupPath(node->path(), &groupKey, &relPath);
+        if (_editPolicy == EditPolicy::WriteBack && (grouped ? bool(_groupInstanceProvider) : bool(_instanceProvider)))
         {
             bool wrote = false;
             rttr::variant actual;
@@ -866,11 +997,11 @@ namespace rpe
                         released = true; // the tree was emptied meanwhile
                         return;
                     }
-                    rttr::instance inst = _instanceProvider();
-                    if (inst.is_valid() && bridge::setValueByPath(inst, node->path(), newVal))
+                    rttr::instance inst = grouped ? _groupInstanceProvider(groupKey) : _instanceProvider();
+                    if (inst.is_valid() && bridge::setValueByPath(inst, relPath, newVal))
                     {
                         // Read back so the display reflects any coercion the object applied.
-                        actual = bridge::getValueByPath(inst, node->path());
+                        actual = bridge::getValueByPath(inst, relPath);
                         wrote = true;
                     }
                 });
@@ -952,8 +1083,45 @@ namespace rpe
         }
         auto* node = static_cast<PropertyNode*>(index.internalPointer());
 
+        // Grouped view: a header row is a label (+ its match count), nothing else.
+        if (_isGroupNode(node))
+        {
+            switch (role)
+            {
+            case Qt::DisplayRole:
+            case Qt::ToolTipRole:
+                return index.column() == 0 ? node->displayName() : QString();
+            case Qt::FontRole:
+            {
+                QFont f;
+                f.setBold(true);
+                return f;
+            }
+            case IsGroupRole:
+                return true;
+            case GroupKeyRole:
+                return _groupKeys.value(node);
+            case GroupCountRole:
+                return _groupCounts.value(_groupKeys.value(node), 0);
+            case PropertyPathRole:
+                return node->path();
+            case IsLeafRole:
+                return false;
+            default:
+                return {};
+            }
+        }
+
         switch (role)
         {
+        case IsGroupRole:
+            return false;
+        case GroupKeyRole:
+            if (const PropertyNode* g = _groupOf(node))
+            {
+                return _groupKeys.value(g);
+            }
+            return QString();
         case Qt::DisplayRole:
             if (index.column() == 0)
             {
@@ -1175,6 +1343,10 @@ namespace rpe
         auto* node = static_cast<PropertyNode*>(index.internalPointer());
 
         Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+        if (_isGroupNode(node))
+        {
+            return f; // a header: never edited
+        }
         // Read-only rows stay ENABLED (normal text, selectable, copyable) — they just
         // never get ItemIsEditable, so no editor opens. The reason is shown on hover.
         if (!_readOnly && index.column() == 1 && node->isLeaf() && TypeRenderer::isInlineEditable(node->type())
@@ -1193,7 +1365,7 @@ namespace rpe
 
     bool PropertyModel::_isInlineVector(const PropertyNode* node) const
     {
-        if (!node || node == _root.get() || node->isLeaf() || node->arraySize() >= 0)
+        if (!node || node == _root.get() || _isGroupNode(node) || node->isLeaf() || node->arraySize() >= 0)
         {
             return false;
         }

@@ -286,6 +286,28 @@ namespace rpe
         void _onRemoveComponent(const QString& name);
 
     private:
+        // ── Search all components ────────────────────────────────────────────────
+        // The property filter, applied to every component of the selected entity:
+        // a match count per component in the list while the filter has text, and —
+        // with the editor's scope button on — every match in one grouped, editable
+        // tree. The search itself runs producer-side in mirror mode (time-sliced, see
+        // EcsMirror), on a timer here in direct mode.
+        void _onSearchChanged();
+        void _updateSearchTarget(); // the entity being searched changed
+        void _applySearchResults(const std::vector<MirrorChannel::SearchHit>& hits);
+        void _runDirectSearch();
+        void _enterGroupView();
+        void _leaveGroupView();
+        void _rebuildGroups();
+        void _onGroupRowPicked(const QString& path);
+        bool _groupView = false;
+        QString _searchText;
+        QStringList _groupKeys;       // the components the grouped view shows
+        QSet<QString> _hitPaths;      // grouped rows filled by the last round
+        QString _groupFocusPath;      // row last picked in the grouped view (component-relative)
+        QTimer* _searchTimer = nullptr; // direct mode: search rounds
+        RttrVariantWrapper _groupWrapper; // direct mode: WriteBack target of a grouped edit
+
         // ── A plugin unloading (rpe/core/TypeRelease.h) ──────────────────────────
         // Any thread: drop what this browser holds of the released types.
         void _onTypesReleased(const std::vector<rttr::type>& released);

@@ -43,6 +43,9 @@ namespace rpe
                           //           empty when it can. Drives the lock mark + tooltip.
         InlineVectorRole, // bool    — a struct row of 2–4 writable numeric fields that
                           //           edits inline as one row (x / y / z / w boxes)
+        GroupKeyRole,     // QString — grouped view (bindGroups): the row's group key; empty otherwise
+        IsGroupRole,      // bool    — the row is a group header (one per component)
+        GroupCountRole,   // int     — a group header's match count (setGroupCounts); 0 = none
     };
 
     // How committed edits are applied.
@@ -77,6 +80,33 @@ namespace rpe
         // ── Schema (GUI thread) ──────────────────────────────────────────────────
         void bindType(rttr::type type);
         void unbind();
+
+        // Grouped view — several objects in one tree, one header row per group (the
+        // browser's "search all components"). Each group's rows edit like a bound
+        // type's. Their paths carry the group: groupPath(key, "position.x"), so
+        // setPropertyValue, the edit sink and PropertyPathRole all address a row in
+        // a group unambiguously; splitGroupPath takes one apart.
+        struct Group
+        {
+            QString key;   // identity (a component's selection key)
+            QString label; // header text
+            rttr::type type = rttr::type::get<void>();
+        };
+        void bindGroups(const QVector<Group>& groups);
+        bool isGrouped() const
+        {
+            return _grouped;
+        }
+        static QString groupPath(const QString& key, const QString& relPath);
+        // False for a path that isn't a group path (then *relPath = path).
+        static bool splitGroupPath(const QString& path, QString* key, QString* relPath);
+        // WriteBack target per group (the grouped counterpart of setInstanceProvider).
+        void setGroupInstanceProvider(std::function<rttr::instance(const QString& key)> provider);
+        // Match counts shown on the group headers (GroupCountRole).
+        void setGroupCounts(const QHash<QString, int>& counts);
+        QModelIndex groupIndex(const QString& key) const;
+        // The row at `path` (column 0), or an invalid index.
+        QModelIndex indexForPath(const QString& path) const;
         rttr::type boundType() const
         {
             return _boundType;
@@ -189,6 +219,16 @@ namespace rpe
         // Type release (rpe/core/TypeRelease.h): runs on the releasing thread, drops
         // every reflected handle/value the tree holds, then queues _finishRelease.
         void _onTypesReleased(const std::vector<rttr::type>& released);
+        // Grouped view: the group header above `node` (nullptr if not grouped).
+        const PropertyNode* _groupOf(const PropertyNode* node) const;
+        bool _isGroupNode(const PropertyNode* node) const
+        {
+            return _grouped && node && node->parent() == _root.get();
+        }
+        bool _grouped = false;
+        QHash<const PropertyNode*, QString> _groupKeys; // header node → key
+        QHash<QString, int> _groupCounts;
+        std::function<rttr::instance(const QString&)> _groupInstanceProvider;
         void _finishRelease();
 
         int _releaseHandle = 0;
