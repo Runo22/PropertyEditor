@@ -129,8 +129,19 @@ Before the DLL is unloaded:
 
 Rules:
 
-- **Unregister, then unload.** Unloading without `unregisterType` leaves rpe
-  holding the plugin's data.
+- **Unregister, then unload — from an explicit shutdown function**, not a
+  global/static destructor (those run during the unload itself, in an order you
+  don't control relative to RTTR's own cleanup). Unloading without
+  `unregisterType` leaves rpe holding the plugin's data. A late `unregisterType`
+  (a second shutdown, or after the unload) doesn't crash, but it's too late to
+  release anything then.
+- **Simplest: don't really unload.** A plugin can be "removed" — systems stopped,
+  types unregistered — while its module stays mapped:
+  `QLibrary::PreventUnloadHint`, `GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_PIN, …)`,
+  `RTLD_NODELETE`. Then nothing of it can dangle.
+- **Don't unregister a type another live module still uses.** The bridge holds one
+  entry per type, no reference count: the first module to unregister removes it
+  for everyone.
 - **Any thread works**, and the release never waits for another thread to *run*
   — only for one to finish a short internal read section. A GUI thread blocked
   while the sim thread reloads the plugin (or the other way round) is fine.
@@ -138,12 +149,20 @@ Rules:
   menu action) — nor block there waiting for a thread that unloads: rpe code is
   still on the stack, holding the types. Queue it.
 - **Types the host shares with plugins** (a `Vec3` in a host header used by a
-  plugin component): register or use them in the host *before* plugins load.
+  plugin component, or a component several modules use): register them — RTTR
+  and `registerType<T>()` — only in a module that never unloads (the host, or a
+  common components library loaded before any plugin), *before* plugins load.
   RTTR gives a type's data to the first module that asks for it; if a plugin is
   first, unloading it frees the type under the host. rpe does this for every
   type it names itself (`QString`, `QColor`, `std::string`, chrono, …).
 - A plugin should use `addEntityMenuHook` / `addComponentMenuHook`, never the
   single-slot `set*MenuHook`: a second plugin calling `set*` replaces the first.
+
+**Test on Linux like Windows behaves:** build plugins with hidden visibility
+(`-fvisibility=hidden -fvisibility-inlines-hidden`). With default visibility,
+GCC/Clang can merge RTTR's per-module statics across `.so` files (and "unique"
+symbols can keep a `.so` from unloading at all), so an unload bug that crashes on
+Windows may never show on Linux.
 
 Your own widgets/code that keep plugin values or types (`rttr::variant`,
 `rttr::type`, `rttr::property`) need the same care: drop them before the unload.

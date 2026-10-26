@@ -149,31 +149,62 @@ namespace rpe
         r.generation.fetch_add(1, std::memory_order_relaxed);
     }
 
+    namespace
+    {
+        // Is a type with this id still registered in RTTR? Compares ids only, so it
+        // is safe for a type whose module has unloaded (RTTR dropped it then).
+        bool rttrStillHas(rttr::type::type_id id)
+        {
+            for (const rttr::type& live : rttr::type::get_types())
+            {
+                if (live.get_id() == id)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    } // namespace
+
     void TypeBridge::unregisterType(rttr::type t)
     {
-        if (!t.is_valid())
+        // Key on the id ALONE — never t.is_valid()/get_name() up front. get_id() is
+        // just the type_data address, while those dereference it, and a late call
+        // (a second shutdown, a static destructor) may come after the module that
+        // owned the type_data has freed it. An invalid type has id 0 and matches
+        // nothing.
+        const auto id = t.get_id();
+        if (id == 0)
         {
             return;
         }
+        bool wasBridged = false;
         {
             auto& r = registry();
             std::lock_guard<std::mutex> lk(r.mutex);
-            r.map.erase(t.get_id());
+            wasBridged = r.map.erase(id) > 0;
             // Drop any aliases pointing at this type so a stale name can't resolve to a
             // freed (unloaded-plugin) entry.
             for (auto it = r.aliases.begin(); it != r.aliases.end();)
             {
-                it = (it->second == t.get_id()) ? r.aliases.erase(it) : std::next(it);
+                it = (it->second == id) ? r.aliases.erase(it) : std::next(it);
             }
             // A type lock by TYPE dies with it (its id is an address RTTR may reuse);
             // a lock by NAME survives and applies to the reloaded type.
-            r.readOnlyIds.erase(t.get_id());
+            r.readOnlyIds.erase(id);
             r.resolved.clear();
             r.generation.fetch_add(1, std::memory_order_relaxed);
         }
         // The release point: everything rpe holds of `t` is dropped now, while the
         // module that defines it is still loaded (see rpe/core/TypeRelease.h).
-        detail::releaseTypes({ t });
+        // Only for a type that was bridged (a second call has nothing left to
+        // release) and that RTTR still has: if its module is already gone, the
+        // type_data is freed and reading it to release anything would crash —
+        // that's the "unregister BEFORE unloading" rule, too late to help here.
+        if (wasBridged && rttrStillHas(id))
+        {
+            detail::releaseTypes({ t });
+        }
     }
 
     uint64_t TypeBridge::registryGeneration()

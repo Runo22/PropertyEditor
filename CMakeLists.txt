@@ -213,6 +213,24 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_plugin_unload_test test/plugin_unload_test.cpp)
     target_link_libraries(rpe_plugin_unload_test PRIVATE rpe_gui)
 
+    # A REAL DLL/.so unload (plugin_unload_test only unregisters). SharedHealth is
+    # owned by a never-unloaded common module; the plugin is loaded/unloaded at run
+    # time. Hidden visibility gives every module its own RTTR statics on Linux too,
+    # as every DLL has on Windows — otherwise the unload hazard can't show up here.
+    add_library(rpe_test_shared_components SHARED test/plugin_module_unload_common.cpp)
+    target_link_libraries(rpe_test_shared_components PRIVATE rpe_core)
+    add_library(rpe_test_unload_plugin MODULE test/plugin_module_unload_plugin.cpp)
+    target_link_libraries(rpe_test_unload_plugin PRIVATE rpe_core)
+    set_target_properties(rpe_test_shared_components rpe_test_unload_plugin PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    add_executable(rpe_plugin_module_unload_test test/plugin_module_unload_test.cpp)
+    target_link_libraries(rpe_plugin_module_unload_test PRIVATE
+        rpe_core rpe_test_shared_components ${CMAKE_DL_LIBS})
+    target_compile_definitions(rpe_plugin_module_unload_test PRIVATE
+        RPE_TEST_PLUGIN_PATH="$<TARGET_FILE:rpe_test_unload_plugin>")
+    add_dependencies(rpe_plugin_module_unload_test rpe_test_unload_plugin)
+
     add_executable(rpe_remove_flow_test test/remove_flow_test.cpp)
     target_link_libraries(rpe_remove_flow_test PRIVATE rpe_gui)
 
@@ -432,7 +450,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 get_property(_rpe_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
 foreach(_t IN LISTS _rpe_targets)
     get_target_property(_ttype ${_t} TYPE)
-    if(_ttype STREQUAL "EXECUTABLE" AND NOT _t STREQUAL "rpe_demo")
+    if((_ttype STREQUAL "EXECUTABLE" AND NOT _t STREQUAL "rpe_demo") OR _t MATCHES "^rpe_test_")
         # tests, shots, benches and dev tools
         set_target_properties(${_t} PROPERTIES FOLDER "rpe/tests")
     else()

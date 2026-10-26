@@ -155,6 +155,58 @@ namespace rpe
     //  not CALL a hook (wrap/clone, i.e. inspect a component) after its plugin has
     //  unloaded — the code it points at is gone. Call unregisterType() in the
     //  plugin's unload path: it also releases everything rpe holds of the type.
+    //
+    //  ── Plugin-unload rules: who OWNS an rttr::type ─────────────────────────────
+    //  RTTR keeps one registration_manager PER MODULE (DLL / .so) — a function-local
+    //  static that owns every type_data, property and method the module registered
+    //  FIRST. An rttr::type is only a pointer to that type_data, and type::get<T>()
+    //  caches it in another per-module static. When a module is really unloaded, its
+    //  registration_manager destructor unregisters AND FREES all of that, including
+    //  types other modules still use. Every rttr::type copy held elsewhere (another
+    //  plugin's type::get<T>() cache, the host's) then dangles, and the next
+    //  is_wrapper()/get_name()/get_properties() reads freed memory: an access
+    //  violation (no C++ exception, try/catch won't help). Which module owns a
+    //  shared type depends on LOAD ORDER, so the crash comes and goes.
+    //
+    //   1. A component used by more than one module is owned by a module that never
+    //      unloads: the host, or a common components library loaded before any
+    //      plugin. Its RTTR_REGISTRATION and registerType<T>() live THERE; plugins
+    //      only use the type and don't register it themselves. (rpe_core owns the
+    //      common types it names itself — QString, QColor, std::string, … — at load.)
+    //   2. Simplest: don't really unload a plugin that registers RTTR types. Pin it
+    //      (QLibrary/QPluginLoader::setLoadHints(QLibrary::PreventUnloadHint),
+    //      GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_PIN, ...), RTLD_NODELETE). It
+    //      can still be "removed" — stop its systems, unregisterType its types — while
+    //      its code and RTTR data stay mapped.
+    //   3. If a plugin IS unloaded, BEFORE FreeLibrary / dlclose:
+    //        a. remove its components from the world (their hooks are its code);
+    //        b. unregisterType() every type it bridged, from an explicit shutdown
+    //           function — not from a global/static destructor: those run during
+    //           the unload itself, in an order you don't control relative to RTTR's
+    //           own registration_manager. This drops everything rpe holds of them
+    //           (TypeRelease.h), on whatever thread you call it from;
+    //        c. drop what YOUR code holds of them (cached rttr::variant / type /
+    //           property — an rttr::variant runs code from the module that created
+    //           it to copy, read its type or destroy itself), or register an
+    //           addTypeReleaseHandler to do it at step b;
+    //        d. unload.
+    //      This only works together with rule 1: unregistering can't repair another
+    //      module's type::get<T>() cache once the type_data under it is freed.
+    //   4. Don't unregisterType() a type another live module still uses. The registry
+    //      holds ONE entry per type (no reference count): the first module to
+    //      unregister removes it for everyone, and a later registerType<T>() simply
+    //      overwrites the entry, so the hooks belong to whoever registered LAST.
+    //  A LATE unregisterType() — a second shutdown, or after the module is already
+    //  gone — is safe: it compares type ids only, and skips the release when RTTR no
+    //  longer has the type (too late to release then; that's rule 3's order).
+    //
+    //  Platform note: on Windows each DLL always gets its own copy of those RTTR
+    //  statics. With GCC/Clang default visibility the copies can be merged across
+    //  .so files (and "unique" symbols can pin a .so in memory), so the per-module
+    //  cleanup may never happen on Linux — the bug can hide there and crash on
+    //  Windows. Build plugins with hidden visibility (-fvisibility=hidden
+    //  -fvisibility-inlines-hidden) to get the Windows behaviour on Linux too;
+    //  test/plugin_module_unload_test.cpp and plugin_reload_test.cpp do exactly that.
     // ─────────────────────────────────────────────────────────────────────────────
     class TypeBridge
     {
@@ -231,8 +283,9 @@ namespace rpe
         // Remove the bridge entry for `t` AND release everything rpe holds of it —
         // property trees, values, open editors' starting values, queued mirror
         // data — on the calling thread, before returning. Call it before unloading
-        // the module that defines `t` (see rpe/core/TypeRelease.h). RTTR's own
-        // registration is untouched.
+        // the module that defines `t` (see rpe/core/TypeRelease.h and the
+        // "Plugin-unload rules" above). RTTR's own registration is untouched. A
+        // late call (already unregistered, or the module already gone) is safe.
         static void unregisterType(rttr::type t);
         template <class T>
         static void unregisterType()
