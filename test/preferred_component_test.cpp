@@ -4,9 +4,8 @@
 //     component you were on), the first preferred component it has is selected.
 //     A previous selection still wins; a component removed from the SAME entity
 //     still falls to its row's neighbour. Mirror and direct mode.
-//   • Drag-to-scrub on/off: Settings::dragToScrub, and a checkable entry in the
-//     property right-click menu (also on empty space), reported by
-//     PropertyEditor::dragToScrubToggled and reflected in settings().
+//   • Drag-to-scrub on/off: Settings::dragToScrub / setDragToScrubEnabled only —
+//     the host decides; the right-click menu offers no toggle.
 #include <rpe/core/TypeBridge.h>
 #include <rpe/ecs/ComponentListWidget.h>
 #include <rpe/ecs/EcsMirror.h>
@@ -206,36 +205,23 @@ int main(int argc, char** argv)
         browser.setDragToScrubEnabled(true);
         check("setDragToScrubEnabled(true) turns it back on", ed->isDragToScrubEnabled() && browser.settings().dragToScrub);
 
-        bool reported = true;
-        QObject::connect(ed, &rpe::PropertyEditor::dragToScrubToggled, [&](bool on) { reported = on; });
-        auto openMenuAndToggle = [&](const QPoint& at) {
-            bool found = false, wasChecked = false;
-            QTimer::singleShot(0, [&] {
-                auto* m = qobject_cast<QMenu*>(QApplication::activePopupWidget());
-                if (m)
-                {
-                    for (QAction* a : m->actions())
-                        if (a->text() == QStringLiteral("Drag names to change values"))
-                        {
-                            found = true;
-                            wasChecked = a->isChecked();
-                            a->trigger();
-                        }
-                    m->close();
-                }
-            });
-            QMetaObject::invokeMethod(ed, "_onContextMenu", Qt::DirectConnection, Q_ARG(QPoint, at));
-            return std::make_pair(found, wasChecked);
-        };
+        // Host-controlled only: no toggle in the right-click menu.
+        bool offered = false, menuShown = false;
+        QTimer::singleShot(0, [&] {
+            auto* m = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if (m)
+            {
+                menuShown = true;
+                for (QAction* a : m->actions())
+                    if (a->text().contains(QStringLiteral("Drag"), Qt::CaseInsensitive))
+                        offered = true;
+                m->close();
+            }
+        });
         auto* view = ed->view();
-        const QPoint onRow = view->visualRect(view->model()->index(0, 0)).center();
-        auto r1 = openMenuAndToggle(onRow);
-        check("the row menu offers \"Drag names to change values\", checked", r1.first && r1.second);
-        check("unchecking it turns scrubbing off, reports it, and settings() follows",
-              !ed->isDragToScrubEnabled() && !reported && !browser.settings().dragToScrub);
-        auto r2 = openMenuAndToggle(QPoint(5, view->viewport()->height() - 5)); // empty space
-        check("it's offered on empty space too, unchecked now", r2.first && !r2.second);
-        check("checking it turns scrubbing back on", ed->isDragToScrubEnabled() && reported && browser.settings().dragToScrub);
+        QMetaObject::invokeMethod(ed, "_onContextMenu", Qt::DirectConnection,
+                                  Q_ARG(QPoint, view->visualRect(view->model()->index(0, 0)).center()));
+        check("the row menu opens but offers no drag-to-scrub toggle", menuShown && !offered);
     }
 
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);

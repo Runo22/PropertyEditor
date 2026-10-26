@@ -190,7 +190,7 @@ namespace rpe
         _editPath = index.data(PropertyPathRole).toString();
         _editHadLocalEdit = index.data(HasLocalEditRole).toBool();
         _editCommitted = false;
-        _model->beginLocalEdit(_editPath);
+        _model->beginEditorPin(_editPath); // transient: Reset doesn't offer to undo it
         return w;
     }
 

@@ -122,8 +122,9 @@ int main(int argc, char** argv)
     }
 
     // ── Pressing Reset while an inline editor is OPEN must be safe ──────────────
-    // (An open editor frozen its row, so the button is enabled during editing; make
-    // sure clicking it then doesn't corrupt anything.)
+    // An open editor pins its row against live updates — a transient local edit
+    // that must NOT show the Reset button (it read as "undo my change", which it
+    // isn't). resetAll() through the API mid-edit must still be safe.
     {
         rpe::PropertyEditor editor;
         editor.setEditSink([](const QString&, const rttr::variant&) {}); // mirror-mode commits
@@ -153,18 +154,57 @@ int main(int argc, char** argv)
         view->edit(hpVal); // open the inline editor → freezes the row
         QCoreApplication::processEvents();
         const bool editorOpen = view->findChild<QSpinBox*>() != nullptr;
-        check("inline editor opened (row frozen)", editorOpen && m->hasAnyLocalEdit());
+        QToolButton* resetBtn = nullptr;
+        for (auto* b : editor.findChildren<QToolButton*>())
+            if (b->text() == QStringLiteral("Reset"))
+                resetBtn = b;
+        check("inline editor opened, its row pinned against live updates",
+              editorOpen && hpVal.siblingAtColumn(0).data(rpe::HasLocalEditRole).toBool());
+        check("...but that pin isn't a freeze: no Reset button while editing",
+              !m->hasAnyLocalEdit() && resetBtn && resetBtn->isHidden());
 
-        // Press Reset mid-edit — must not crash or corrupt state.
+        // resetAll() mid-edit (API) — must not crash or corrupt state.
         m->resetAll();
         QCoreApplication::processEvents();
-        check("Reset while editing releases the freeze", !m->hasAnyLocalEdit());
+        check("resetAll while editing releases the pin", !hpVal.siblingAtColumn(0).data(rpe::HasLocalEditRole).toBool());
         check("the open editor still exists after Reset", view->findChild<QSpinBox*>() != nullptr);
 
         // Close the editor (move selection away) — clean teardown, still no crash.
         view->setCurrentIndex(proxy->index(0, 0));
         QCoreApplication::processEvents();
         check("closing the editor after a mid-edit Reset is clean", !m->hasAnyLocalEdit());
+    }
+
+    // LocalEdit policy: COMMITTING an inline edit makes a real draft → Reset shows.
+    {
+        rpe::PropertyEditor editor;
+        editor.bindType(rttr::type::get<Comp>());
+        Comp c4 { 1, 2 };
+        editor.refresh(rttr::instance(c4));
+        editor.show();
+        QCoreApplication::processEvents();
+        auto* view = editor.findChild<QTreeView*>();
+        auto* proxy = view->model();
+        QModelIndex hpVal;
+        for (int r = 0; r < proxy->rowCount(); ++r)
+            if (proxy->index(r, 0).data(rpe::PropertyPathRole).toString() == QStringLiteral("hp"))
+                hpVal = proxy->index(r, 1);
+        QToolButton* resetBtn = nullptr;
+        for (auto* b : editor.findChildren<QToolButton*>())
+            if (b->text() == QStringLiteral("Reset"))
+                resetBtn = b;
+        view->setCurrentIndex(hpVal);
+        view->edit(hpVal);
+        QCoreApplication::processEvents();
+        auto* spin = view->findChild<QSpinBox*>();
+        check("LocalEdit: editing shows no Reset", spin && resetBtn->isHidden());
+        if (spin)
+        {
+            spin->setValue(42);
+            view->setCurrentIndex(proxy->index(0, 0)); // commit + close
+            QCoreApplication::processEvents();
+        }
+        check("LocalEdit: the committed draft shows Reset", !resetBtn->isHidden() && editor.model()->hasAnyLocalEdit());
     }
 
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);

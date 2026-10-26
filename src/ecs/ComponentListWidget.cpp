@@ -257,9 +257,13 @@ namespace rpe
                     p->save();
                     p->setRenderHint(QPainter::Antialiasing, true);
                     p->setPen(Qt::NoPen);
-                    p->setBrush(sel ? opt.palette.color(QPalette::HighlightedText) : opt.palette.color(QPalette::Highlight));
+                    // The ACTIVE accent: the list is usually unfocused while you type
+                    // in the property filter, and an inactive highlight is grey.
+                    const QColor accent = opt.palette.color(QPalette::Active, QPalette::Highlight);
+                    const QColor onAccent = opt.palette.color(QPalette::Active, QPalette::HighlightedText);
+                    p->setBrush(sel ? onAccent : accent);
                     p->drawRoundedRect(r, 8, 8);
-                    p->setPen(sel ? opt.palette.color(QPalette::Highlight) : opt.palette.color(QPalette::HighlightedText));
+                    p->setPen(sel ? accent : onAccent);
                     p->setFont(pillFont);
                     p->drawText(r, Qt::AlignCenter, pill);
                     p->restore();

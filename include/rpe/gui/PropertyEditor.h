@@ -135,8 +135,6 @@ namespace rpe
         // Ctrl = coarse; Esc during the drag restores the starting value. The
         // step is the property's Step hint (else 0.1 for floats, 1 for integers),
         // the result kept within its Min/Max hints. Read-only values don't scrub.
-        // Users can flip it too: "Drag names to change values" in the right-click
-        // menu (dragToScrubToggled reports it — e.g. to persist the choice).
         void setDragToScrubEnabled(bool on);
         bool isDragToScrubEnabled() const
         {
@@ -160,8 +158,6 @@ namespace rpe
         void searchAllToggled(bool on);
         // The current row changed: its path (PropertyPathRole), empty when none.
         void currentPathChanged(const QString& path);
-        // The user turned drag-to-scrub on/off from the right-click menu.
-        void dragToScrubToggled(bool on);
 
     private slots:
         void _onFilterChanged(const QString& text);
@@ -203,6 +199,7 @@ namespace rpe
         QLineEdit* _filter = nullptr;
         QToolButton* _resetBtn = nullptr;
         QToolButton* _scopeBtn = nullptr;
+        void _updateScopeIcon(); // drawn in the button's current text colour
         bool _searchAllAvailable = false;
         // Grouped view: recount each header's visible matches (coalesced).
         void _scheduleGroupCounts();

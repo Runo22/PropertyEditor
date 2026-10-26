@@ -48,9 +48,6 @@ namespace rpe
         _mirrorTimer->setInterval(33); // ~30 Hz GUI poll of the mirror
         connect(_mirrorTimer, &QTimer::timeout, this, &EntityComponentBrowser::_onMirrorPoll);
 
-        // The user flipped drag-to-scrub in the property menu: keep settings() true.
-        connect(_propertyEditor, &PropertyEditor::dragToScrubToggled, this, [this](bool on) { _settings.dragToScrub = on; });
-
         // Search all components (scope button + list counts).
         _propertyEditor->setSearchAllAvailable(true);
         connect(_propertyEditor, &PropertyEditor::filterTextChanged, this, &EntityComponentBrowser::_onSearchChanged);

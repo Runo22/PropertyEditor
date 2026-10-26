@@ -137,7 +137,7 @@ For an editor without the ECS browser (owned copy or in place), see
 
 | Policy | What a committed edit does |
 |---|---|
-| `EditPolicy::LocalEdit` (default) | kept as a **local draft**: the row shows your value (amber) and stops following live updates until *Reset to live* / *Reset All*. The object/world is never written. The toolbar's **Reset** button appears only while something is frozen |
+| `EditPolicy::LocalEdit` (default) | kept as a **local draft**: the row shows your value (amber) and stops following live updates until *Reset to live* / *Reset All*. The object/world is never written. The toolbar's **Reset** button appears only while something is frozen (a value being typed into an open editor isn't) |
 | `EditPolicy::WriteBack` | written straight into the bound object through the instance provider (optionally under `setWriteGuard` for objects another thread owns) |
 
 In **mirror mode** the browser sends edits to the simulation thread regardless

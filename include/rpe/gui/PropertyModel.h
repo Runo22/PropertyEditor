@@ -169,8 +169,14 @@ namespace rpe
 
         // ── Local edit / reset ──────────────────────────────────────────────────────
         void beginLocalEdit(const QString& path);
+        // The pin an open inline editor puts on its row (so live updates can't
+        // overwrite what you're typing) — a local edit too, but a transient one:
+        // hasAnyLocalEdit() doesn't count it until a commit turns it into a real
+        // draft (LocalEdit policy). Used by PropertyDelegate.
+        void beginEditorPin(const QString& path);
         void resetNode(const QString& path);
         void resetAll();
+        // Frozen values the user has (drafts, "Local edit") — not an open editor's pin.
         bool hasAnyLocalEdit() const;
 
         // ── QAbstractItemModel ───────────────────────────────────────────────────
@@ -226,6 +232,7 @@ namespace rpe
             return _grouped && node && node->parent() == _root.get();
         }
         bool _grouped = false;
+        QString _editorPinPath; // the row an open editor pinned (see beginEditorPin)
         QHash<const PropertyNode*, QString> _groupKeys; // header node → key
         QHash<QString, int> _groupCounts;
         std::function<rttr::instance(const QString&)> _groupInstanceProvider;

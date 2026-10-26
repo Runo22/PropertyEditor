@@ -85,7 +85,7 @@ namespace rpe
             // nothing). Full path ("game.Player", "game::Player") or a trailing part.
             QStringList preferredComponents;
             // Drag a number's NAME to change its value (PropertyEditor's drag to
-            // scrub). Users can also flip it from the property right-click menu.
+            // scrub). Host-controlled only — there is no in-UI toggle.
             bool dragToScrub = true;
             // Panel arrangement.
             Layout layout = Layout::Wide;

@@ -182,6 +182,7 @@ namespace rpe
         _grouped = false;
         _groupKeys.clear();
         _groupCounts.clear();
+        _editorPinPath.clear();
         _boundType = type;
         _expandedPaths.clear();
         if (type.is_valid())
@@ -201,6 +202,7 @@ namespace rpe
         _grouped = false;
         _groupKeys.clear();
         _groupCounts.clear();
+        _editorPinPath.clear();
         _boundType = rttr::type::get<void>();
         _expandedPaths.clear();
         endResetModel();
@@ -243,6 +245,7 @@ namespace rpe
         _grouped = true;
         _groupKeys.clear();
         _groupCounts.clear();
+        _editorPinPath.clear();
         for (const Group& g : groups)
         {
             // The header's path is "key<sep>", so its rows' paths come out as
@@ -763,9 +766,24 @@ namespace rpe
         emit localEditsChanged();
     }
 
+    void PropertyModel::beginEditorPin(const QString& path)
+    {
+        auto* node = _findNode(path);
+        if (!node || node->hasLocalEdit())
+        {
+            return; // already frozen by the user: that freeze is theirs, not the editor's
+        }
+        _editorPinPath = path;
+        beginLocalEdit(path);
+    }
+
     void PropertyModel::resetNode(const QString& path)
     {
         TypeUseScope scope; // see rpe/core/TypeRelease.h
+        if (path == _editorPinPath)
+        {
+            _editorPinPath.clear();
+        }
         auto* node = _findNode(path);
         if (!node || !node->hasLocalEdit())
         {
@@ -780,6 +798,7 @@ namespace rpe
     void PropertyModel::resetAll()
     {
         TypeUseScope scope; // see rpe/core/TypeRelease.h
+        _editorPinPath.clear();
         bool any = false;
         for (auto* node : std::as_const(_nodeByPath))
         {
@@ -801,7 +820,7 @@ namespace rpe
     {
         for (auto* node : std::as_const(_nodeByPath))
         {
-            if (node->hasLocalEdit())
+            if (node->hasLocalEdit() && node->path() != _editorPinPath)
             {
                 return true;
             }
@@ -963,6 +982,10 @@ namespace rpe
 
     bool PropertyModel::_applyEdit(PropertyNode* node, const rttr::variant& newVal)
     {
+        if (node->path() == _editorPinPath)
+        {
+            _editorPinPath.clear(); // committed: from here on it's an ordinary edit
+        }
         if (_editSink)
         {
             // Mirror mode: hand the edit off, show it optimistically, and resume

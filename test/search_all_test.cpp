@@ -24,6 +24,8 @@
 #include <rttr/registration.h>
 
 #include <QApplication>
+#include <QImage>
+#include <QPalette>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QSortFilterProxyModel>
@@ -31,6 +33,7 @@
 #include <QToolButton>
 #include <QTreeView>
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 
@@ -346,6 +349,63 @@ int main(int argc, char** argv)
 
     runBrowser(true);
     runBrowser(false);
+
+    // ── colours that must not depend on focus or on when styling happened ──────
+    printf("\n-- colours --\n");
+    {
+        // Windows-like: an INACTIVE highlight is grey. Typing in the filter leaves
+        // the tree inactive, and the match used to be painted in that grey.
+        QPalette pal = app.palette();
+        pal.setColor(QPalette::Active, QPalette::Highlight, QColor(0x30, 0x6c, 0xe6));
+        pal.setColor(QPalette::Inactive, QPalette::Highlight, QColor(0xc0, 0xc0, 0xc0));
+        app.setPalette(pal);
+        Physics ph;
+        rpe::PropertyEditor ed;
+        ed.editObject(ph);
+        ed.resize(400, 200);
+        ed.show();
+        ed.findChild<QLineEdit*>()->setFocus();
+        ed.setFilterText(QStringLiteral("speed"));
+        QCoreApplication::processEvents();
+        const QImage img = ed.view()->viewport()->grab().toImage();
+        int blue = 0;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < std::min(img.width(), 200); ++x)
+            {
+                const QColor c = img.pixelColor(x, y);
+                if (c.blue() > c.red() + 60 && c.blue() > c.green() + 30)
+                    ++blue;
+            }
+        check("the matched text is in the ACTIVE accent while the filter has focus (not the grey inactive one)", blue > 20);
+        app.setPalette(QPalette());
+    }
+    {
+        // The scope glyph is drawn in the button's text colour once styling is
+        // known — it used to start black under a dark style sheet.
+        app.setStyleSheet(QStringLiteral("QWidget { color: #e0e0e0; background: #202020; }"));
+        rpe::PropertyEditor ed;
+        ed.setSearchAllAvailable(true);
+        ed.show();
+        QCoreApplication::processEvents();
+        QToolButton* scope = nullptr;
+        for (auto* b : ed.findChildren<QToolButton*>())
+            if (b->isCheckable())
+                scope = b;
+        auto glyph = [&] {
+            const QImage icon = scope->icon().pixmap(32, 32).toImage();
+            QColor best(0, 0, 0, 0);
+            for (int y = 0; y < icon.height(); ++y)
+                for (int x = 0; x < icon.width(); ++x)
+                    if (icon.pixelColor(x, y).alpha() > best.alpha())
+                        best = icon.pixelColor(x, y);
+            return best;
+        };
+        check("the scope glyph starts in the styled text colour (light), not black", scope && glyph().lightness() > 160);
+        scope->click();
+        QCoreApplication::processEvents();
+        check("...and stays light when checked", glyph().lightness() > 160);
+        app.setStyleSheet(QString());
+    }
 
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);
     return g_fails ? 1 : 0;

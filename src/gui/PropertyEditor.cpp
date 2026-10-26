@@ -101,9 +101,14 @@ namespace rpe
 
                 const bool selected = o.state & QStyle::State_Selected;
                 const QColor base = o.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
-                // On a selected row the highlight colour IS the background: mark the
-                // match by weight there instead.
-                const QColor mark = selected ? base : o.palette.color(QPalette::Highlight).lighter(150);
+                // The ACTIVE accent, whatever has focus: typing in the filter leaves
+                // the tree inactive, and an inactive highlight is grey on Windows.
+                // Lightened on a dark background, darkened on a light one, so it
+                // reads as a tint of the text rather than a selection. On a selected
+                // row the accent IS the background: mark the match by weight there.
+                const QColor accent = o.palette.color(QPalette::Active, QPalette::Highlight);
+                const bool darkBase = o.palette.color(QPalette::Active, QPalette::Base).lightness() < 128;
+                const QColor mark = selected ? base : (darkBase ? accent.lighter(150) : accent.darker(115));
                 QString html;
                 const int at = needle.isEmpty() ? -1 : text.indexOf(needle, 0, Qt::CaseInsensitive);
                 if (at >= 0)
@@ -202,14 +207,17 @@ namespace rpe
             " border: 1px solid palette(highlight); border-radius: 3px; padding: 1px 6px; }"));
         _scopeBtn->setVisible(false);
         tb->addWidget(_scopeBtn);
+        // The glyph is drawn in the button's text colour — known only once the
+        // style sheet has been applied (polish), and again on any theme change.
+        _scopeBtn->installEventFilter(this);
         connect(_scopeBtn, &QToolButton::toggled, this, [this](bool on) {
-            _scopeBtn->setIcon(layersIcon(on ? palette().color(QPalette::HighlightedText) : palette().color(QPalette::Text)));
+            _updateScopeIcon();
             _scopeBtn->setText(on ? tr("All") : QString());
             _scopeBtn->setToolButtonStyle(on ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
             _filter->setPlaceholderText(on ? tr("Search all components…") : tr("Filter properties…"));
             emit searchAllToggled(on);
         });
-        _scopeBtn->setIcon(layersIcon(palette().color(QPalette::Text)));
+        _updateScopeIcon();
         auto* scopeKey = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F), this);
         scopeKey->setContext(Qt::WidgetWithChildrenShortcut);
         connect(scopeKey, &QShortcut::activated, this, [this] {
@@ -716,8 +724,22 @@ namespace rpe
         _scrubValue = QPersistentModelIndex();
     }
 
+    void PropertyEditor::_updateScopeIcon()
+    {
+        const QPalette& pal = _scopeBtn->palette();
+        const QColor c = _scopeBtn->isChecked() ? pal.color(QPalette::Active, QPalette::HighlightedText)
+                                                : pal.color(QPalette::Active, QPalette::ButtonText);
+        _scopeBtn->setIcon(layersIcon(c));
+    }
+
     bool PropertyEditor::eventFilter(QObject* obj, QEvent* ev)
     {
+        if (obj == _scopeBtn
+            && (ev->type() == QEvent::Polish || ev->type() == QEvent::PaletteChange || ev->type() == QEvent::StyleChange))
+        {
+            _updateScopeIcon();
+            return false;
+        }
         if (obj == _view->viewport() && _scrubEnabled)
         {
             switch (ev->type())
@@ -857,24 +879,10 @@ namespace rpe
 
     void PropertyEditor::_onContextMenu(const QPoint& pos)
     {
-        QMenu menu(this);
-        // A preference, not a row action: offered on empty space too.
-        const auto addScrubToggle = [this, &menu] {
-            QAction* a = menu.addAction(tr("Drag names to change values"));
-            a->setCheckable(true);
-            a->setChecked(_scrubEnabled);
-            a->setToolTip(tr("Drag a number's name left/right to change it (Shift = fine, Ctrl = coarse)."));
-            connect(a, &QAction::toggled, this, [this](bool on) {
-                setDragToScrubEnabled(on);
-                emit dragToScrubToggled(on);
-            });
-        };
         const QModelIndex proxyIdx = _view->indexAt(pos);
         const QModelIndex srcIdx = proxyIdx.isValid() ? _proxy->mapToSource(proxyIdx) : QModelIndex();
         if (!srcIdx.isValid())
         {
-            addScrubToggle();
-            menu.exec(_view->viewport()->mapToGlobal(pos));
             return;
         }
 
@@ -883,6 +891,7 @@ namespace rpe
         const QString name = srcIdx.siblingAtColumn(0).data(Qt::DisplayRole).toString();
         const QString value = srcIdx.siblingAtColumn(1).data(Qt::DisplayRole).toString();
 
+        QMenu menu(this);
         // Copy the row's text to the clipboard — available regardless of read-only /
         // pinning, since it never mutates anything.
         connect(menu.addAction(tr("Copy value")), &QAction::triggered, this,
@@ -917,8 +926,6 @@ namespace rpe
             menu.addSeparator();
         }
         connect(menu.addAction(tr("Reset All")), &QAction::triggered, this, &PropertyEditor::_onResetAll);
-        menu.addSeparator();
-        addScrubToggle();
         menu.exec(_view->viewport()->mapToGlobal(pos));
     }
 
