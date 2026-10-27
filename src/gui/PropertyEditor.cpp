@@ -233,8 +233,12 @@ namespace rpe
                 return;
             }
             setSearchAll(!isSearchAll());
-            _filter->setFocus();
-            _filter->selectAll();
+            // Caret at the end, text NOT selected — like Tab back into a filter box.
+            // Selected text is drawn in the palette's HighlightedText, which many
+            // dark palettes leave black: the filter text looked like it turned black.
+            _filter->setFocus(Qt::ShortcutFocusReason);
+            _filter->deselect();
+            _filter->end(false);
         });
 
         _resetBtn = new QToolButton(_toolbar);

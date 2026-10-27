@@ -24,6 +24,7 @@
 #include <rttr/registration.h>
 
 #include <QApplication>
+#include <QKeyEvent>
 #include <QImage>
 #include <QPalette>
 #include <QLineEdit>
@@ -410,6 +411,23 @@ int main(int argc, char** argv)
         const int during = countOrange();
         check("names keep the style sheet's ::item colour while filtering", before > 20 && during > 20);
         app.setStyleSheet(QString());
+    }
+    {
+        // Ctrl+Shift+F focuses the filter WITHOUT selecting its text: selected text
+        // is drawn in HighlightedText, which many dark palettes set to black.
+        rpe::PropertyEditor ed;
+        ed.setSearchAllAvailable(true);
+        ed.show();
+        auto* f = ed.findChild<QLineEdit*>();
+        f->setText(QStringLiteral("speed"));
+        ed.activateWindow();
+        ed.view()->setFocus();
+        QCoreApplication::processEvents();
+        QKeyEvent press(QEvent::KeyPress, Qt::Key_F, Qt::ControlModifier | Qt::ShiftModifier);
+        QCoreApplication::sendEvent(ed.view(), &press); // the shortcut map sees it as a key press
+        QCoreApplication::processEvents();
+        check("Ctrl+Shift+F turns the scope on and focuses the filter", ed.isSearchAll() && f->hasFocus());
+        check("...with the caret at the end and nothing selected", !f->hasSelectedText() && f->cursorPosition() == 5);
     }
     {
         // The scope glyph is drawn in the button's text colour once styling is
