@@ -632,7 +632,8 @@ int main(int argc, char** argv)
         QMetaObject::invokeMethod(&ed, "_onContextMenu", Qt::DirectConnection, Q_ARG(QPoint, ed.view()->visualRect(levelVal).center()));
         check("\"Local edit\" isn't offered on a read-only row", !offered);
 
-        // Toolbar: the filter box keeps its width when Reset appears / the scope toggles.
+        // Toolbar: hidden Reset takes no room (the filter box shortens only when it
+        // shows); toggling the scope doesn't change the filter box's width.
         ed.setSearchAllAvailable(true);
         QCoreApplication::processEvents();
         auto* filter = ed.findChild<QLineEdit*>();
@@ -640,12 +641,15 @@ int main(int argc, char** argv)
         ed.model()->beginLocalEdit(QStringLiteral("speed"));
         QCoreApplication::processEvents();
         const int w1 = filter->width();
-        ed.setSearchAll(true);
+        ed.model()->resetAll();
         QCoreApplication::processEvents();
         const int w2 = filter->width();
-        ed.model()->resetAll();
+        ed.setSearchAll(true);
+        QCoreApplication::processEvents();
+        const int w3 = filter->width();
         ed.setSearchAll(false);
-        check("the filter box keeps its width as Reset shows/hides and the scope toggles", w0 == w1 && w1 == w2);
+        check("hidden Reset leaves no gap: the filter box is shorter only while Reset shows", w1 < w0 && w2 == w0);
+        check("toggling the scope doesn't change the filter box's width", w3 == w2);
         QToolButton* scope = nullptr;
         for (auto* b : ed.findChildren<QToolButton*>())
             if (b->isCheckable())

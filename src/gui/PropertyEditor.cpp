@@ -249,13 +249,8 @@ namespace rpe
 
         _resetBtn = new QToolButton(_toolbar);
         _resetBtn->setText(tr("Reset"));
-        // Shown only while something is frozen — but its room is kept, so the
-        // filter box doesn't change width every time a value freezes or resumes.
-        {
-            QSizePolicy sp = _resetBtn->sizePolicy();
-            sp.setRetainSizeWhenHidden(true);
-            _resetBtn->setSizePolicy(sp);
-        }
+        // Shown only while something is frozen; hidden, it takes no room — the
+        // filter box gets the width and gives it back when Reset appears.
         // Spell out what "Reset" does, since the short label can read like "reset to
         // defaults": it only releases FROZEN values and resumes live updates — it does
         // not change any value in the world.
