@@ -35,9 +35,11 @@
 // ecs (optional)
 #if defined(RPE_WITH_FLECS)
 #include "rpe/ecs/ComponentListWidget.h"
+#include "rpe/ecs/ComponentScan.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityComponentBrowser.h"
 #include "rpe/ecs/EntityListWidget.h"
+#include "rpe/ecs/HealthCheck.h"
 #include "rpe/ecs/PinnedPropertiesWidget.h"
 #endif
 

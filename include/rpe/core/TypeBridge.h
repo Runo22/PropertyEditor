@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace rpe
@@ -135,10 +136,10 @@ namespace rpe
     //    unit, where T is complete), so the two share one lifetime.
     //  • registerType is idempotent — re-registering a type just overwrites its
     //    entry, so plugin add/remove/add cycles are harmless.
-    //  • unregisterType only removes the bridge entry; it does NOT touch RTTR's own
-    //    registration. You rarely need it: RTTR has no unregister and its property
-    //    accessors point into the defining module, so the safe pattern is to keep
-    //    RTTR + bridge registrations alive for the process (host-owned).
+    //  • Unloading a plugin: call unregisterType for each of its types FIRST. RTTR
+    //    unregisters and frees a module's types when the module unloads, so rpe
+    //    must have let go of them by then — unregisterType is that release point
+    //    (see rpe/core/TypeRelease.h). It does not touch RTTR's own registration.
     //  • SINGLE-REGISTRY REQUIREMENT: build rpe_core as a SHARED library so the host
     //    and every plugin link the same registry instance. With a static rpe_core
     //    linked separately into each module, each gets its own copy and the browser
@@ -153,7 +154,59 @@ namespace rpe
     //  down is safe (no "exception on destruction"). The one rule that remains: do
     //  not CALL a hook (wrap/clone, i.e. inspect a component) after its plugin has
     //  unloaded — the code it points at is gone. Call unregisterType() in the
-    //  plugin's unload path, or stop inspecting its components first.
+    //  plugin's unload path: it also releases everything rpe holds of the type.
+    //
+    //  ── Plugin-unload rules: who OWNS an rttr::type ─────────────────────────────
+    //  RTTR keeps one registration_manager PER MODULE (DLL / .so) — a function-local
+    //  static that owns every type_data, property and method the module registered
+    //  FIRST. An rttr::type is only a pointer to that type_data, and type::get<T>()
+    //  caches it in another per-module static. When a module is really unloaded, its
+    //  registration_manager destructor unregisters AND FREES all of that, including
+    //  types other modules still use. Every rttr::type copy held elsewhere (another
+    //  plugin's type::get<T>() cache, the host's) then dangles, and the next
+    //  is_wrapper()/get_name()/get_properties() reads freed memory: an access
+    //  violation (no C++ exception, try/catch won't help). Which module owns a
+    //  shared type depends on LOAD ORDER, so the crash comes and goes.
+    //
+    //   1. A component used by more than one module is owned by a module that never
+    //      unloads: the host, or a common components library loaded before any
+    //      plugin. Its RTTR_REGISTRATION and registerType<T>() live THERE; plugins
+    //      only use the type and don't register it themselves. (rpe_core owns the
+    //      common types it names itself — QString, QColor, std::string, … — at load.)
+    //   2. Simplest: don't really unload a plugin that registers RTTR types. Pin it
+    //      (QLibrary/QPluginLoader::setLoadHints(QLibrary::PreventUnloadHint),
+    //      GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_PIN, ...), RTLD_NODELETE). It
+    //      can still be "removed" — stop its systems, unregisterType its types — while
+    //      its code and RTTR data stay mapped.
+    //   3. If a plugin IS unloaded, BEFORE FreeLibrary / dlclose:
+    //        a. remove its components from the world (their hooks are its code);
+    //        b. unregisterType() every type it bridged, from an explicit shutdown
+    //           function — not from a global/static destructor: those run during
+    //           the unload itself, in an order you don't control relative to RTTR's
+    //           own registration_manager. This drops everything rpe holds of them
+    //           (TypeRelease.h), on whatever thread you call it from;
+    //        c. drop what YOUR code holds of them (cached rttr::variant / type /
+    //           property — an rttr::variant runs code from the module that created
+    //           it to copy, read its type or destroy itself), or register an
+    //           addTypeReleaseHandler to do it at step b;
+    //        d. unload.
+    //      This only works together with rule 1: unregistering can't repair another
+    //      module's type::get<T>() cache once the type_data under it is freed.
+    //   4. Don't unregisterType() a type another live module still uses. The registry
+    //      holds ONE entry per type (no reference count): the first module to
+    //      unregister removes it for everyone, and a later registerType<T>() simply
+    //      overwrites the entry, so the hooks belong to whoever registered LAST.
+    //  A LATE unregisterType() — a second shutdown, or after the module is already
+    //  gone — is safe: it compares type ids only, and skips the release when RTTR no
+    //  longer has the type (too late to release then; that's rule 3's order).
+    //
+    //  Platform note: on Windows each DLL always gets its own copy of those RTTR
+    //  statics. With GCC/Clang default visibility the copies can be merged across
+    //  .so files (and "unique" symbols can pin a .so in memory), so the per-module
+    //  cleanup may never happen on Linux — the bug can hide there and crash on
+    //  Windows. Build plugins with hidden visibility (-fvisibility=hidden
+    //  -fvisibility-inlines-hidden) to get the Windows behaviour on Linux too;
+    //  test/plugin_module_unload_test.cpp and plugin_reload_test.cpp do exactly that.
     // ─────────────────────────────────────────────────────────────────────────────
     class TypeBridge
     {
@@ -165,13 +218,26 @@ namespace rpe
 
         static void registerEntry(rttr::type t, Wrapper wrap, Cloner clone);
 
+        // T may be MOVE-ONLY (copy constructor deleted). Inspection and editing work
+        // through a T* and copy only individual property values, never T itself;
+        // the one hook that needs a copy is clone(), which then returns an invalid
+        // variant for T. Nothing in rpe calls clone().
         template <class T>
         static void registerType()
         {
+            Cloner cloner = nullptr;
+            if constexpr (std::is_copy_constructible_v<T>)
+            {
+                cloner = +[](void* p) -> rttr::variant { return rttr::variant(*static_cast<T*>(p)); };
+            }
+            else
+            {
+                cloner = +[](void*) -> rttr::variant { return rttr::variant(); };
+            }
             registerEntry(
                 rttr::type::get<T>(),
                 +[](void* p) -> rttr::variant { return rttr::variant(static_cast<T*>(p)); },
-                +[](void* p) -> rttr::variant { return rttr::variant(*static_cast<T*>(p)); });
+                cloner);
             // Alias the type by its REAL C++ name ("game::Stats"), so a flecs path
             // resolves to the right type even when the RTTR registration used a
             // different — or namespace-stripped, or duplicated — name. Without this,
@@ -214,7 +280,12 @@ namespace rpe
         // copied into the registry, so no null-termination or lifetime is assumed.
         static void registerAlias(rttr::type t, std::string_view flecsName);
 
-        // Remove only the bridge entry for `t` (RTTR registration is untouched).
+        // Remove the bridge entry for `t` AND release everything rpe holds of it —
+        // property trees, values, open editors' starting values, queued mirror
+        // data — on the calling thread, before returning. Call it before unloading
+        // the module that defines `t` (see rpe/core/TypeRelease.h and the
+        // "Plugin-unload rules" above). RTTR's own registration is untouched. A
+        // late call (already unregistered, or the module already gone) is safe.
         static void unregisterType(rttr::type t);
         template <class T>
         static void unregisterType()
@@ -230,13 +301,58 @@ namespace rpe
         // string source (const char* / std::string / view).
         static rttr::type resolveByName(std::string_view flecsName);
 
+        // resolveByName, showing its work — for diagnostics (see rpe/ecs/HealthCheck.h),
+        // never the hot path. `via` is the rung that decided; `candidates` lists every
+        // bridged type that matched AT that rung (by RTTR name), so more than one at
+        // ShortName means the choice between same-leaf types was a tie-break.
+        struct ResolveExplanation
+        {
+            enum class Via
+            {
+                None,         // nothing bridged matches
+                Alias,        // an explicit or C++-name alias
+                ExactName,    // the full RTTR name, separator-insensitively
+                ScopedSuffix, // a scope-aligned tail of a longer RTTR name
+                ShortName     // the leaf only — ambiguous if several share it
+            };
+            rttr::type type = rttr::type::get_by_name(std::string()); // invalid if None
+            Via via = Via::None;
+            std::vector<std::string> candidates;
+        };
+        static ResolveExplanation explainResolve(std::string_view flecsName);
+
         // Wrap `obj` as a variant holding a typed pointer (invalid if unregistered).
         static rttr::variant wrap(rttr::type t, void* obj);
 
         // Deep-copy the pointee into a self-contained value variant (invalid if
-        // unregistered). The result owns its data and is safe to hand to another
-        // thread.
+        // unregistered, or if the type is move-only). The result owns its data and
+        // is safe to hand to another thread.
         static rttr::variant clone(rttr::type t, void* obj);
+
+        // ── Read-only types ──────────────────────────────────────────────────────
+        // Lock a type against editing: the editor shows its values (normal colour,
+        // a lock mark, the reason in a tooltip) but never opens an editor for them —
+        // for a component type, the whole component; for any other struct type,
+        // every place it appears inside a component. The mirror refuses edits to it
+        // on the sim thread too, so API callers can't write around the UI.
+        //
+        // Runtime, and independent of registration order: the host can lock a
+        // plugin's type before the plugin loads (by name), without touching the
+        // plugin's code. The RTTR-side equivalent, for a type you register yourself,
+        // is class metadata: class_<T>("T")(metadata(rpe::hint::ReadOnly, true)).
+        static void setReadOnly(rttr::type t, bool readOnly = true);
+        template <class T>
+        static void setReadOnly(bool readOnly = true)
+        {
+            setReadOnly(rttr::type::get<T>(), readOnly);
+        }
+        // By name ("audio::Speaker" / "audio.Speaker"); matched against a type's RTTR
+        // name, its C++ name and its aliases, so it works before the type exists.
+        static void setReadOnly(std::string_view typeName, bool readOnly = true);
+        static bool isReadOnly(rttr::type t);
+        // Bumped on every setReadOnly change — lets views refresh cached decisions.
+        // (Separate from registryGeneration: locking a type changes no resolution.)
+        static uint64_t readOnlyGeneration();
 
         // Monotonic counter bumped by every registration change (registerEntry,
         // registerAlias, unregisterType). Lets a consumer cache derived data (e.g.

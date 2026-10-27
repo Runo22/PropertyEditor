@@ -31,6 +31,11 @@ namespace rpe
     class MirrorChannel
     {
     public:
+        MirrorChannel();
+        ~MirrorChannel();
+        MirrorChannel(const MirrorChannel&) = delete;
+        MirrorChannel& operator=(const MirrorChannel&) = delete;
+
         struct EntityEntry
         {
             qulonglong id = 0;
@@ -46,6 +51,24 @@ namespace rpe
         };
         struct ValueUpdate
         {
+            QString path;
+            rttr::variant value;
+            // Which entity + component the value was READ from. A consumer that has
+            // switched selection since must drop it: the producer may have read the
+            // old target in a pump that raced the switch, and the same leaf path
+            // exists on the new one. 0 / empty = unknown (accept).
+            qulonglong entity = 0;
+            QString component;
+        };
+
+        // A value edit, addressed to the entity + component it was MADE on. The target
+        // is fixed when the edit is queued, never at apply time: an inline editor
+        // commits on focus-out, i.e. in the very click that selects another entity, so
+        // "whatever is selected when the sim gets round to it" is often the wrong one.
+        struct EditRequest
+        {
+            qulonglong entity = 0;
+            QString component; // the selection key (full path, or "Rel (Target)")
             QString path;
             rttr::variant value;
         };
@@ -149,16 +172,50 @@ namespace rpe
             rttr::variant value;
         };
 
+        // ── Search all components ────────────────────────────────────────────────
+        // While a search is set, the producer searches every bridged component of
+        // `entity` for rows whose name or value text contains `text` (the property
+        // filter's rule — see rpe/core/PropertySearch.h) and publishes the hits:
+        // a round every ~250 ms, sliced across pumps so no single frame pays for it.
+        struct SearchHit
+        {
+            QString component; // the component's selection key
+            QString path;      // row path inside it
+            rttr::variant value;
+        };
+        struct SearchResults
+        {
+            qulonglong entity = 0;
+            QString text;
+            std::vector<SearchHit> hits;
+        };
+        // Empty text (or entity 0) stops searching.
+        void setSearch(qulonglong entity, const QString& text);
+        // Start a round now (e.g. right after an edit, to echo it promptly).
+        void requestSearchRefresh();
+        // The latest complete round, if one finished since the last poll.
+        bool pollSearchResults(SearchResults& out);
+
         // ── GUI thread: intent ───────────────────────────────────────────────────
         void setRequiredComponent(const QString& componentName);
         void setInterest(qulonglong entity, const QString& componentName, const QStringList& leafPaths);
         void clearInterest();
+        // Edit the leaf `path` of the current interest (entity + component as set by the
+        // last setInterest) — captured NOW, so a later selection change can't redirect it.
         void queueEdit(const QString& path, rttr::variant value);
+        // Edit the leaf `path` of an explicit entity + component.
+        void queueEdit(qulonglong entity, const QString& component, const QString& path, rttr::variant value);
         // The consumer reset its view (e.g. re-selected the same entity/component,
         // or rebound the property tree). The producer dedups publishes against what
         // it last sent, so without this it would NOT resend identical data and the
         // reset view would stay empty. Call this to force one full resend.
         void requestResync();
+        // Ask the producer to rescan the add-component catalog and the spawnable
+        // prefabs on its next pump — e.g. because an Add menu is opening. Both are
+        // otherwise rescanned only on change (component count / bridge registry) and
+        // on a slow safety interval, which can't see every change (a renamed
+        // component, or one unloaded and another loaded in the same pump).
+        void requestCatalogRefresh();
 
         // Structural component edits (add/remove a component on an entity). Applied
         // on the simulation thread by the producer — structural world changes are
@@ -232,11 +289,15 @@ namespace rpe
             QString required;
             QStringList paths;
             QStringList prefabGroups;                             // prefab grouping tags
-            std::vector<std::pair<QString, rttr::variant>> edits; // drained
+            std::vector<EditRequest> edits;                       // drained
             std::vector<StructuralEdit> structurals;              // drained
             QVector<PinKey> pins;                                 // current pin set
             std::vector<std::pair<PinKey, rttr::variant>> pinEdits; // drained
             bool resync = false; // consumer reset its view → resend everything
+            bool catalogRefresh = false; // rescan catalog + prefabs now
+            qulonglong searchEntity = 0; // search all components (see setSearch)
+            QString searchText;
+            bool searchNow = false;
         };
         Intent takeIntent();
         void publishEntities(const QVector<EntityEntry>& entities);
@@ -250,6 +311,7 @@ namespace rpe
         void publishCatalog(const QStringList& catalog); // legacy → non-tag entries
         void publishCatalogEntries(const QVector<CatalogEntry>& entries);
         void publishPrefabs(const QVector<PrefabEntry>& prefabs);
+        void publishSearchResults(SearchResults&& results);
         void markProducerGone()
         {
             _producerAlive.store(false, std::memory_order_release);
@@ -264,11 +326,15 @@ namespace rpe
         QStringList _inPaths;
         QString _required;
         QStringList _prefabGroups;
-        std::vector<std::pair<QString, rttr::variant>> _edits;
+        std::vector<EditRequest> _edits;
         std::vector<StructuralEdit> _structurals;
         QVector<PinKey> _pins;
         std::vector<std::pair<PinKey, rttr::variant>> _pinEdits;
         bool _resync = false; // set by requestResync(), drained by takeIntent()
+        qulonglong _searchEntity = 0;
+        QString _searchText;
+        bool _searchNow = false;
+        bool _catalogRefresh = false;
 
         // sim -> GUI
         QVector<EntityEntry> _outEntities;
@@ -281,13 +347,20 @@ namespace rpe
         bool _outPrefabsDirty = false;
         // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
         // consumer can't make this grow unbounded.
-        QHash<QString, rttr::variant> _outValues;
+        QHash<QString, ValueUpdate> _outValues; // coalesced by path; carries its target
         // Same idea for pins, keyed by "entity|component|path".
         QHash<QString, PinValue> _outPinValues;
         // Pins whose target vanished, coalesced by the same key (drained by the GUI).
         QHash<QString, PinKey> _outDeadPins;
+        SearchResults _outSearch; // latest complete search round
+        bool _outSearchDirty = false;
 
         std::atomic<bool> _producerAlive { true };
+
+        // Type release (rpe/core/TypeRelease.h): drop every queued value — a value
+        // read through a plugin's property calls into the plugin when destroyed.
+        int _releaseHandle = 0;
+        void _onTypesReleased();
     };
 
 } // namespace rpe

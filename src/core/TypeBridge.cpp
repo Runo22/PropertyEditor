@@ -1,9 +1,12 @@
 #include "rpe/core/TypeBridge.h"
+#include "rpe/core/TypeRelease.h"
 
+#include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <string>
-#include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace rpe
 {
@@ -16,6 +19,14 @@ namespace rpe
             rttr::type type = rttr::type::get<void>();
             TypeBridge::Wrapper wrap = nullptr;
             TypeBridge::Cloner clone = nullptr;
+            // The type's name in the three forms the resolution ladder compares
+            // against, computed ONCE at registration. The ladder visits every entry
+            // on a miss; deriving these there allocated three strings per entry per
+            // lookup. (Plain std::strings owned by rpe_core — destroying them never
+            // calls into a plugin, see the unload notes in TypeBridge.h.)
+            std::string fullName; // as registered with RTTR ("game::Transform")
+            std::string normFull; // separators normalised to "::"
+            std::string leaf;     // last scope segment ("Transform")
         };
 
         struct Registry
@@ -27,7 +38,30 @@ namespace rpe
             std::unordered_map<std::string, rttr::type::type_id> aliases;
             // Bumped on every registration change; atomic so readers skip the mutex.
             std::atomic<uint64_t> generation { 0 };
+            // Memo of resolveByName, hits AND misses, keyed by the name exactly as
+            // given. A miss is the expensive case — it walks the whole registry three
+            // times, allocating per entry — and it is also the COMMON one: most flecs
+            // components in a real world have no RTTR bridge, and the mirror asks
+            // about every one of them on each catalog / bridged-set scan. Cleared on
+            // every registration change, so it can never serve a stale answer.
+            struct Resolved
+            {
+                bool hit = false;
+                rttr::type::type_id id {};
+            };
+            std::unordered_map<std::string, Resolved> resolved;
+
+            // Read-only types: by type id, and by (normalised) name for types the
+            // host locks before they exist. See TypeBridge::setReadOnly.
+            std::unordered_set<rttr::type::type_id> readOnlyIds;
+            std::unordered_set<std::string> readOnlyNames;
+            std::atomic<uint64_t> readOnlyGeneration { 0 };
         };
+
+        // Bound on the memo: a world has a few thousand component names; anything far
+        // beyond that means callers are feeding unique strings, so start over rather
+        // than grow without limit.
+        constexpr size_t kMaxResolved = 65536;
 
         Registry& registry()
         {
@@ -91,7 +125,15 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        r.map[t.get_id()] = Entry { t, wrap, clone };
+        Entry entry;
+        entry.type = t;
+        entry.wrap = wrap;
+        entry.clone = clone;
+        entry.fullName = t.get_name().to_string();
+        entry.normFull = normalizeScopes(entry.fullName);
+        entry.leaf = shortName(entry.fullName);
+        r.map[t.get_id()] = std::move(entry);
+        r.resolved.clear();
         r.generation.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -106,25 +148,67 @@ namespace rpe
         // Store normalised ("::") so an alias registered either way matches a flecs
         // path spelled the other way ("game::Stats" alias ↔ "game.Stats" path).
         r.aliases[normalizeScopes(std::string(flecsName))] = t.get_id();
+        r.resolved.clear();
         r.generation.fetch_add(1, std::memory_order_relaxed);
     }
 
+    namespace
+    {
+        // Is a type with this id still registered in RTTR? Compares ids only, so it
+        // is safe for a type whose module has unloaded (RTTR dropped it then).
+        bool rttrStillHas(rttr::type::type_id id)
+        {
+            for (const rttr::type& live : rttr::type::get_types())
+            {
+                if (live.get_id() == id)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    } // namespace
+
     void TypeBridge::unregisterType(rttr::type t)
     {
-        if (!t.is_valid())
+        // Key on the id ALONE — never t.is_valid()/get_name() up front. get_id() is
+        // just the type_data address, while those dereference it, and a late call
+        // (a second shutdown, a static destructor) may come after the module that
+        // owned the type_data has freed it. An invalid type has id 0 and matches
+        // nothing.
+        const auto id = t.get_id();
+        if (id == 0)
         {
             return;
         }
-        auto& r = registry();
-        std::lock_guard<std::mutex> lk(r.mutex);
-        r.map.erase(t.get_id());
-        // Drop any aliases pointing at this type so a stale name can't resolve to a
-        // freed (unloaded-plugin) entry.
-        for (auto it = r.aliases.begin(); it != r.aliases.end();)
         {
-            it = (it->second == t.get_id()) ? r.aliases.erase(it) : std::next(it);
+            auto& r = registry();
+            std::lock_guard<std::mutex> lk(r.mutex);
+            r.map.erase(id);
+            // Drop any aliases pointing at this type so a stale name can't resolve to a
+            // freed (unloaded-plugin) entry.
+            for (auto it = r.aliases.begin(); it != r.aliases.end();)
+            {
+                it = (it->second == id) ? r.aliases.erase(it) : std::next(it);
+            }
+            // A type lock by TYPE dies with it (its id is an address RTTR may reuse);
+            // a lock by NAME survives and applies to the reloaded type.
+            r.readOnlyIds.erase(id);
+            r.resolved.clear();
+            r.generation.fetch_add(1, std::memory_order_relaxed);
         }
-        r.generation.fetch_add(1, std::memory_order_relaxed);
+        // The release point: everything rpe holds of `t` is dropped now, while the
+        // module that defines it is still loaded (see rpe/core/TypeRelease.h).
+        // Bridged or not (a plugin object shown through editObject<T> or a
+        // VariantEditor holds its type too), as long as RTTR still has the type:
+        // if its module is already gone, the type_data is freed and reading it to
+        // release anything would crash — that's the "unregister BEFORE unloading"
+        // rule, too late to help here. A second call releases again; the handlers
+        // find nothing left, which is harmless.
+        if (rttrStillHas(id))
+        {
+            detail::releaseTypes({ t });
+        }
     }
 
     uint64_t TypeBridge::registryGeneration()
@@ -132,89 +216,170 @@ namespace rpe
         return registry().generation.load(std::memory_order_relaxed);
     }
 
+    namespace
+    {
+        rttr::type resolveLocked(Registry& r, const std::string& name,
+                                 TypeBridge::ResolveExplanation* why = nullptr);
+    } // namespace
+
     rttr::type TypeBridge::resolveByName(std::string_view flecsName)
     {
         if (flecsName.empty())
         {
             return rttr::type::get_by_name(std::string()); // invalid
         }
-        const std::string name(flecsName);
+        std::string name(flecsName);
 
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
 
-        const std::string normName = normalizeScopes(name);
-
-        // 1) Alias wins — an explicit registerType<T>(name)/registerAlias, or the
-        //    automatic C++-type-name alias registerType<T>() records. The latter is
-        //    what keeps two types apart when their RTTR names are identical (the RTTR
-        //    name is whatever was registered; the C++ name always carries the
-        //    namespace). Matched separator-insensitively.
-        if (const auto a = r.aliases.find(normName); a != r.aliases.end())
+        // Memo first — see Registry::resolved. The answer is a pure function of the
+        // name and the registry contents, and every registry change clears the memo.
+        if (const auto m = r.resolved.find(name); m != r.resolved.end())
         {
-            if (const auto e = r.map.find(a->second); e != r.map.end())
+            if (m->second.hit)
             {
-                return e->second.type;
+                if (const auto e = r.map.find(m->second.id); e != r.map.end())
+                {
+                    return e->second.type;
+                }
+            }
+            else
+            {
+                return rttr::type::get_by_name(std::string()); // cached miss
             }
         }
-
-        // 2) Exact full-name match, separator-insensitive: a flecs path like
-        //    "game.Transform" matches the RTTR type "game::Transform". This is the
-        //    UNAMBIGUOUS path — pass the full flecs component path here and two
-        //    components that share a short name ("Panel") still resolve correctly.
-        for (const auto& [id, entry] : r.map)
+        const rttr::type t = resolveLocked(r, name);
+        if (r.resolved.size() >= kMaxResolved)
         {
-            if (normalizeScopes(entry.type.get_name().to_string()) == normName)
-            {
-                return entry.type;
-            }
+            r.resolved.clear();
         }
+        r.resolved.emplace(std::move(name), Registry::Resolved { t.is_valid(), t.is_valid() ? t.get_id() : rttr::type::type_id {} });
+        return t;
+    }
 
-        // 2.5) Scoped-SUFFIX match: the flecs path is a trailing, scope-aligned part of
-        //      the RTTR full name (flecs "game.Transform" ↔ RTTR "app::game::Transform").
-        //      This STILL disambiguates same-leaf types by namespace, unlike the bare
-        //      short-name fallback. Deterministic: closest (shortest) full name wins,
-        //      ties broken lexicographically — so debug and release always agree.
+    namespace
+    {
+        // The resolution ladder itself. Caller holds r.mutex.
+        rttr::type resolveLocked(Registry& r, const std::string& name, TypeBridge::ResolveExplanation* why)
         {
-            const std::string suffix = "::" + normName;
+            using Via = TypeBridge::ResolveExplanation::Via;
+            const auto explain = [&](Via via, rttr::type t) {
+                if (why)
+                {
+                    why->via = via;
+                    why->type = t;
+                }
+                return t;
+            };
+            const std::string normName = normalizeScopes(name);
+
+            // 1) Alias wins — an explicit registerType<T>(name)/registerAlias, or the
+            //    automatic C++-type-name alias registerType<T>() records. The latter is
+            //    what keeps two types apart when their RTTR names are identical (the RTTR
+            //    name is whatever was registered; the C++ name always carries the
+            //    namespace). Matched separator-insensitively.
+            if (const auto a = r.aliases.find(normName); a != r.aliases.end())
+            {
+                if (const auto e = r.map.find(a->second); e != r.map.end())
+                {
+                    if (why)
+                    {
+                        why->candidates.push_back(e->second.fullName);
+                    }
+                    return explain(Via::Alias, e->second.type);
+                }
+            }
+
+            // 2) Exact full-name match, separator-insensitive: a flecs path like
+            //    "game.Transform" matches the RTTR type "game::Transform". This is the
+            //    UNAMBIGUOUS path — pass the full flecs component path here and two
+            //    components that share a short name ("Panel") still resolve correctly.
+            for (const auto& [id, entry] : r.map)
+            {
+                if (entry.normFull == normName)
+                {
+                    if (why)
+                    {
+                        why->candidates.push_back(entry.fullName);
+                    }
+                    return explain(Via::ExactName, entry.type);
+                }
+            }
+
+            // 2.5) Scoped-SUFFIX match: the flecs path is a trailing, scope-aligned part of
+            //      the RTTR full name (flecs "game.Transform" ↔ RTTR "app::game::Transform").
+            //      This STILL disambiguates same-leaf types by namespace, unlike the bare
+            //      short-name fallback. Deterministic: closest (shortest) full name wins,
+            //      ties broken lexicographically — so debug and release always agree.
+            {
+                const std::string suffix = "::" + normName;
+                rttr::type best = rttr::type::get_by_name(std::string());
+                std::string bestFull;
+                for (const auto& [id, entry] : r.map)
+                {
+                    const std::string& full = entry.normFull;
+                    const bool matches = full.size() > suffix.size()
+                        && full.compare(full.size() - suffix.size(), suffix.size(), suffix) == 0;
+                    if (matches && why)
+                    {
+                        why->candidates.push_back(entry.fullName);
+                    }
+                    if (matches
+                        && (!best.is_valid() || full.size() < bestFull.size()
+                            || (full.size() == bestFull.size() && full < bestFull)))
+                    {
+                        best = entry.type;
+                        bestFull = full;
+                    }
+                }
+                if (best.is_valid())
+                {
+                    return explain(Via::ScopedSuffix, best);
+                }
+            }
+
+            // 3) Short-name (leaf) fallback — AMBIGUOUS when two bridged types share a leaf
+            //    ("game::Panel" vs "ui::Panel") and only the leaf was given. Pick the
+            //    smallest full name DETERMINISTICALLY (unordered_map order otherwise varies
+            //    between builds — the classic "works in debug, wrong in release"). Prefer a
+            //    full path (step 2) or a scoped suffix (2.5) so this is never reached.
+            const std::string target = shortName(name);
             rttr::type best = rttr::type::get_by_name(std::string());
             std::string bestFull;
             for (const auto& [id, entry] : r.map)
             {
-                const std::string full = normalizeScopes(entry.type.get_name().to_string());
-                if (full.size() > suffix.size()
-                    && full.compare(full.size() - suffix.size(), suffix.size(), suffix) == 0
-                    && (!best.is_valid() || full.size() < bestFull.size()
-                        || (full.size() == bestFull.size() && full < bestFull)))
+                const std::string& full = entry.fullName;
+                if (entry.leaf == target && why)
+                {
+                    why->candidates.push_back(full);
+                }
+                if (entry.leaf == target && (!best.is_valid() || full < bestFull))
                 {
                     best = entry.type;
                     bestFull = full;
                 }
             }
-            if (best.is_valid())
-            {
-                return best;
-            }
+            return best.is_valid() ? explain(Via::ShortName, best) : rttr::type::get_by_name(std::string()); // invalid
         }
+    } // namespace
 
-        // 3) Short-name (leaf) fallback — AMBIGUOUS when two bridged types share a leaf
-        //    ("game::Panel" vs "ui::Panel") and only the leaf was given. Pick the
-        //    smallest full name DETERMINISTICALLY (unordered_map order otherwise varies
-        //    between builds — the classic "works in debug, wrong in release"). Prefer a
-        //    full path (step 2) or a scoped suffix (2.5) so this is never reached.
-        const std::string target = shortName(name);
-        rttr::type best = rttr::type::get_by_name(std::string());
-        std::string bestFull;
-        for (const auto& [id, entry] : r.map)
+    TypeBridge::ResolveExplanation TypeBridge::explainResolve(std::string_view flecsName)
+    {
+        ResolveExplanation why;
+        if (flecsName.empty())
         {
-            const std::string full = entry.type.get_name().to_string();
-            if (shortName(full) == target && (!best.is_valid() || full < bestFull))
-            {
-                best = entry.type;
-                bestFull = full;
-            }
+            return why;
         }
-        return best.is_valid() ? best : rttr::type::get_by_name(std::string()); // invalid
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        resolveLocked(r, std::string(flecsName), &why); // never the memo: show the work
+        if (why.via == ResolveExplanation::Via::None)
+        {
+            why.candidates.clear();
+        }
+        std::sort(why.candidates.begin(), why.candidates.end());
+        return why;
     }
 
     rttr::variant TypeBridge::wrap(rttr::type t, void* obj)
@@ -227,6 +392,114 @@ namespace rpe
         std::lock_guard<std::mutex> lk(r.mutex);
         const auto it = r.map.find(t.get_id());
         return it != r.map.end() ? it->second.wrap(obj) : rttr::variant();
+    }
+
+    namespace
+    {
+        // Name key for read-only matching: an unregistered type's RTTR name is
+        // compiler-derived (MSVC: "class audio::Speaker"), so drop the keyword, then
+        // normalise the separators.
+        std::string readOnlyKey(std::string name)
+        {
+            for (const char* kw : { "class ", "struct ", "enum ", "union " })
+            {
+                const size_t n = std::char_traits<char>::length(kw);
+                if (name.compare(0, n, kw) == 0)
+                {
+                    name.erase(0, n);
+                    break;
+                }
+            }
+            return normalizeScopes(name);
+        }
+    } // namespace
+
+    void TypeBridge::setReadOnly(rttr::type t, bool readOnly)
+    {
+        if (!t.is_valid())
+        {
+            return;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        if (readOnly)
+        {
+            r.readOnlyIds.insert(t.get_id());
+        }
+        else
+        {
+            r.readOnlyIds.erase(t.get_id());
+            r.readOnlyNames.erase(readOnlyKey(t.get_name().to_string()));
+        }
+        r.readOnlyGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void TypeBridge::setReadOnly(std::string_view typeName, bool readOnly)
+    {
+        if (typeName.empty())
+        {
+            return;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        const std::string key = readOnlyKey(std::string(typeName));
+        if (readOnly)
+        {
+            r.readOnlyNames.insert(key);
+        }
+        else
+        {
+            r.readOnlyNames.erase(key);
+            // Also release a type locked by id under that name.
+            for (auto it = r.readOnlyIds.begin(); it != r.readOnlyIds.end();)
+            {
+                const auto e = r.map.find(*it);
+                const bool same = e != r.map.end() ? e->second.normFull == key : false;
+                it = same ? r.readOnlyIds.erase(it) : std::next(it);
+            }
+        }
+        r.readOnlyGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    bool TypeBridge::isReadOnly(rttr::type t)
+    {
+        if (!t.is_valid())
+        {
+            return false;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        if (r.readOnlyIds.count(t.get_id()))
+        {
+            return true;
+        }
+        if (r.readOnlyNames.empty())
+        {
+            return false;
+        }
+        // By name: the RTTR name, the bridged entry's normalised name, and every
+        // alias (which includes the type's C++ name) that maps to this type.
+        if (r.readOnlyNames.count(readOnlyKey(t.get_name().to_string())))
+        {
+            return true;
+        }
+        if (const auto e = r.map.find(t.get_id()); e != r.map.end() && r.readOnlyNames.count(e->second.normFull))
+        {
+            return true;
+        }
+        for (const auto& [alias, id] : r.aliases)
+        {
+            if (id == t.get_id() && r.readOnlyNames.count(alias))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    uint64_t TypeBridge::readOnlyGeneration()
+    {
+        return registry().readOnlyGeneration.load(std::memory_order_relaxed);
     }
 
     rttr::variant TypeBridge::clone(rttr::type t, void* obj)
@@ -243,13 +516,15 @@ namespace rpe
 
     bool TypeBridge::has(rttr::type t)
     {
-        if (!t.is_valid())
+        // By id only (never dereferenced): safe on a handle whose type was released.
+        const auto id = t.get_id();
+        if (id == 0)
         {
             return false;
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        return r.map.find(t.get_id()) != r.map.end();
+        return r.map.find(id) != r.map.end();
     }
 
     std::vector<rttr::type> TypeBridge::registeredTypes()

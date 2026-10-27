@@ -10,6 +10,26 @@ namespace rpe
 {
 
     class PropertyModel;
+    class VectorEditor;
+
+    // The read-only mark, shared by every view that shows property values (the
+    // property grid and the watch list), so a locked value looks the same in both:
+    // the value keeps its normal look, and a small faint lock sits at the right edge
+    // of the cell. readOnlyLockWidth() is the strip to keep clear of text.
+    int readOnlyLockWidth(const QStyleOptionViewItem& option);
+    void paintReadOnlyLock(QPainter* painter, const QStyleOptionViewItem& option);
+
+    // Paint an item (an option already filled by initStyleOption) ONCE across its
+    // full rect — background, selection, hover, focus — with its text elided so it
+    // stops `reserve` px short of the right edge, for decorations painted after it.
+    // (Painting the background, then the item again in a narrower rect, doubled a
+    // translucent selection and drew a second border on Windows / style sheets.)
+    void paintItemReservingRight(QPainter* painter, QStyleOptionViewItem option, int reserve);
+
+    // The colour the style draws a SELECTED row's text in — HighlightedText,
+    // except under the Windows native style, which keeps the normal text colour on
+    // its light selection. Decorations on a selected row should use this.
+    QColor selectedTextColor(const QStyleOptionViewItem& option);
 
     // ─────────────────────────────────────────────────────────────────────────────
     //  PropertyDelegate — provides type-appropriate inline editors for column 1.
@@ -41,6 +61,10 @@ namespace rpe
         // type isn't inline-editable. Separate so createEditor pins the row only on
         // success.
         QWidget* _makeEditor(rttr::type t, const QString& ed, const QModelIndex& index, QWidget* parent) const;
+        // A small numeric struct's row: one box per field (see InlineVectorRole).
+        QWidget* _makeVectorEditor(const QModelIndex& index, QWidget* parent) const;
+        void _setVectorData(VectorEditor* editor, const QModelIndex& index) const;
+        void _commitVector(VectorEditor* editor, const QModelIndex& index) const;
 
         PropertyModel* _model;
         // Track the in-progress edit so a cancelled edit (Esc / focus loss without

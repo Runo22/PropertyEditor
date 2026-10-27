@@ -5,7 +5,11 @@
 #include "rpe/core/OptionalSupport.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/EditorWidgets.h"
+#include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
 
+#include <QApplication>
+#include <QAbstractItemDelegate>
+#include <QPointer>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
@@ -17,6 +21,7 @@
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
 
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -88,6 +93,21 @@ namespace rpe::varedit
             return {};
         }
 
+    } // namespace
+
+    namespace
+    {
+        // The Slider hint wraps a number's spin box in a SliderEditor — only when
+        // there is a real range to slide over (Min AND Max, Max > Min). Without one
+        // the hint is ignored and the plain spin box is returned.
+        QWidget* maybeSlider(QAbstractSpinBox* sb, const QString& ed, const EditorHints& hints, QWidget* parent)
+        {
+            if (ed != QLatin1String(editor::Slider) || !hints.min || !hints.max || !(*hints.max > *hints.min))
+            {
+                return sb;
+            }
+            return new SliderEditor(sb, *hints.min, *hints.max, hints.step.value_or(0), parent);
+        }
     } // namespace
 
     QWidget* makeEditor(rttr::type t, const QString& ed, const EditorHints& hints, QWidget* parent)
@@ -194,7 +214,7 @@ namespace rpe::varedit
             sb->setDecimals(hints.decimals.value_or(4));
             sb->setRange(hints.min.value_or(-1e15), hints.max.value_or(1e15));
             sb->setSingleStep(hints.step.value_or(0.1));
-            return sb;
+            return maybeSlider(sb, ed, hints, parent);
         }
 
         // integral
@@ -219,7 +239,7 @@ namespace rpe::varedit
             sb->setRange(hints.min ? static_cast<int>(*hints.min) : lo,
                          hints.max ? static_cast<int>(*hints.max) : std::numeric_limits<int>::max());
             sb->setSingleStep(hints.step ? static_cast<int>(*hints.step) : 1);
-            return sb;
+            return maybeSlider(sb, ed, hints, parent);
         }
 
         return nullptr; // expandable / unsupported types are not inline-editable
@@ -229,6 +249,11 @@ namespace rpe::varedit
     {
         if (!editor)
         {
+            return;
+        }
+        if (auto* se = qobject_cast<SliderEditor*>(editor))
+        {
+            setEditorData(se->spinBox(), vIn); // the spin box is the editor; the slider follows
             return;
         }
         rttr::variant v = TypeRenderer::unwrap(vIn);
@@ -325,6 +350,10 @@ namespace rpe::varedit
         if (!editor)
         {
             return {};
+        }
+        if (auto* se = qobject_cast<SliderEditor*>(editor))
+        {
+            return readEditorData(se->spinBox(), t);
         }
         rttr::variant newVal;
 
@@ -456,6 +485,126 @@ namespace rpe::varedit
         }
 
         return newVal;
+    }
+
+    namespace
+    {
+        constexpr const char* kOpeningValue = "rpeOpeningValue";
+
+        // A value as plain Qt data — never an rttr::variant: the editor widget keeps
+        // it, and a variant read through a plugin's property holds pointers into the
+        // plugin's code, which may be unloaded before the editor is destroyed.
+        // Equal fingerprints ⇔ the editor would write back the same value.
+        QVariant fingerprint(const rttr::variant& v)
+        {
+            if (!v.is_valid())
+            {
+                return {};
+            }
+            const rttr::type t = v.get_type();
+            QVariant value;
+            if (t.is_enumeration())
+            {
+                // By bits: a combined flags mask has no name, so its text can't tell
+                // two different masks apart.
+                value = QVariant::fromValue<qulonglong>(static_cast<qulonglong>(TypeRenderer::enumBits(v)));
+            }
+            else if (t == rttr::type::get<bool>())
+            {
+                value = v.to_bool();
+            }
+            else if (t.is_arithmetic())
+            {
+                const rttr::type r = TypeRenderer::rawType(t);
+                if (r == rttr::type::get<float>() || r == rttr::type::get<double>() || r == rttr::type::get<long double>())
+                    value = v.to_double();
+                else if (r == rttr::type::get<unsigned char>() || r == rttr::type::get<unsigned short>()
+                         || r == rttr::type::get<unsigned int>() || r == rttr::type::get<unsigned long>()
+                         || r == rttr::type::get<unsigned long long>())
+                    value = QVariant::fromValue<qulonglong>(v.to_uint64());
+                else
+                    value = QVariant::fromValue<qlonglong>(v.to_int64());
+            }
+            else if (t == rttr::type::get<std::string>())
+            {
+                value = QString::fromStdString(v.get_value<std::string>());
+            }
+            else if (t == rttr::type::get<QString>())
+            {
+                value = v.get_value<QString>();
+            }
+            else
+            {
+                // Other types (QColor, QDateTime, paths, …): the rendered text is
+                // exact — but an empty rendering says nothing about equality.
+                const QString d = TypeRenderer::toDisplayString(v);
+                if (d.isEmpty())
+                {
+                    return {};
+                }
+                value = d;
+            }
+            return QVariantList { QString::fromStdString(t.get_name().to_string()), value };
+        }
+    } // namespace
+
+    void rememberOpeningValue(QWidget* editor, rttr::type t)
+    {
+        if (editor)
+        {
+            editor->setProperty(kOpeningValue, fingerprint(readEditorData(editor, t)));
+        }
+    }
+
+    bool unchangedSinceOpen(QWidget* editor, const rttr::variant& newVal)
+    {
+        if (!editor)
+        {
+            return false;
+        }
+        const QVariant before = editor->property(kOpeningValue);
+        const QVariant now = fingerprint(newVal);
+        return before.isValid() && now.isValid() && before == now;
+    }
+
+    void commitOnFocusLeave(QAbstractItemDelegate* delegate, QWidget* editor)
+    {
+        if (!delegate || !editor || !editor->focusProxy())
+        {
+            return;
+        }
+        QPointer<QAbstractItemDelegate> d(delegate);
+        // `editor` is the connection's context: destroying it disconnects.
+        QObject::connect(qApp, &QApplication::focusChanged, editor, [d, editor](QWidget*, QWidget* now) {
+            if (!d || !now || now == editor || editor->isAncestorOf(now) || editor->property("rpeLeft").toBool())
+            {
+                return;
+            }
+            // A picker the editor opened (menu, file / colour dialog) is not leaving.
+            if (QApplication::activePopupWidget() || QApplication::activeModalWidget()
+                || now->window() != editor->window())
+            {
+                return;
+            }
+            editor->setProperty("rpeLeft", true); // once: closing moves focus again
+            emit d->commitData(editor);
+            emit d->closeEditor(editor, QAbstractItemDelegate::NoHint);
+        });
+    }
+
+    rttr::variant numberAs(double value, rttr::type t)
+    {
+        const rttr::type r = TypeRenderer::rawType(t);
+        if (r == rttr::type::get<double>())
+        {
+            return value;
+        }
+        if (r == rttr::type::get<float>())
+        {
+            return static_cast<float>(value);
+        }
+        rttr::variant v = static_cast<int64_t>(std::llround(value));
+        return v.convert(r) ? v : rttr::variant();
     }
 
 } // namespace rpe::varedit

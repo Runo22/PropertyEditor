@@ -1,19 +1,33 @@
 #include "rpe/gui/PropertyEditor.h"
 
+#include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/PropertyDelegate.h"
+#include "rpe/gui/VariantEditorFactory.h"
 
 #include <QAction>
-#include <QHBoxLayout>
-#include <QHeaderView>
-#include <QLabel>
-#include <QLineEdit>
 #include <QApplication>
 #include <QClipboard>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPolygonF>
+#include <QScopedValueRollback>
+#include <QShortcut>
 #include <QSortFilterProxyModel>
+#include <QStyledItemDelegate>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace rpe
 {
@@ -53,6 +67,131 @@ namespace rpe
         private:
             QString _text;
         };
+
+        // The NAME column. Without a filter (or a match) the style draws the row as
+        // usual. With one, the style still draws everything but the text, and the
+        // text is drawn in the view's font and the row's colour with the matched
+        // part bold in the accent colour. Group headers (the grouped view) are the
+        // view's own font in bold, with their match count appended.
+        class NameDelegate : public QStyledItemDelegate
+        {
+        public:
+            NameDelegate(std::function<QString()> needle, QObject* parent)
+                : QStyledItemDelegate(parent)
+                , _needle(std::move(needle))
+            {
+            }
+
+        protected:
+            void initStyleOption(QStyleOptionViewItem* o, const QModelIndex& index) const override
+            {
+                QStyledItemDelegate::initStyleOption(o, index);
+                if (index.data(IsGroupRole).toBool())
+                {
+                    o->font.setBold(true); // the view's font, bold — not the app default
+                    o->fontMetrics = QFontMetrics(o->font);
+                    const int n = index.data(GroupCountRole).toInt();
+                    if (n > 0)
+                    {
+                        o->text += QStringLiteral("  \u00B7  %1").arg(n);
+                    }
+                }
+            }
+
+        public:
+            void paint(QPainter* p, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            {
+                const QString needle = _needle();
+                QStyleOptionViewItem o(option);
+                initStyleOption(&o, index);
+                const int at = needle.isEmpty() ? -1 : o.text.indexOf(needle, 0, Qt::CaseInsensitive);
+                if (at < 0)
+                {
+                    QStyledItemDelegate::paint(p, option, index);
+                    return;
+                }
+                const QWidget* w = o.widget;
+                QStyle* style = w ? w->style() : QApplication::style();
+                // The text area as the style lays it out (after any icon), less the
+                // style's own text margin.
+                const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, w) + 1;
+                const QRect r = style->subElementRect(QStyle::SE_ItemViewItemText, &o, w).adjusted(margin, 0, -margin, 0);
+                const QString text = o.text;
+
+                // Everything but the text — background, selection, hover, focus,
+                // icon — by the style, as on every other row.
+                o.text.clear();
+                style->drawControl(QStyle::CE_ItemViewItem, &o, p, w);
+
+                // The text, in the row's own colour (ForegroundRole included), with
+                // the match re-coloured in bold. Drawn with QPainter in the view's
+                // font — the same text rendering the style uses.
+                const bool selected = o.state & QStyle::State_Selected;
+                const QColor base = selected ? selectedTextColor(o) : o.palette.color(QPalette::Text);
+                // The ACTIVE accent (typing in the filter leaves the tree inactive,
+                // and an inactive highlight is grey on Windows): lightened on a dark
+                // background, darkened on a light one — judged by the row's TEXT
+                // colour, which a style sheet always sets, unlike the palette's Base.
+                // On a selected row the accent is the background: weight only.
+                const QColor accent = o.palette.color(QPalette::Active, QPalette::Highlight);
+                const bool darkBackground = base.lightness() > 128;
+                const QColor mark = selected ? base : (darkBackground ? accent.lighter(150) : accent.darker(115));
+
+                QFont bold = o.font;
+                bold.setBold(true);
+                const QFontMetrics fm(o.font);
+                const QFontMetrics fmBold(bold);
+                const QString before = text.left(at);
+                const QString hit = text.mid(at, needle.size());
+                const QString after = text.mid(at + needle.size());
+                p->save();
+                p->setClipRect(r);
+                const int flags = Qt::AlignVCenter | Qt::AlignLeft | Qt::TextSingleLine;
+                if (fm.horizontalAdvance(before) + fmBold.horizontalAdvance(hit) + fm.horizontalAdvance(after) > r.width())
+                {
+                    // Doesn't fit: elided, plain — the match may be cut off anyway.
+                    p->setPen(base);
+                    p->setFont(o.font);
+                    p->drawText(r, flags, fm.elidedText(text, o.textElideMode, r.width()));
+                }
+                else
+                {
+                    QRect seg = r;
+                    p->setFont(o.font);
+                    p->setPen(base);
+                    p->drawText(seg, flags, before);
+                    seg.setLeft(seg.left() + fm.horizontalAdvance(before));
+                    p->setFont(bold);
+                    p->setPen(mark);
+                    p->drawText(seg, flags, hit);
+                    seg.setLeft(seg.left() + fmBold.horizontalAdvance(hit));
+                    p->setFont(o.font);
+                    p->setPen(base);
+                    p->drawText(seg, flags, after);
+                }
+                p->restore();
+            }
+
+        private:
+            std::function<QString()> _needle;
+        };
+
+        // The scope button's glyph: three stacked layers.
+        QIcon layersIcon(const QColor& c)
+        {
+            QPixmap pm(32, 32);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(QPen(c, 2.2));
+            p.setBrush(Qt::NoBrush);
+            for (int i = 0; i < 3; ++i)
+            {
+                const double y = 9 + i * 6;
+                p.drawPolygon(QPolygonF({ QPointF(16, y - 5), QPointF(27, y), QPointF(16, y + 5), QPointF(5, y) }));
+            }
+            return QIcon(pm);
+        }
     } // namespace
 
 
@@ -63,8 +202,12 @@ namespace rpe
         _delegate = new PropertyDelegate(_model, this);
         _setupUi();
         connect(_model, &PropertyModel::propertyEdited, this, &PropertyEditor::propertyEdited);
+        connect(_model, &PropertyModel::boundTypeReleased, this, [this](const QString& typeName) {
+            _endScrub(false); // its value cell is gone
+            emit boundTypeReleased(typeName);
+        });
         connect(_model, &PropertyModel::localEditsChanged, this, &PropertyEditor::_updateResetEnabled);
-        _updateResetEnabled(); // start disabled — nothing is frozen yet
+        _updateResetEnabled(); // start hidden — nothing is frozen yet
     }
 
     void PropertyEditor::_setupUi()
@@ -84,8 +227,56 @@ namespace rpe
         _filter->setClearButtonEnabled(true);
         tb->addWidget(_filter, 1);
 
+        // Search scope: this object / all of them (the host decides what "all" is).
+        _scopeBtn = new QToolButton(_toolbar);
+        _scopeBtn->setCheckable(true);
+        // Icon + "All" in both states — the button doesn't change width when toggled
+        // — and no Tab stop of its own (Ctrl+Shift+F is the keyboard way).
+        _scopeBtn->setText(tr("All"));
+        _scopeBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        _scopeBtn->setFocusPolicy(Qt::NoFocus);
+        _scopeBtn->setToolTip(tr("Search all components of this entity (Ctrl+Shift+F)"));
+        // Same box in both states (only the colours change), so toggling never moves
+        // the filter box.
+        _scopeBtn->setStyleSheet(QStringLiteral(
+            "QToolButton { border: 1px solid transparent; border-radius: 3px; padding: 1px 6px; }"
+            " QToolButton:hover { border-color: palette(mid); }"
+            " QToolButton:checked { background: palette(highlight); color: palette(highlighted-text);"
+            " border-color: palette(highlight); }"));
+        _scopeBtn->setVisible(false);
+        tb->addWidget(_scopeBtn);
+        // The glyph is drawn in the button's text colour — known only once the
+        // style sheet has been applied (polish), and again on any theme change.
+        _scopeBtn->installEventFilter(this);
+        connect(_scopeBtn, &QToolButton::toggled, this, [this](bool on) {
+            _updateScopeIcon();
+            _filter->setPlaceholderText(on ? tr("Search all components…") : tr("Filter properties…"));
+            emit searchAllToggled(on);
+        });
+        _updateScopeIcon();
+        // Disabled until setSearchAllAvailable(true): an ENABLED shortcut on the same
+        // keys as a host action makes Qt treat both as ambiguous, and neither fires.
+        _scopeKey = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F), this);
+        _scopeKey->setContext(Qt::WidgetWithChildrenShortcut);
+        _scopeKey->setEnabled(false);
+        connect(_scopeKey, &QShortcut::activated, this, [this] {
+            if (!_searchAllAvailable)
+            {
+                return;
+            }
+            setSearchAll(!isSearchAll());
+            // Caret at the end, text NOT selected — like Tab back into a filter box.
+            // Selected text is drawn in the palette's HighlightedText, which many
+            // dark palettes leave black: the filter text looked like it turned black.
+            _filter->setFocus(Qt::ShortcutFocusReason);
+            _filter->deselect();
+            _filter->end(false);
+        });
+
         _resetBtn = new QToolButton(_toolbar);
         _resetBtn->setText(tr("Reset"));
+        // Shown only while something is frozen; hidden, it takes no room — the
+        // filter box gets the width and gives it back when Reset appears.
         // Spell out what "Reset" does, since the short label can read like "reset to
         // defaults": it only releases FROZEN values and resumes live updates — it does
         // not change any value in the world.
@@ -112,7 +303,13 @@ namespace rpe
         _view = new QTreeView(this);
         _view->setModel(_proxy);
         _view->setItemDelegateForColumn(1, _delegate);
+        _view->setItemDelegateForColumn(0, new NameDelegate([this] { return _filter->text().trimmed(); }, this));
         _view->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::SelectedClicked | QAbstractItemView::EditKeyPressed);
+        // Drag-to-scrub watches the viewport (hover cursor, press/drag/release) and
+        // the view (Esc mid-drag).
+        _view->viewport()->setMouseTracking(true);
+        _view->viewport()->installEventFilter(this);
+        _view->installEventFilter(this);
         _view->setAlternatingRowColors(true);
         _view->setUniformRowHeights(true);
         _view->setAnimated(false); // keep redraws cheap under live updates
@@ -125,21 +322,37 @@ namespace rpe
         connect(_filter, &QLineEdit::textChanged, this, &PropertyEditor::_onFilterChanged);
         connect(_resetBtn, &QToolButton::clicked, this, &PropertyEditor::_onResetAll);
         connect(_view, &QTreeView::customContextMenuRequested, this, &PropertyEditor::_onContextMenu);
+        connect(_view->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& cur) {
+            emit currentPathChanged(cur.isValid() ? cur.siblingAtColumn(0).data(PropertyPathRole).toString() : QString());
+        });
 
         // Keep the model's notion of expansion in sync with the view, so collapsed
         // struct rows can show a "[a, b]" summary that disappears on expand.
         // (Custom roles pass through the proxy, so no mapToSource needed here.)
+        // Outside the editor's own bulk operations (see _bulkExpanding), a per-row
+        // expand/collapse is the user's choice — remembered per bound type.
         connect(_view, &QTreeView::expanded, this, [this](const QModelIndex& idx) {
-            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), true);
+            const QString path = idx.data(PropertyPathRole).toString();
+            _model->setPathExpanded(path, true);
+            if (!_bulkExpanding && !_boundTypeName.isEmpty())
+            {
+                _collapsedByType[_boundTypeName].remove(path);
+            }
         });
         connect(_view, &QTreeView::collapsed, this, [this](const QModelIndex& idx) {
-            _model->setPathExpanded(idx.data(PropertyPathRole).toString(), false);
+            const QString path = idx.data(PropertyPathRole).toString();
+            _model->setPathExpanded(path, false);
+            if (!_bulkExpanding && !_boundTypeName.isEmpty())
+            {
+                _collapsedByType[_boundTypeName].insert(path);
+            }
         });
     }
 
-    // Bulk expansion calls (expandAll / expandToDepth / collapseAll) do NOT emit
-    // the per-row expanded/collapsed signals, so after any of them the model's
-    // expansion set must be rebuilt by walking the view.
+    // Bulk expansion calls (expandAll / expandToDepth / collapseAll) do not
+    // reliably emit the per-row expanded/collapsed signals (it varies across Qt 5
+    // releases), so after any of them the model's expansion set is rebuilt by
+    // walking the view.
     void PropertyEditor::_pushExpansionState()
     {
         QList<QModelIndex> stack;
@@ -167,11 +380,105 @@ namespace rpe
 
     void PropertyEditor::bindType(rttr::type type)
     {
+        _boundTypeName = type.is_valid() ? QString::fromStdString(type.get_name().to_string()) : QString();
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
         _model->bindType(type);
         _view->expandToDepth(0);
         _pushExpansionState();
         _updateResetEnabled(); // a fresh schema has no frozen nodes
         _updateEmptyHint(type);
+    }
+
+    void PropertyEditor::bindGroups(const QVector<PropertyModel::Group>& groups)
+    {
+        _boundTypeName.clear(); // no per-type expansion memory for a mixed view
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
+        _model->bindGroups(groups);
+        _view->expandAll();
+        _pushExpansionState();
+        _updateResetEnabled();
+        _emptyHint->setVisible(false);
+    }
+
+    void PropertyEditor::setGroupInstanceProvider(std::function<rttr::instance(const QString&)> provider)
+    {
+        _model->setGroupInstanceProvider(std::move(provider));
+    }
+
+    bool PropertyEditor::revealPath(const QString& path)
+    {
+        const QModelIndex src = _model->indexForPath(path);
+        const QModelIndex idx = src.isValid() ? _proxy->mapFromSource(src) : QModelIndex();
+        if (!idx.isValid())
+        {
+            return false;
+        }
+        for (QModelIndex p = idx.parent(); p.isValid(); p = p.parent())
+        {
+            _view->expand(p);
+        }
+        _view->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+        _view->setCurrentIndex(idx);
+        return true;
+    }
+
+    void PropertyEditor::revealGroup(const QString& key)
+    {
+        const QModelIndex src = _model->groupIndex(key);
+        const QModelIndex idx = src.isValid() ? _proxy->mapFromSource(src) : QModelIndex();
+        if (idx.isValid())
+        {
+            _view->expand(idx);
+            _view->scrollTo(idx, QAbstractItemView::PositionAtTop);
+            _view->setCurrentIndex(idx);
+        }
+    }
+
+    // ── search scope ──────────────────────────────────────────────────────────────
+
+    void PropertyEditor::setSearchAllShortcut(const QKeySequence& keys)
+    {
+        _scopeKey->setKey(keys);
+        _scopeKey->setEnabled(_searchAllAvailable && !keys.isEmpty());
+        _scopeBtn->setToolTip(keys.isEmpty() ? tr("Search all components of this entity")
+                                             : tr("Search all components of this entity (%1)")
+                                                   .arg(keys.toString(QKeySequence::NativeText)));
+    }
+
+    QKeySequence PropertyEditor::searchAllShortcut() const
+    {
+        return _scopeKey->key();
+    }
+
+    void PropertyEditor::setSearchAllAvailable(bool on)
+    {
+        _searchAllAvailable = on;
+        _scopeKey->setEnabled(on && !_scopeKey->key().isEmpty());
+        _scopeBtn->setVisible(on);
+        if (!on)
+        {
+            setSearchAll(false);
+        }
+    }
+
+    void PropertyEditor::setSearchAll(bool on)
+    {
+        _scopeBtn->setChecked(on && _searchAllAvailable);
+    }
+
+    bool PropertyEditor::isSearchAll() const
+    {
+        return _scopeBtn->isChecked();
+    }
+
+    QString PropertyEditor::filterText() const
+    {
+        return _filter->text().trimmed();
+    }
+
+    void PropertyEditor::setFilterText(const QString& text)
+    {
+        _filter->setText(text);
     }
 
     void PropertyEditor::unbind()
@@ -225,7 +532,12 @@ namespace rpe
     // rather than an always-lit button that looks like "reset to defaults".
     void PropertyEditor::_updateResetEnabled()
     {
-        _resetBtn->setEnabled(!isReadOnly() && _model->hasAnyLocalEdit());
+        // Shown only while there is something to release: frozen values are rare
+        // (LocalEdit drafts, "Local edit" from the context menu), so a permanently
+        // visible — and almost always disabled — button was just clutter.
+        const bool needed = !isReadOnly() && _model->hasAnyLocalEdit();
+        _resetBtn->setEnabled(needed);
+        _resetBtn->setVisible(needed);
     }
     bool PropertyEditor::isReadOnly() const
     {
@@ -266,6 +578,37 @@ namespace rpe
         if (!onlyExpanded)
         {
             return _model->allLeafPaths();
+        }
+        if (!_filter->text().trimmed().isEmpty())
+        {
+            // While filtering, a row can be hidden only because its value hasn't
+            // arrived yet (it may match by VALUE). Watching just the shown rows
+            // would never fetch it, and it would stay hidden: watch every leaf —
+            // and every array, whose elements exist only once its value is read.
+            QStringList out;
+            QList<QModelIndex> stack { QModelIndex() };
+            while (!stack.isEmpty())
+            {
+                const QModelIndex parent = stack.takeLast();
+                for (int r = 0; r < _model->rowCount(parent); ++r)
+                {
+                    const QModelIndex idx = _model->index(r, 0, parent);
+                    if (idx.data(IsArrayRole).toBool())
+                    {
+                        out.append(idx.data(PropertyPathRole).toString());
+                    }
+                    if (_model->rowCount(idx) == 0)
+                    {
+                        if (!idx.data(IsArrayRole).toBool())
+                            out.append(idx.data(PropertyPathRole).toString());
+                    }
+                    else
+                    {
+                        stack.append(idx);
+                    }
+                }
+            }
+            return out;
         }
 
         // Walk the proxy tree, descending only into expanded rows, collecting leaves.
@@ -327,9 +670,272 @@ namespace rpe
     {
         _toolbar->setVisible(visible);
     }
+    // ── Drag-to-scrub ─────────────────────────────────────────────────────────────
+
+    void PropertyEditor::setDragToScrubEnabled(bool on)
+    {
+        _scrubEnabled = on;
+        if (!on)
+        {
+            _endScrub(false);
+            _view->viewport()->unsetCursor();
+        }
+    }
+
+    bool PropertyEditor::_isScrubbable(const QModelIndex& nameIndex) const
+    {
+        if (!nameIndex.isValid() || nameIndex.column() != 0)
+        {
+            return false;
+        }
+        const QModelIndex value = nameIndex.siblingAtColumn(1);
+        if (!(value.flags() & Qt::ItemIsEditable) || !value.data(IsLeafRole).toBool())
+        {
+            return false; // read-only rows, structs, the whole editor in read-only mode
+        }
+        const rttr::variant declared = value.data(DeclaredTypeRole).value<rttr::variant>();
+        if (!declared.is_valid())
+        {
+            return false;
+        }
+        const rttr::type t = TypeRenderer::rawType(declared.get_value<rttr::type>());
+        return t.is_arithmetic() && t != rttr::type::get<bool>();
+    }
+
+    namespace
+    {
+        // The representable range of an arithmetic type (false for others).
+        template <class T>
+        bool rangeOf(rttr::type t, double& lo, double& hi)
+        {
+            if (t != rttr::type::get<T>())
+            {
+                return false;
+            }
+            lo = static_cast<double>(std::numeric_limits<T>::lowest());
+            hi = static_cast<double>(std::numeric_limits<T>::max());
+            return true;
+        }
+
+        bool numericRange(rttr::type t, double& lo, double& hi)
+        {
+            return rangeOf<char>(t, lo, hi) || rangeOf<signed char>(t, lo, hi) || rangeOf<unsigned char>(t, lo, hi)
+                || rangeOf<short>(t, lo, hi) || rangeOf<unsigned short>(t, lo, hi) || rangeOf<int>(t, lo, hi)
+                || rangeOf<unsigned int>(t, lo, hi) || rangeOf<long>(t, lo, hi) || rangeOf<unsigned long>(t, lo, hi)
+                || rangeOf<long long>(t, lo, hi) || rangeOf<unsigned long long>(t, lo, hi) || rangeOf<float>(t, lo, hi)
+                || rangeOf<double>(t, lo, hi);
+        }
+    } // namespace
+
+    void PropertyEditor::_applyScrub(int dx, Qt::KeyboardModifiers mods)
+    {
+        if (!_scrubValue.isValid())
+        {
+            return;
+        }
+        const rttr::type t = TypeRenderer::rawType(
+            _scrubValue.data(DeclaredTypeRole).value<rttr::variant>().get_value<rttr::type>());
+        const bool floating = t == rttr::type::get<float>() || t == rttr::type::get<double>()
+            || t == rttr::type::get<long double>();
+        const QVariant stepHint = _scrubValue.data(StepRole);
+        double step = stepHint.isValid() && stepHint.toDouble() > 0 ? stepHint.toDouble() : (floating ? 0.1 : 1.0);
+        if (mods & Qt::ShiftModifier)
+        {
+            step *= 0.1; // fine
+        }
+        else if (mods & Qt::ControlModifier)
+        {
+            step *= 10.0; // coarse
+        }
+        // Whole steps only (one per kPixelsPerStep): the value moves — and is
+        // written — when the drag crosses into the next step, not on every pixel.
+        constexpr double kPixelsPerStep = 4.0;
+        double v = _scrubStart + std::round(dx / kPixelsPerStep) * step;
+        if (!floating)
+        {
+            v = std::round(v);
+        }
+        else if (const QVariant dec = _scrubValue.data(DecimalsRole); dec.isValid())
+        {
+            const double scale = std::pow(10.0, std::clamp(dec.toInt(), 0, 12));
+            v = std::round(v * scale) / scale; // the editor's precision
+        }
+        else
+        {
+            // Two digits past the step's own: drops float noise (0.30000000004),
+            // keeps steps like 0.25 exact.
+            const int digits = std::clamp(static_cast<int>(std::ceil(-std::log10(step))) + 2, 0, 12);
+            const double scale = std::pow(10.0, digits);
+            v = std::round(v * scale) / scale;
+        }
+        if (const QVariant lo = _scrubValue.data(MinRole); lo.isValid())
+        {
+            v = std::max(v, lo.toDouble());
+        }
+        if (const QVariant hi = _scrubValue.data(MaxRole); hi.isValid())
+        {
+            v = std::min(v, hi.toDouble());
+        }
+        // And the type's own range — an unsigned value stops at 0 instead of the
+        // drag silently doing nothing below it.
+        double typeLo = 0, typeHi = 0;
+        if (numericRange(t, typeLo, typeHi))
+        {
+            v = std::clamp(v, typeLo, typeHi);
+        }
+        if (v == _scrubLast)
+        {
+            return; // nothing changed — no write
+        }
+        const rttr::variant typed = varedit::numberAs(v, t);
+        if (typed.is_valid() && _view->model()->setData(_scrubValue, QVariant::fromValue(typed), Qt::EditRole))
+        {
+            _scrubLast = v;
+        }
+    }
+
+    void PropertyEditor::_endScrub(bool restore)
+    {
+        if (_scrubbing && restore && _scrubValue.isValid() && _scrubLast != _scrubStart)
+        {
+            const rttr::type t = TypeRenderer::rawType(
+                _scrubValue.data(DeclaredTypeRole).value<rttr::variant>().get_value<rttr::type>());
+            const rttr::variant typed = varedit::numberAs(_scrubStart, t);
+            if (typed.is_valid())
+            {
+                _view->model()->setData(_scrubValue, QVariant::fromValue(typed), Qt::EditRole);
+            }
+        }
+        _scrubArmed = false;
+        _scrubbing = false;
+        _scrubValue = QPersistentModelIndex();
+    }
+
+    void PropertyEditor::_updateScopeIcon()
+    {
+        const QPalette& pal = _scopeBtn->palette();
+        const QColor c = _scopeBtn->isChecked() ? pal.color(QPalette::Active, QPalette::HighlightedText)
+                                                : pal.color(QPalette::Active, QPalette::ButtonText);
+        _scopeBtn->setIcon(layersIcon(c));
+    }
+
+    bool PropertyEditor::eventFilter(QObject* obj, QEvent* ev)
+    {
+        if (obj == _scopeBtn
+            && (ev->type() == QEvent::Polish || ev->type() == QEvent::PaletteChange || ev->type() == QEvent::StyleChange))
+        {
+            _updateScopeIcon();
+            return false;
+        }
+        if (obj == _view->viewport() && _scrubEnabled)
+        {
+            switch (ev->type())
+            {
+            case QEvent::MouseMove:
+            {
+                auto* me = static_cast<QMouseEvent*>(ev);
+                if (_scrubArmed && (me->buttons() & Qt::LeftButton))
+                {
+                    const int dx = me->pos().x() - _scrubPressX;
+                    if (!_scrubbing)
+                    {
+                        if (std::abs(dx) < QApplication::startDragDistance())
+                        {
+                            return false; // still a click, not a drag
+                        }
+                        // Crossing the threshold STARTS the drag here: re-anchor, so
+                        // the value doesn't jump by the threshold's worth of pixels.
+                        _scrubbing = true;
+                        _scrubPressX = me->pos().x();
+                        return true;
+                    }
+                    _applyScrub(dx, me->modifiers());
+                    return true; // no rubber-band / drag-selection while scrubbing
+                }
+                // Hover: advertise the scrubbable names.
+                if (_isScrubbable(_view->indexAt(me->pos())))
+                {
+                    _view->viewport()->setCursor(Qt::SizeHorCursor);
+                }
+                else
+                {
+                    _view->viewport()->unsetCursor();
+                }
+                return false;
+            }
+            case QEvent::MouseButtonPress:
+            {
+                auto* me = static_cast<QMouseEvent*>(ev);
+                const QModelIndex idx = _view->indexAt(me->pos());
+                if (me->button() == Qt::LeftButton && _isScrubbable(idx))
+                {
+                    // Arm, but let the press through: a plain click still selects.
+                    _scrubArmed = true;
+                    _scrubbing = false;
+                    _scrubPressX = me->pos().x();
+                    _scrubValue = idx.siblingAtColumn(1);
+                    const rttr::variant v = TypeRenderer::unwrap(_scrubValue.data(RttrVariantRole).value<rttr::variant>());
+                    _scrubStart = _scrubLast = v.is_valid() ? v.to_double() : 0.0;
+                }
+                return false;
+            }
+            case QEvent::MouseButtonRelease:
+            {
+                const bool wasScrubbing = _scrubbing;
+                _endScrub(false);
+                return wasScrubbing; // a drag's release isn't a click
+            }
+            default:
+                break;
+            }
+        }
+        if (obj == _view && ev->type() == QEvent::KeyPress && _scrubbing
+            && static_cast<QKeyEvent*>(ev)->key() == Qt::Key_Escape)
+        {
+            _endScrub(true); // Esc mid-drag: back to where it started
+            return true;
+        }
+        return QWidget::eventFilter(obj, ev);
+    }
+
     void PropertyEditor::expandAll()
     {
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
         _view->expandAll();
+        _pushExpansionState();
+    }
+
+    void PropertyEditor::expandAllExceptCollapsed()
+    {
+        const QSet<QString> keep = _collapsedByType.value(_boundTypeName);
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
+        _view->expandAll();
+        if (!keep.isEmpty())
+        {
+            QList<QModelIndex> stack;
+            for (int r = _proxy->rowCount({}) - 1; r >= 0; --r)
+            {
+                stack.append(_proxy->index(r, 0, {}));
+            }
+            while (!stack.isEmpty())
+            {
+                const QModelIndex idx = stack.takeLast();
+                const int rows = _proxy->rowCount(idx);
+                if (rows == 0)
+                {
+                    continue;
+                }
+                if (keep.contains(idx.data(PropertyPathRole).toString()))
+                {
+                    _view->collapse(idx);
+                    continue; // nothing below a collapsed row is visible anyway
+                }
+                for (int r = rows - 1; r >= 0; --r)
+                {
+                    stack.append(_proxy->index(r, 0, idx));
+                }
+            }
+        }
         _pushExpansionState();
     }
 
@@ -337,7 +943,9 @@ namespace rpe
 
     void PropertyEditor::_onFilterChanged(const QString& text)
     {
+        const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
         static_cast<PropertyFilterProxy*>(_proxy)->setFilterText(text);
+        _view->viewport()->update(); // the name column highlights the new text
         if (text.isEmpty())
         {
             _view->expandToDepth(0);
@@ -347,6 +955,7 @@ namespace rpe
             _view->expandAll();
         }
         _pushExpansionState();
+        emit filterTextChanged(text.trimmed());
     }
 
     void PropertyEditor::_onResetAll()
@@ -357,11 +966,7 @@ namespace rpe
     void PropertyEditor::_onContextMenu(const QPoint& pos)
     {
         const QModelIndex proxyIdx = _view->indexAt(pos);
-        if (!proxyIdx.isValid())
-        {
-            return;
-        }
-        const QModelIndex srcIdx = _proxy->mapToSource(proxyIdx);
+        const QModelIndex srcIdx = proxyIdx.isValid() ? _proxy->mapToSource(proxyIdx) : QModelIndex();
         if (!srcIdx.isValid())
         {
             return;
@@ -382,7 +987,11 @@ namespace rpe
         connect(menu.addAction(tr("Copy \"name = value\"")), &QAction::triggered, this,
                 [name, value] { QApplication::clipboard()->setText(name + QStringLiteral(" = ") + value); });
         menu.addSeparator();
-        if (!isReadOnly())
+        // Freezing makes sense only for a row with a value of its own that could
+        // change: not a group header, not a read-only value (it would just stop
+        // updating, amber, for no edit that could ever come).
+        const bool freezable = !srcIdx.data(IsGroupRole).toBool() && srcIdx.siblingAtColumn(1).data(ReadOnlyRole).toString().isEmpty();
+        if (!isReadOnly() && (freezable || hasLocalEdit))
         {
             if (!hasLocalEdit)
             {

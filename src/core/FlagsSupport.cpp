@@ -1,6 +1,7 @@
 #include "rpe/core/FlagsSupport.h"
 
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 namespace rpe
@@ -8,11 +9,30 @@ namespace rpe
 
     namespace
     {
+        // Keyed by type id — an ADDRESS, which RTTR may hand to another type once a
+        // plugin's type is freed — so each entry keeps its type's name and only
+        // answers for a type of that name. (A reloaded plugin registers again.)
+        struct Entry
+        {
+            std::string name;
+            FlagsBridge::BuildFn build = nullptr;
+        };
         struct Registry
         {
             std::mutex mutex;
-            std::unordered_map<rttr::type::type_id, FlagsBridge::BuildFn> map;
+            std::unordered_map<rttr::type::type_id, Entry> map;
         };
+
+        FlagsBridge::BuildFn lookup(Registry& r, rttr::type t)
+        {
+            const auto it = r.map.find(t.get_id());
+            // string_view compare: no allocation on this per-lookup path.
+            if (it == r.map.end() || rttr::string_view(it->second.name) != t.get_name())
+            {
+                return nullptr;
+            }
+            return it->second.build;
+        }
 
         Registry& registry()
         {
@@ -29,7 +49,7 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        r.map[enumType.get_id()] = build;
+        r.map[enumType.get_id()] = Entry { enumType.get_name().to_string(), build };
     }
 
     bool FlagsBridge::canBuild(rttr::type enumType)
@@ -40,7 +60,7 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        return r.map.find(enumType.get_id()) != r.map.end();
+        return lookup(r, enumType) != nullptr;
     }
 
     rttr::variant FlagsBridge::build(rttr::type enumType, int64_t bits)
@@ -51,8 +71,8 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        const auto it = r.map.find(enumType.get_id());
-        return it != r.map.end() ? it->second(bits) : rttr::variant();
+        const FlagsBridge::BuildFn fn = lookup(r, enumType);
+        return fn ? fn(bits) : rttr::variant();
     }
 
 } // namespace rpe

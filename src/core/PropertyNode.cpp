@@ -17,6 +17,21 @@ namespace rpe
         qDeleteAll(_children);
     }
 
+    void PropertyNode::releaseReflection()
+    {
+        _type = rttr::type::get<void>();
+        // RTTR has no public invalid-property constructor; a missing property on
+        // `void` is one (and lives in rpe_core, not in a plugin).
+        _prop = rttr::type::get<void>().get_property(std::string());
+        _liveValue = rttr::variant();
+        _localEditValue = rttr::variant();
+        _hasLocalEdit = false;
+        for (PropertyNode* c : _children)
+        {
+            c->releaseReflection();
+        }
+    }
+
     int PropertyNode::row() const
     {
         if (!_parent)

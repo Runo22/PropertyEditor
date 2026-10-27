@@ -1,16 +1,22 @@
 #include "rpe/ecs/PinnedPropertiesWidget.h"
 
+#include "rpe/core/ReadOnly.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/ecs/EcsMirror.h"
+#include "rpe/gui/PropertyDelegate.h"
 #include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
+#include "rpe/core/RttrBridge.h"
+#include "rpe/core/TypeRelease.h"
 #include "rpe/gui/VariantEditorFactory.h"
 
 #include <QAbstractItemDelegate>
 #include <QApplication>
 #include <QHeaderView>
+#include <QIcon>
 #include <QLabel>
 #include <QMenu>
+#include <QStyle>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QTreeWidget>
@@ -29,8 +35,9 @@ namespace rpe
             EntityRole = Qt::UserRole,      // qulonglong
             ComponentRole,                  // QString (full scoped name / pair key)
             PathRole,                       // QString (dot-path)
-            LastValueRole,                  // rttr::variant (last mirrored value)
+            LastValueRoleUnused,            // (was the last value — now kept in _lastValues)
             RawIdRole,                      // qulonglong (pair id; 0 for plain components)
+            PinReadOnlyRole,                // QString — why it can't be edited (empty: it can)
         };
 
         constexpr int kValueColumn = 2; // Entity | Property | Value
@@ -81,7 +88,9 @@ namespace rpe
         // The type an editor for this row should be built from: the DECLARED type when
         // resolvable (so pins are editable before any value arrives), otherwise the
         // last mirrored value's type. Invalid when neither is available.
-        rttr::type pinLeafType(const QTreeWidgetItem* it)
+        using LastValues = QHash<const QTreeWidgetItem*, rttr::variant>;
+
+        rttr::type pinLeafType(const QTreeWidgetItem* it, const LastValues& values)
         {
             const rttr::type dt = pinDeclaredType(it);
             if (dt.is_valid() && dt != rttr::type::get<void>())
@@ -90,7 +99,7 @@ namespace rpe
             }
             if (it)
             {
-                const rttr::variant last = it->data(0, LastValueRole).value<rttr::variant>();
+                const rttr::variant last = values.value(it);
                 if (last.is_valid())
                 {
                     return TypeRenderer::rawType(last.get_type());
@@ -114,20 +123,43 @@ namespace rpe
             using Commit = std::function<void(int row, const rttr::variant&)>;
             using Arm = std::function<void(int row)>;
 
-            PinnedValueDelegate(QTreeWidget* tree, Commit commit, Arm arm, QObject* parent)
+            PinnedValueDelegate(QTreeWidget* tree, const LastValues* values, Commit commit, Arm arm, QObject* parent)
                 : QStyledItemDelegate(parent)
                 , _tree(tree)
+                , _values(values)
                 , _commit(std::move(commit))
                 , _arm(std::move(arm))
             {
             }
 
+            void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+            {
+                const QTreeWidgetItem* it = _tree->topLevelItem(index.row());
+                if (index.column() != kValueColumn || !it || it->data(0, PinReadOnlyRole).toString().isEmpty())
+                {
+                    QStyledItemDelegate::paint(painter, option, index);
+                    return;
+                }
+                // Same read-only look as the property grid: full-cell background, the
+                // value in the remaining width, a faint lock at the right edge.
+                QStyleOptionViewItem o(option);
+                initStyleOption(&o, index);
+                paintItemReservingRight(painter, o, readOnlyLockWidth(option));
+                paintReadOnlyLock(painter, option);
+            }
+
             QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const override
             {
+                TypeUseScope scope; // see rpe/core/TypeRelease.h
+                const QTreeWidgetItem* row = _tree->topLevelItem(index.row());
+                if (row && !row->data(0, PinReadOnlyRole).toString().isEmpty())
+                {
+                    return nullptr; // read-only: never an editor (the item isn't editable either)
+                }
                 // Drive the editor from the leaf's declared type (resolvable straight
                 // after pinning) and fall back to the mirrored value's type. No hint
                 // metadata in the pin list → default numeric ranges.
-                const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()));
+                const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()), *_values);
                 if (!t.is_valid())
                 {
                     return nullptr;
@@ -138,6 +170,7 @@ namespace rpe
                     // An editor is actually open on this row now: pause live refresh
                     // for it until it closes (see the closeEditor connection).
                     _arm(index.row());
+                    varedit::commitOnFocusLeave(const_cast<PinnedValueDelegate*>(this), editor);
                 }
                 return editor;
             }
@@ -146,17 +179,26 @@ namespace rpe
             {
                 // Seed from the live value if one has arrived; otherwise the editor
                 // opens at its type default (empty line edit, 0, first enum, …).
+                TypeUseScope scope;
                 varedit::setEditorData(editor, _valueAt(index));
+                varedit::rememberOpeningValue(editor, pinLeafType(_tree->topLevelItem(index.row()), *_values));
             }
 
             void setModelData(QWidget* editor, QAbstractItemModel*, const QModelIndex& index) const override
             {
-                const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()));
-                const rttr::variant v = varedit::readEditorData(editor, t);
-                if (v.is_valid())
+                TypeUseScope scope;
+                const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()), *_values);
+                rttr::variant edit;
                 {
-                    _commit(index.row(), v);
+                    const rttr::variant v = varedit::readEditorData(editor, t);
+                    if (!v.is_valid() || varedit::unchangedSinceOpen(editor, v))
+                    {
+                        return; // left unchanged → no write (see unchangedSinceOpen)
+                    }
+                    // An enum travels as its integer (see PropertyDelegate::setModelData).
+                    edit = v.get_type().is_enumeration() ? rttr::variant(static_cast<int64_t>(TypeRenderer::enumBits(v))) : v;
                 }
+                _commit(index.row(), edit);
             }
 
             void updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option, const QModelIndex&) const override
@@ -170,10 +212,11 @@ namespace rpe
             rttr::variant _valueAt(const QModelIndex& index) const
             {
                 QTreeWidgetItem* it = _tree->topLevelItem(index.row());
-                return it ? it->data(0, LastValueRole).value<rttr::variant>() : rttr::variant();
+                return it ? _values->value(it) : rttr::variant();
             }
 
             QTreeWidget* _tree;
+            const LastValues* _values;
             Commit _commit;
             Arm _arm;
         };
@@ -183,9 +226,20 @@ namespace rpe
         : QWidget(parent)
     {
         _setupUi();
+        // A plugin unloading: drop the last values (a value read through a plugin's
+        // property calls into it when destroyed). The rows keep their text; the next
+        // poll refills the values.
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>&) { _lastValues.clear(); });
         _timer = new QTimer(this);
         _timer->setInterval(33); // ~30 Hz, same cadence as the browser's mirror poll
         connect(_timer, &QTimer::timeout, this, &PinnedPropertiesWidget::pollNow);
+    }
+
+    PinnedPropertiesWidget::~PinnedPropertiesWidget()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+        TypeUseScope scope;
+        _lastValues.clear();
     }
 
     void PinnedPropertiesWidget::_setupUi()
@@ -218,6 +272,7 @@ namespace rpe
         // is written back to the display and queued to the sim thread as a pin edit.
         auto* delegate = new PinnedValueDelegate(
             _tree,
+            &_lastValues,
             [this](int row, const rttr::variant& v) { _commitValueEdit(row, v); },
             [this](int row) { _editingItem = _tree->topLevelItem(row); }, // an editor opened
             _tree);
@@ -339,7 +394,24 @@ namespace rpe
         item->setData(0, ComponentRole, component);
         item->setData(0, PathRole, path);
         item->setData(0, RawIdRole, rawId);
-        item->setFlags(item->flags() | Qt::ItemIsEditable);
+        // Same rule as the property grid (rpe::readOnlyReason): a getter-only
+        // property, one marked read-only, or a locked type stays non-editable here
+        // too — otherwise the watch list would be the back door around it.
+        const QString readOnly = rawId != 0
+            ? QString()
+            : [&] {
+                  TypeUseScope scope; // resolve and read with no release in between
+                  return readOnlyReason(TypeBridge::resolveByName(component.toUtf8().constData()), path);
+              }();
+        item->setData(0, PinReadOnlyRole, readOnly);
+        if (readOnly.isEmpty())
+        {
+            item->setFlags(item->flags() | Qt::ItemIsEditable);
+        }
+        else
+        {
+            item->setToolTip(kValueColumn, readOnly);
+        }
         item->setText(kValueColumn, placeholderText()); // until the first value lands
         _updating = false;
 
@@ -355,6 +427,10 @@ namespace rpe
             {
                 _editingItem = nullptr;
             }
+            {
+                TypeUseScope scope;
+                _lastValues.remove(it);
+            }
             delete it;
             _pushPins();
             emit pinsChanged();
@@ -368,6 +444,10 @@ namespace rpe
             return;
         }
         _editingItem = nullptr;
+        {
+            TypeUseScope scope;
+            _lastValues.clear();
+        }
         _updating = true;
         _tree->clear();
         _updating = false;
@@ -385,6 +465,7 @@ namespace rpe
 
     void PinnedPropertiesWidget::pollNow()
     {
+        TypeUseScope scope; // the polled values may come from a plugin's properties
         if (!_channel)
         {
             return;
@@ -414,7 +495,7 @@ namespace rpe
                     continue;
                 }
                 it->setText(kValueColumn, TypeRenderer::toDisplayString(u.value));
-                it->setData(0, LastValueRole, QVariant::fromValue(u.value));
+                _lastValues.insert(it, u.value); // under pollNow's read section
             }
         }
         _updating = false;
@@ -431,7 +512,10 @@ namespace rpe
         // user edit), then queue it to the sim thread exactly like the property grid.
         // The next mirror poll re-confirms it (and updates LastValueRole).
         _updating = true;
-        item->setText(kValueColumn, TypeRenderer::toDisplayString(v));
+        {
+            TypeUseScope scope; // the display value is the property's own type (an enum)
+            item->setText(kValueColumn, TypeRenderer::toDisplayString(bridge::coerce(v, pinLeafType(item, _lastValues))));
+        }
         _updating = false;
         _channel->queuePinEdit(_itemKey(item), v);
     }

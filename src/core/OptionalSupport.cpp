@@ -1,6 +1,7 @@
 #include "rpe/core/OptionalSupport.h"
 
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 namespace rpe
@@ -8,8 +9,11 @@ namespace rpe
 
     namespace
     {
+        // Keyed by type id — an address RTTR may reuse once a plugin's type is freed
+        // — so an entry only answers for a type of the name it was registered with.
         struct Entry
         {
+            std::string name;
             rttr::type inner = rttr::type::get<void>();
             OptionalBridge::HasValueFn hasValue = nullptr;
             OptionalBridge::EngageFn engage = nullptr;
@@ -37,7 +41,8 @@ namespace rpe
             auto& r = registry();
             std::lock_guard<std::mutex> lk(r.mutex);
             const auto it = r.map.find(t.get_id());
-            return it != r.map.end() ? &it->second : nullptr;
+            // string_view compare: no allocation on this per-lookup path.
+            return it != r.map.end() && rttr::string_view(it->second.name) == t.get_name() ? &it->second : nullptr;
         }
     } // namespace
 
@@ -50,7 +55,7 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        r.map[optType.get_id()] = Entry { innerType, hasValue, engage, disengage };
+        r.map[optType.get_id()] = Entry { optType.get_name().to_string(), innerType, hasValue, engage, disengage };
     }
 
     bool OptionalBridge::isOptional(rttr::type t)

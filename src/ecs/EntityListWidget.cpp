@@ -1,5 +1,7 @@
 #include "rpe/ecs/EntityListWidget.h"
 
+#include "PickerKeys.h"
+#include "rpe/ecs/RowActions.h"
 #include "rpe/core/TypeBridge.h"
 
 #include <QAction>
@@ -34,6 +36,21 @@ namespace rpe
         {
             const int pos = s.lastIndexOf(QStringLiteral("::"));
             return pos >= 0 ? s.mid(pos + 2) : s;
+        }
+
+        // Last scope segment, for either spelling of the separator ("a::b::c" and
+        // "a.b.c" both → "c"). Unlike shortName() above — which stays "::"-only
+        // because it matches component names against flecs paths — this is purely
+        // a DISPLAY shortening, so it may cut at whichever separator the host used.
+        QString scopeLeaf(const QString& s)
+        {
+            const int dc = s.lastIndexOf(QStringLiteral("::"));
+            const int dot = s.lastIndexOf(QLatin1Char('.'));
+            if (dot > dc)
+            {
+                return s.mid(dot + 1);
+            }
+            return dc >= 0 ? s.mid(dc + 2) : s;
         }
 
         // Trim a trailing whitespace-delimited "prefab" (any case) — matches
@@ -212,6 +229,17 @@ namespace rpe
         connect(_list, &QListWidget::customContextMenuRequested, this, &EntityListWidget::_onContextMenu);
         connect(_filterEdit, &QLineEdit::textChanged, this, &EntityListWidget::_refresh);
         connect(_addBtn, &QToolButton::clicked, this, &EntityListWidget::_onAddEntityClicked);
+        _addBtn->installEventFilter(this); // hover → addPickerWanted (see eventFilter)
+
+        // Filter, then walk the results without leaving the box (arrows select,
+        // Enter hands focus to the list, Esc clears the filter). Installed after
+        // the textChanged refresh above so it walks the rebuilt list.
+        picker::driveList(_filterEdit, _list);
+        picker::returnToSearchOnTab(_list, _filterEdit); // Tab out of the rows = refine
+
+        // Tab walks the panel the way it reads — Add → filter — and then leaves for
+        // the next panel; the rows are entered with Enter or the arrows instead.
+        setTabOrder(_addBtn, _filterEdit);
     }
 
     void EntityListWidget::setEntityRemovingEnabled(bool on)
@@ -226,6 +254,12 @@ namespace rpe
 
     bool EntityListWidget::eventFilter(QObject* obj, QEvent* ev)
     {
+        // Pointer on the Add button: ask for a fresh prefab list now, so it has
+        // usually landed by the time the click opens the picker.
+        if (obj == _addBtn && ev->type() == QEvent::Enter)
+        {
+            emit addPickerWanted();
+        }
         // The view selects a row on mouse PRESS. So the trash glyph's two-step confirm
         // is driven HERE, from the press, and the press is consumed — the row is never
         // selected, and clicking an unselected entity's trash deletes it without
@@ -308,7 +342,8 @@ namespace rpe
             {
                 if (a.label.isEmpty() || !a.callback)
                     continue;
-                QAction* act = a.icon.isNull() ? menu.addAction(a.label) : menu.addAction(a.icon, a.label);
+                QMenu* into = subMenu(menu, a.menu);
+                QAction* act = a.icon.isNull() ? into->addAction(a.label) : into->addAction(a.icon, a.label);
                 const auto cb = a.callback;
                 connect(act, &QAction::triggered, this, [cb, id] { cb(id); });
             }
@@ -341,6 +376,7 @@ namespace rpe
 
     void EntityListWidget::_onAddEntityClicked()
     {
+        emit addPickerWanted();
         // A small popup: a filter box over a tree of spawnable prefabs, grouped by
         // their group tag (with the host's optional icon on each group header).
         // Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.
@@ -384,13 +420,23 @@ namespace rpe
             QHash<QString, QTreeWidgetItem*> groups;
             for (const MirrorChannel::PrefabEntry& p : _prefabs)
             {
+                // The group's IDENTITY stays the full tag name the host registered
+                // ("a::b::c") — it is what the world knows the tag by, and what the
+                // icon map is keyed on. Only the header LABEL is shortened to the
+                // leaf ("c"); the full name goes in the tooltip so the scope is
+                // still there when you want it. Two groups sharing a leaf therefore
+                // stay two groups.
                 const QString g = p.group.isEmpty() ? tr("(ungrouped)") : p.group;
                 QTreeWidgetItem*& node = groups[g];
                 if (!node)
                 {
-                    node = new QTreeWidgetItem(tree, { g });
+                    node = new QTreeWidgetItem(tree, { scopeLeaf(g) });
                     node->setFlags(Qt::ItemIsEnabled);
                     node->setExpanded(true);
+                    if (g != scopeLeaf(g))
+                    {
+                        node->setToolTip(0, g);
+                    }
                     if (const auto it = _groupIcons.constFind(p.group); it != _groupIcons.constEnd())
                     {
                         node->setIcon(0, it.value());
@@ -436,8 +482,16 @@ namespace rpe
                     shown += match ? 1 : 0;
                 }
                 top->setHidden(shown == 0); // hide an empty group header
+                if (shown)
+                    top->setExpanded(true);
             }
         });
+
+        // Type, then drive the list from the filter box: arrows walk the matches,
+        // Enter spawns the highlighted prefab (the topmost match by default), Esc
+        // closes. Connected AFTER the filter above so the re-highlight it installs
+        // sees the freshly filtered tree.
+        picker::driveTree(search, tree, popup, activate);
 
         // Position it under the button, then clamp fully inside the screen so it
         // never overflows the window edge (the button is right-aligned in the

@@ -1,5 +1,6 @@
 #include "rpe/gui/VariantEditor.h"
 
+#include "rpe/core/TypeRelease.h"
 #include "rpe/core/TypeRenderer.h"
 #include "rpe/gui/PropertyEditor.h"
 
@@ -24,6 +25,14 @@ namespace rpe
         _editor->setEditPolicy(EditPolicy::WriteBack);
         _editor->setInstanceProvider([this] { return _wrapper.instance(); });
         layout->addWidget(_editor, 1);
+        // A plugin unloading: an owned value of its type is its code — drop it now
+        // (any thread, plain data only); the tree unbinds itself.
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>& released) {
+            if (_wrapper.isValid() && isReleased(_wrapper.type(), released))
+            {
+                _wrapper = RttrVariantWrapper();
+            }
+        });
 
         connect(_editor, &PropertyEditor::propertyEdited, this, [this](const QString& path, const rttr::variant& v) {
             // The write already landed in _wrapper. Refresh dependent rows
@@ -36,14 +45,23 @@ namespace rpe
         });
     }
 
+    VariantEditor::~VariantEditor()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+        TypeUseScope scope;
+        _wrapper = RttrVariantWrapper();
+    }
+
     void VariantEditor::setVariant(const rttr::variant& v)
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         _wrapper = RttrVariantWrapper(v);
         _rebind();
     }
 
     void VariantEditor::updateVariant(const rttr::variant& v)
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         // Values-only path: replace the owned copy and re-read through the existing
         // schema. Locally-edited rows (including the one behind an open inline
         // editor, which is pinned while editing) are skipped by refresh(), so live
@@ -60,12 +78,14 @@ namespace rpe
 
     void VariantEditor::setLinked(rttr::type type, void* obj)
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         _wrapper = RttrVariantWrapper::makeLinked(type, obj);
         _rebind();
     }
 
     void VariantEditor::clear()
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         _wrapper.clear();
         _editor->unbind();
         _typeLabel->setText(tr("<no value>"));
@@ -73,6 +93,7 @@ namespace rpe
 
     void VariantEditor::_rebind()
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         if (!_wrapper.isValid())
         {
             clear();
@@ -86,6 +107,7 @@ namespace rpe
 
     void VariantEditor::refreshFromSource()
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         if (_wrapper.isValid())
         {
             _editor->refresh(_wrapper.instance());

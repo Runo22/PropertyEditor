@@ -16,9 +16,14 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QProxyStyle>
+#include <QSlider>
+#include <QSpinBox>
 #include <QStandardItemModel>
 #include <QStyle>
 #include <QToolButton>
+
+#include <cmath>
+#include <limits>
 
 namespace rpe
 {
@@ -409,6 +414,215 @@ namespace rpe
             }
         }
         return QComboBox::eventFilter(obj, ev);
+    }
+
+    // ── SliderEditor ─────────────────────────────────────────────────────────────
+
+    SliderEditor::SliderEditor(QAbstractSpinBox* spin, double min, double max, double step, QWidget* parent)
+        : QWidget(parent)
+        , _spin(spin)
+        , _min(min)
+        , _max(max)
+    {
+        // One slider tick per Step when that gives a sensible resolution; otherwise
+        // a fine fixed resolution (the spin box keeps the exact value either way).
+        const double span = _max - _min;
+        const double wanted = step > 0 ? span / step : 0;
+        _ticks = (wanted >= 1 && wanted <= 10000) ? static_cast<int>(std::lround(wanted)) : 1000;
+        _step = span / _ticks;
+
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(4);
+
+        _slider = new QSlider(Qt::Horizontal, this);
+        _slider->setRange(0, _ticks);
+        _slider->setFocusPolicy(Qt::NoFocus); // focus stays in the spin box
+        _slider->setPageStep(qMax(1, _ticks / 10));
+        layout->addWidget(_slider, 1);
+
+        _spin->setParent(this);
+        _spin->setFrame(false);
+        _spin->setMinimumWidth(qMax(56, _spin->sizeHint().width()));
+        layout->addWidget(_spin, 0);
+
+        setFocusProxy(_spin);
+        setAutoFillBackground(true); // cover the cell's value text
+
+        if (auto* d = qobject_cast<QDoubleSpinBox*>(_spin))
+        {
+            connect(d, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this] { _syncSliderFromSpin(); });
+        }
+        else if (auto* i = qobject_cast<QSpinBox*>(_spin))
+        {
+            connect(i, QOverload<int>::of(&QSpinBox::valueChanged), this, [this] { _syncSliderFromSpin(); });
+        }
+        connect(_slider, &QSlider::valueChanged, this, [this](int pos) { _syncSpinFromSlider(pos); });
+        _syncSliderFromSpin();
+    }
+
+    double SliderEditor::_spinValue() const
+    {
+        if (auto* d = qobject_cast<QDoubleSpinBox*>(_spin))
+        {
+            return d->value();
+        }
+        if (auto* i = qobject_cast<QSpinBox*>(_spin))
+        {
+            return i->value();
+        }
+        return _min;
+    }
+
+    void SliderEditor::_setSpinValue(double v)
+    {
+        if (auto* d = qobject_cast<QDoubleSpinBox*>(_spin))
+        {
+            d->setValue(v);
+        }
+        else if (auto* i = qobject_cast<QSpinBox*>(_spin))
+        {
+            i->setValue(static_cast<int>(std::lround(v)));
+        }
+    }
+
+    void SliderEditor::_syncSliderFromSpin()
+    {
+        if (_syncing)
+        {
+            return;
+        }
+        _syncing = true;
+        const double t = _step > 0 ? (_spinValue() - _min) / _step : 0;
+        _slider->setValue(qBound(0, static_cast<int>(std::lround(t)), _ticks));
+        _syncing = false;
+    }
+
+    void SliderEditor::_syncSpinFromSlider(int pos)
+    {
+        if (_syncing)
+        {
+            return;
+        }
+        _syncing = true;
+        // The ends land exactly on Min/Max, not on an accumulated rounding error.
+        _setSpinValue(pos >= _ticks ? _max : _min + pos * _step);
+        _syncing = false;
+    }
+
+    // ── VectorEditor ─────────────────────────────────────────────────────────────
+
+    QColor VectorEditor::axisColor(const QString& name)
+    {
+        const QString n = name.trimmed().toLower();
+        if (n == QLatin1String("x") || n == QLatin1String("r"))
+        {
+            return QColor(0xD9, 0x4F, 0x4F); // red
+        }
+        if (n == QLatin1String("y") || n == QLatin1String("g"))
+        {
+            return QColor(0x5A, 0xA8, 0x4C); // green
+        }
+        if (n == QLatin1String("z") || n == QLatin1String("b"))
+        {
+            return QColor(0x4A, 0x86, 0xD8); // blue
+        }
+        if (n == QLatin1String("w") || n == QLatin1String("a"))
+        {
+            return QColor(0x8A, 0x8F, 0x98); // grey
+        }
+        return QColor();
+    }
+
+    VectorEditor::VectorEditor(const QVector<Field>& fields, QWidget* parent)
+        : QWidget(parent)
+    {
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(3);
+
+        // Axis chips only when the fields ARE axes — all of x/y/z/w, or all of
+        // r/g/b/a. A Rect{x, y, w, h} would otherwise get a red X, a grey W and a
+        // plain "h": names it is, then.
+        const auto inSet = [&](const QString& set) {
+            for (const Field& f : fields)
+            {
+                const QString n = f.name.trimmed().toLower();
+                if (n.size() != 1 || !set.contains(n))
+                    return false;
+            }
+            return true;
+        };
+        const bool axes = inSet(QStringLiteral("xyzw")) || inSet(QStringLiteral("rgba"));
+
+        for (const Field& f : fields)
+        {
+            // The label: a coloured one-letter chip for an axis, the name otherwise.
+            const QColor axis = axes ? axisColor(f.name) : QColor();
+            auto* label = new QLabel(axis.isValid() ? f.name.trimmed().toUpper() : f.name, this);
+            label->setAlignment(Qt::AlignCenter);
+            label->setMinimumWidth(14);
+            if (axis.isValid())
+            {
+                label->setStyleSheet(QStringLiteral("QLabel { background: %1; color: white; font-weight: bold;"
+                                                    " border-radius: 2px; padding: 0 3px; }")
+                                         .arg(axis.name()));
+            }
+            layout->addWidget(label, 0);
+
+            QAbstractSpinBox* spin = nullptr;
+            if (f.integral)
+            {
+                auto* sb = new QSpinBox(this);
+                sb->setRange(static_cast<int>(qMax<double>(f.min, std::numeric_limits<int>::min())),
+                             static_cast<int>(qMin<double>(f.max, std::numeric_limits<int>::max())));
+                sb->setSingleStep(f.step > 0 ? static_cast<int>(f.step) : 1);
+                spin = sb;
+            }
+            else
+            {
+                auto* sb = new QDoubleSpinBox(this);
+                sb->setDecimals(f.decimals);
+                sb->setRange(f.min, f.max);
+                sb->setSingleStep(f.step > 0 ? f.step : 0.1);
+                spin = sb;
+            }
+            spin->setFrame(false);
+            spin->setButtonSymbols(QAbstractSpinBox::NoButtons); // room for the numbers
+            spin->setMinimumWidth(40);
+            layout->addWidget(spin, 1);
+            _spins.append(spin);
+        }
+        if (!_spins.isEmpty())
+        {
+            setFocusProxy(_spins.first());
+        }
+        setAutoFillBackground(true); // cover the cell's summary text
+    }
+
+    double VectorEditor::value(int i) const
+    {
+        if (auto* d = qobject_cast<QDoubleSpinBox*>(_spins.value(i)))
+        {
+            return d->value();
+        }
+        if (auto* s = qobject_cast<QSpinBox*>(_spins.value(i)))
+        {
+            return s->value();
+        }
+        return 0;
+    }
+
+    void VectorEditor::setValue(int i, double v)
+    {
+        if (auto* d = qobject_cast<QDoubleSpinBox*>(_spins.value(i)))
+        {
+            d->setValue(v);
+        }
+        else if (auto* s = qobject_cast<QSpinBox*>(_spins.value(i)))
+        {
+            s->setValue(static_cast<int>(std::lround(v)));
+        }
     }
 
 } // namespace rpe

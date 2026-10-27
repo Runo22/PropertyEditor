@@ -39,6 +39,13 @@ namespace rpe
         FilterValueRole,  // QString — value text for filtering (expansion-independent:
                           //           a collapsed struct's "[a, b]" summary or an
                           //           array's "[N]" is matchable even while expanded)
+        ReadOnlyRole,     // QString — why the row can't be edited (see rpe::readOnlyReason);
+                          //           empty when it can. Drives the lock mark + tooltip.
+        InlineVectorRole, // bool    — a struct row of 2–4 writable numeric fields that
+                          //           edits inline as one row (x / y / z / w boxes)
+        GroupKeyRole,     // QString — grouped view (bindGroups): the row's group key; empty otherwise
+        IsGroupRole,      // bool    — the row is a group header (one per component)
+        GroupCountRole,   // int     — a group header's match count (setGroupCounts); 0 = none
     };
 
     // How committed edits are applied.
@@ -73,6 +80,37 @@ namespace rpe
         // ── Schema (GUI thread) ──────────────────────────────────────────────────
         void bindType(rttr::type type);
         void unbind();
+
+        // Grouped view — several objects in one tree, one header row per group (the
+        // browser's "search all components"). Each group's rows edit like a bound
+        // type's. Their paths carry the group: groupPath(key, "position.x"), so
+        // setPropertyValue, the edit sink and PropertyPathRole all address a row in
+        // a group unambiguously; splitGroupPath takes one apart.
+        struct Group
+        {
+            QString key;   // identity (a component's selection key)
+            QString label; // header text
+            rttr::type type = rttr::type::get<void>();
+        };
+        void bindGroups(const QVector<Group>& groups);
+        bool isGrouped() const
+        {
+            return _grouped;
+        }
+        static QString groupPath(const QString& key, const QString& relPath);
+        // False for a path that isn't a group path (then *relPath = path).
+        static bool splitGroupPath(const QString& path, QString* key, QString* relPath);
+        // WriteBack target per group (the grouped counterpart of setInstanceProvider).
+        void setGroupInstanceProvider(std::function<rttr::instance(const QString& key)> provider);
+        // Match counts shown on the group headers (GroupCountRole).
+        void setGroupCounts(const QHash<QString, int>& counts);
+        // Forget the values of the row at `path` and everything below it (GUI
+        // thread; frozen rows keep theirs) — e.g. a grouped search hit that stopped
+        // matching: its fields must not linger with values from an older round.
+        void clearValues(const QString& path);
+        QModelIndex groupIndex(const QString& key) const;
+        // The row at `path` (column 0), or an invalid index.
+        QModelIndex indexForPath(const QString& path) const;
         rttr::type boundType() const
         {
             return _boundType;
@@ -135,8 +173,14 @@ namespace rpe
 
         // ── Local edit / reset ──────────────────────────────────────────────────────
         void beginLocalEdit(const QString& path);
+        // The pin an open inline editor puts on its row (so live updates can't
+        // overwrite what you're typing) — a local edit too, but a transient one:
+        // hasAnyLocalEdit() doesn't count it until a commit turns it into a real
+        // draft (LocalEdit policy). Used by PropertyDelegate.
+        void beginEditorPin(const QString& path);
         void resetNode(const QString& path);
         void resetAll();
+        // Frozen values the user has (drafts, "Local edit") — not an open editor's pin.
         bool hasAnyLocalEdit() const;
 
         // ── QAbstractItemModel ───────────────────────────────────────────────────
@@ -155,6 +199,10 @@ namespace rpe
         // node was frozen, reset, or an edit released one. Lets the view enable the
         // Reset control only while there is actually something frozen to release.
         void localEditsChanged();
+        // The bound type was released (TypeBridge::unregisterType — a plugin is
+        // unloading): the model has unbound itself. `typeName` is the released type's
+        // RTTR name, for rebinding once it is registered again.
+        void boundTypeReleased(const QString& typeName);
 
     private slots:
         void _flushPending();
@@ -178,10 +226,41 @@ namespace rpe
         void _forgetNodes(PropertyNode* node); // remove node + its subtree from _nodeByPath
         PropertyNode* _findNode(const QString& path) const;
         bool _applyEdit(PropertyNode* node, const rttr::variant& newVal);
+        // Type release (rpe/core/TypeRelease.h): runs on the releasing thread, drops
+        // every reflected handle/value the tree holds, then queues _finishRelease.
+        void _onTypesReleased(const std::vector<rttr::type>& released);
+        // Grouped view: the group header above `node` (nullptr if not grouped).
+        const PropertyNode* _groupOf(const PropertyNode* node) const;
+        bool _isGroupNode(const PropertyNode* node) const
+        {
+            return _grouped && node && node->parent() == _root.get();
+        }
+        bool _grouped = false;
+        QString _editorPinPath; // the row an open editor pinned (see beginEditorPin)
+        QHash<const PropertyNode*, QString> _groupKeys; // header node → key
+        QHash<QString, int> _groupCounts;
+        std::function<rttr::instance(const QString&)> _groupInstanceProvider;
+        void _finishRelease();
+
+        int _releaseHandle = 0;
+        std::atomic<bool> _released { false };
+        QString _releasedTypeName;
 
         std::unique_ptr<PropertyNode> _root;
         QHash<QString, PropertyNode*> _nodeByPath;
         rttr::type _boundType = rttr::type::get<void>();
+        // Why a node can't be edited (rpe::readOnlyReason), cached per PATH — not per
+        // node pointer: array rows are rebuilt on refresh, and a new node landing at a
+        // freed node's address must not inherit its answer — and dropped whenever the
+        // bound schema, the bridge registry or the set of locked types changes.
+        // flags() is asked on every paint.
+        QString _readOnlyReason(const PropertyNode* node) const;
+        // A struct of 2–4 numeric (non-bool, non-enum, int-sized or floating) leaf
+        // fields, none of them read-only: its row can be edited inline as a vector.
+        bool _isInlineVector(const PropertyNode* node) const;
+        mutable QHash<QString, QString> _roCache;
+        mutable quint64 _roRegistryGen = ~quint64(0);
+        mutable quint64 _roLockGen = ~quint64(0);
 
         mutable QMutex _pendingMutex;
         QHash<QString, rttr::variant> _pendingUpdates;

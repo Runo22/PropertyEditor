@@ -1,6 +1,8 @@
 #include "rpe/ecs/EntityComponentBrowser.h"
 
+#include "rpe/core/PropertySearch.h"
 #include "rpe/core/TypeBridge.h"
+#include "rpe/core/TypeRelease.h"
 #include "rpe/ecs/ComponentScan.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/ecs/EntityListWidget.h"
@@ -8,11 +10,15 @@
 #include "rpe/gui/PropertyEditor.h"
 
 #include <QCheckBox>
+#include <QDateTime>
+#include <QMenu>
 #include <QSplitter>
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <optional>
 #include <string>
 
 #include <rttr/instance.h>
@@ -31,9 +37,42 @@ namespace rpe
         _liveTimer->setInterval(20); // 50 Hz default
         connect(_liveTimer, &QTimer::timeout, this, &EntityComponentBrowser::_onLiveUpdate);
 
+        // A plugin unloading: drop what we hold of its types now, rebind by name
+        // once they are back (see rpe/core/TypeRelease.h).
+        _releaseHandle = addTypeReleaseHandler(
+            [this](const std::vector<rttr::type>& released) { _onTypesReleased(released); });
+        connect(_propertyEditor, &PropertyEditor::boundTypeReleased, this, [this] { _onBoundTypeReleased(); });
+        _rebindTimer = new QTimer(this);
+        _rebindTimer->setInterval(100);
+        connect(_rebindTimer, &QTimer::timeout, this, &EntityComponentBrowser::_tryRebindReleased);
+
         _mirrorTimer = new QTimer(this);
         _mirrorTimer->setInterval(33); // ~30 Hz GUI poll of the mirror
         connect(_mirrorTimer, &QTimer::timeout, this, &EntityComponentBrowser::_onMirrorPoll);
+
+        // Search all components (scope button + list counts).
+        _propertyEditor->setSearchAllAvailable(true);
+        connect(_propertyEditor, &PropertyEditor::filterTextChanged, this, &EntityComponentBrowser::_onSearchChanged);
+        connect(_propertyEditor, &PropertyEditor::searchAllToggled, this, &EntityComponentBrowser::_onSearchChanged);
+        connect(_propertyEditor, &PropertyEditor::currentPathChanged, this, &EntityComponentBrowser::_onGroupRowPicked);
+        _searchTimer = new QTimer(this);
+        _searchTimer->setInterval(250); // same cadence as the mirror's rounds
+        connect(_searchTimer, &QTimer::timeout, this, &EntityComponentBrowser::_runDirectSearch);
+        // Direct mode, grouped view: a WriteBack edit lands in the row's own component.
+        _propertyEditor->setGroupInstanceProvider([this](const QString& key) -> rttr::instance {
+            const ComponentInfo ci = _componentList->componentInfo(key);
+            if (!_world || !_selectedEntity.is_alive() || !ci.rttrType.is_valid())
+            {
+                return rttr::instance();
+            }
+            void* p = _selectedEntity.get_mut(ci.id.raw_id());
+            if (!p)
+            {
+                return rttr::instance();
+            }
+            _groupWrapper = RttrVariantWrapper::makeLinked(ci.rttrType, p);
+            return _groupWrapper.instance();
+        });
     }
 
     void EntityComponentBrowser::_setupUi()
@@ -80,6 +119,17 @@ namespace rpe
         connect(_componentList, &ComponentListWidget::addComponentRequested, this, &EntityComponentBrowser::_onAddComponent);
         connect(_componentList, &ComponentListWidget::removeComponentRequested, this, &EntityComponentBrowser::_onRemoveComponent);
         connect(_componentList, &ComponentListWidget::removeComponentIdRequested, this, &EntityComponentBrowser::_onRemoveComponentId);
+        // An Add menu is about to open: have the producer rescan what it offers. The
+        // catalog is otherwise rescanned only on a detectable change or a slow
+        // safety interval, which can miss a renamed / swapped-in component.
+        const auto refreshCatalog = [this] {
+            if (_channel)
+            {
+                _channel->requestCatalogRefresh();
+            }
+        };
+        connect(_componentList, &ComponentListWidget::addPickerWanted, this, refreshCatalog);
+        connect(_entityList, &EntityListWidget::addPickerWanted, this, refreshCatalog);
         connect(_propertyEditor, &PropertyEditor::propertyEdited, this, &EntityComponentBrowser::propertyEdited);
         connect(_writeCheck, &QCheckBox::toggled, this, &EntityComponentBrowser::_onWriteToggled);
     }
@@ -127,6 +177,14 @@ namespace rpe
         }
         _mainLayout->addWidget(root, 1);
         _layoutRoot = root;
+
+        // Re-parenting into a fresh splitter tree rebuilds the focus chain in
+        // whatever order the widgets landed, so restate it: Tab walks the browser
+        // the way it reads, top-level control first, then the three panels in the
+        // order you work through them.
+        setTabOrder(_writeCheck, _entityList);
+        setTabOrder(_entityList, _componentList);
+        setTabOrder(_componentList, _propertyEditor);
     }
 
     void EntityComponentBrowser::setBrowserLayout(Layout layout)
@@ -149,11 +207,15 @@ namespace rpe
             _writeCheck->setVisible(true);
         }
 
+        // Clear the panels BEFORE handing the world to the list: the list auto-selects
+        // its top entity, which fills the component panel through _onEntitySelected.
+        // Clearing afterwards left that entity highlighted with an empty panel — and
+        // clicking it again changed nothing (it was already current).
         _world = world;
-        _entityList->setWorld(world);
         _liveTimer->stop();
         _componentList->clearEntity();
         _propertyEditor->unbind();
+        _entityList->setWorld(world);
         _applyEntityFilter(); // re-apply the configured filter to the new mode
     }
 
@@ -208,10 +270,19 @@ namespace rpe
 
     void EntityComponentBrowser::setPrefabGroups(const QVector<PrefabGroup>& groups)
     {
+        // Remember them: the tag names only reach the producer through a channel,
+        // and the host may well configure the browser before handing it the mirror.
+        // Dropping them then would leave the picker silently ungrouped.
+        _prefabGroups = groups;
+        _applyPrefabGroups();
+    }
+
+    void EntityComponentBrowser::_applyPrefabGroups()
+    {
         QStringList tags;
         QHash<QString, QIcon> icons;
-        tags.reserve(groups.size());
-        for (const PrefabGroup& g : groups)
+        tags.reserve(_prefabGroups.size());
+        for (const PrefabGroup& g : _prefabGroups)
         {
             tags.append(g.tag);
             if (!g.icon.isNull())
@@ -232,47 +303,135 @@ namespace rpe
         _entityList->setEntityRemovingEnabled(on);
     }
 
-    void EntityComponentBrowser::addEntityAction(const EntityAction& action)
+    qulonglong EntityComponentBrowser::_menuEntityId() const
     {
-        _entityActions.append(action);
-        _entityList->setContextActions(_entityActions);
+        return _mirrorEntity != 0 ? _mirrorEntity
+                                  : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
     }
 
-    void EntityComponentBrowser::addComponentAction(const ComponentAction& action)
+    int EntityComponentBrowser::addEntityAction(const EntityAction& action)
     {
-        _componentActions.append(action);
+        const int handle = _nextMenuHandle++;
+        _entityActions.append({ handle, action });
+        _pushEntityActions();
+        return handle;
+    }
+
+    void EntityComponentBrowser::removeEntityAction(int handle)
+    {
+        const auto n = _entityActions.size();
+        _entityActions.erase(std::remove_if(_entityActions.begin(), _entityActions.end(),
+                                            [handle](const auto& e) { return e.first == handle; }),
+                             _entityActions.end());
+        if (_entityActions.size() != n)
+            _pushEntityActions();
+    }
+
+    void EntityComponentBrowser::_pushEntityActions()
+    {
+        QVector<EntityAction> list;
+        list.reserve(_entityActions.size());
+        for (const auto& e : _entityActions)
+            list.append(e.second);
+        _entityList->setContextActions(list);
+    }
+
+    int EntityComponentBrowser::addComponentAction(const ComponentAction& action)
+    {
+        const int handle = _nextMenuHandle++;
+        _componentActions.append({ handle, action });
+        _pushComponentActions();
+        return handle;
+    }
+
+    void EntityComponentBrowser::removeComponentAction(int handle)
+    {
+        const auto n = _componentActions.size();
+        _componentActions.erase(std::remove_if(_componentActions.begin(), _componentActions.end(),
+                                               [handle](const auto& e) { return e.first == handle; }),
+                                _componentActions.end());
+        if (_componentActions.size() != n)
+            _pushComponentActions();
+    }
+
+    void EntityComponentBrowser::_pushComponentActions()
+    {
         // Wrap each host action so the widget-level callback (key, rawId) forwards the
         // CURRENTLY selected entity id, read at click time.
         QVector<ComponentListWidget::MenuAction> wrapped;
         wrapped.reserve(_componentActions.size());
-        for (const ComponentAction& a : _componentActions)
+        for (const auto& e : _componentActions)
         {
-            const auto cb = a.callback;
-            wrapped.append({ a.label, a.icon, [this, cb](const QString& key, qulonglong rawId) {
-                                const qulonglong id = _mirrorEntity != 0
-                                    ? _mirrorEntity
-                                    : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
-                                if (cb)
-                                    cb(id, key, rawId);
-                            } });
+            const auto cb = e.second.callback;
+            wrapped.append({ e.second.label, e.second.icon,
+                             [this, cb](const QString& key, qulonglong rawId) {
+                                 if (cb)
+                                     cb(_menuEntityId(), key, rawId);
+                             },
+                             e.second.menu });
         }
         _componentList->setContextActions(wrapped);
     }
 
-    void EntityComponentBrowser::setEntityMenuHook(std::function<void(qulonglong, QMenu&)> hook)
+    int EntityComponentBrowser::addEntityMenuHook(EntityMenuHook hook)
     {
-        _entityList->setContextMenuHook(std::move(hook));
+        const int handle = _nextMenuHandle++;
+        _entityMenuHooks.append({ handle, std::move(hook) });
+        _installMenuHooks();
+        return handle;
     }
 
-    void EntityComponentBrowser::setComponentMenuHook(
-        std::function<void(qulonglong, const QString&, qulonglong, QMenu&)> hook)
+    int EntityComponentBrowser::addComponentMenuHook(ComponentMenuHook hook)
     {
-        _componentList->setContextMenuHook([this, hook](const QString& key, qulonglong rawId, QMenu& menu) {
-            const qulonglong id = _mirrorEntity != 0
-                ? _mirrorEntity
-                : (_selectedEntity.is_alive() ? static_cast<qulonglong>(_selectedEntity.id()) : 0);
-            if (hook)
-                hook(id, key, rawId, menu);
+        const int handle = _nextMenuHandle++;
+        _componentMenuHooks.append({ handle, std::move(hook) });
+        _installMenuHooks();
+        return handle;
+    }
+
+    void EntityComponentBrowser::removeMenuHook(int handle)
+    {
+        auto byHandle = [handle](const auto& e) { return e.first == handle; };
+        _entityMenuHooks.erase(std::remove_if(_entityMenuHooks.begin(), _entityMenuHooks.end(), byHandle),
+                               _entityMenuHooks.end());
+        _componentMenuHooks.erase(std::remove_if(_componentMenuHooks.begin(), _componentMenuHooks.end(), byHandle),
+                                  _componentMenuHooks.end());
+    }
+
+    void EntityComponentBrowser::setEntityMenuHook(EntityMenuHook hook)
+    {
+        _entityMenuHook = std::move(hook);
+        _installMenuHooks();
+    }
+
+    void EntityComponentBrowser::setComponentMenuHook(ComponentMenuHook hook)
+    {
+        _componentMenuHook = std::move(hook);
+        _installMenuHooks();
+    }
+
+    void EntityComponentBrowser::_installMenuHooks()
+    {
+        // One widget-level hook per list that runs every registered hook. Each run
+        // iterates a COPY, so a hook may add or remove hooks while the menu builds.
+        _entityList->setContextMenuHook([this](qulonglong id, QMenu& menu) {
+            const EntityMenuHook primary = _entityMenuHook;
+            const auto hooks = _entityMenuHooks;
+            if (primary)
+                primary(id, menu);
+            for (const auto& h : hooks)
+                if (h.second)
+                    h.second(id, menu);
+        });
+        _componentList->setContextMenuHook([this](const QString& key, qulonglong rawId, QMenu& menu) {
+            const qulonglong id = _menuEntityId();
+            const ComponentMenuHook primary = _componentMenuHook;
+            const auto hooks = _componentMenuHooks;
+            if (primary)
+                primary(id, key, rawId, menu);
+            for (const auto& h : hooks)
+                if (h.second)
+                    h.second(id, key, rawId, menu);
         });
     }
 
@@ -354,12 +513,394 @@ namespace rpe
         }
         setEditPolicy(s.editPolicy);
         setComponentEditingEnabled(s.allowComponentEditing);
+        _componentList->setPreferredComponents(s.preferredComponents);
+        _propertyEditor->setDragToScrubEnabled(s.dragToScrub);
         _applyEntityFilter();
+        _updateAddable(); // hiddenAddNamespaces may have changed
+    }
+
+    void EntityComponentBrowser::setHiddenAddNamespaces(const QStringList& namespaces)
+    {
+        _settings.hiddenAddNamespaces = namespaces;
+        _updateAddable();
+    }
+
+    void EntityComponentBrowser::setPreferredComponents(const QStringList& names)
+    {
+        _settings.preferredComponents = names;
+        _componentList->setPreferredComponents(names);
+    }
+
+    void EntityComponentBrowser::setDragToScrubEnabled(bool on)
+    {
+        _settings.dragToScrub = on;
+        _propertyEditor->setDragToScrubEnabled(on);
     }
 
     void EntityComponentBrowser::_onWriteToggled(bool on)
     {
         _propertyEditor->setEditPolicy(on ? EditPolicy::WriteBack : EditPolicy::LocalEdit);
+    }
+
+    EntityComponentBrowser::~EntityComponentBrowser()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+        TypeUseScope scope;
+        _liveWrapper = RttrVariantWrapper();
+        _groupWrapper = RttrVariantWrapper();
+    }
+
+    void EntityComponentBrowser::_onTypesReleased(const std::vector<rttr::type>& released)
+    {
+        // Any thread, while no other thread is in a TypeUseScope; the released
+        // module is still loaded. Only plain data here — no signals, no widgets.
+        if (isReleased(_selectedComponent.rttrType, released))
+        {
+            // Invalid (not void): _liveComponentPtr then reads nothing — the
+            // component's flecs id is about to die with the plugin.
+            _selectedComponent.rttrType = rttr::type::get_by_name(std::string());
+        }
+        if (_liveWrapper.isValid() && isReleased(_liveWrapper.type(), released))
+        {
+            _liveWrapper = RttrVariantWrapper(); // a variant made by the plugin's code
+        }
+        if (_groupWrapper.isValid() && isReleased(_groupWrapper.type(), released))
+        {
+            _groupWrapper = RttrVariantWrapper();
+        }
+    }
+
+    void EntityComponentBrowser::_onBoundTypeReleased()
+    {
+        _rebindPending = true;
+        _rebindGen = ~quint64(0); // try now
+        _tryRebindReleased();
+        if (_rebindPending && !_channel)
+        {
+            _rebindTimer->start(); // mirror mode retries on every poll instead
+        }
+    }
+
+    void EntityComponentBrowser::_tryRebindReleased()
+    {
+        if (!_rebindPending)
+        {
+            _rebindTimer->stop();
+            return;
+        }
+        const quint64 gen = TypeBridge::registryGeneration();
+        if (gen == _rebindGen)
+        {
+            return; // nothing registered since the last try
+        }
+        _rebindGen = gen;
+        if (_groupView)
+        {
+            _rebuildGroups(); // the grouped view rebuilds from the list, by name
+            _rebindPending = false;
+            _rebindTimer->stop();
+            return;
+        }
+        if (_channel)
+        {
+            if (_mirrorEntity == 0 || _mirrorComponent.isEmpty())
+            {
+                _rebindPending = false;
+                return;
+            }
+            const QString typeName = _pairTypeName.value(_mirrorComponent, _mirrorComponent);
+            if (TypeBridge::resolveByName(typeName.toUtf8().constData()).is_valid())
+            {
+                _onComponentNameSelected(_mirrorComponent); // clears _rebindPending
+            }
+            return;
+        }
+        // Direct mode: rebuild the entity's component list; it reselects the same
+        // component by name, which binds it again.
+        if (!_world || !_selectedEntity.is_alive())
+        {
+            _rebindPending = false;
+            _rebindTimer->stop();
+            return;
+        }
+        _componentList->setEntity(_world, _selectedEntity);
+    }
+
+    // ── search all components ────────────────────────────────────────────────────────
+
+    void EntityComponentBrowser::_onSearchChanged()
+    {
+        if (_propertyEditor->filterText() != _searchText)
+        {
+            _pendingReveal.clear(); // a new filter: the row to reveal is moot
+        }
+        _searchText = _propertyEditor->filterText();
+        _updateSearchTarget();
+        const bool hasEntity = _channel ? _mirrorEntity != 0 : _selectedEntity.is_alive();
+        const bool wantGroups = _propertyEditor->isSearchAll() && !_searchText.isEmpty() && hasEntity;
+        if (wantGroups && !_groupView)
+        {
+            _enterGroupView();
+        }
+        else if (!wantGroups && _groupView)
+        {
+            _leaveGroupView();
+        }
+    }
+
+    void EntityComponentBrowser::_updateSearchTarget()
+    {
+        // Counts from another entity / another text are stale: clear until the next
+        // round reports.
+        _componentList->setMatchCounts({}, !_searchText.isEmpty());
+        if (_channel)
+        {
+            _channel->setSearch(_mirrorEntity, _searchText);
+        }
+        else if (!_searchText.isEmpty() && _selectedEntity.is_alive())
+        {
+            _runDirectSearch();
+            _searchTimer->start();
+        }
+        else
+        {
+            _searchTimer->stop();
+        }
+        if (_searchText.isEmpty())
+        {
+            _componentList->setMatchCounts({}, false);
+        }
+        if (_groupView)
+        {
+            _rebuildGroups();
+        }
+    }
+
+    void EntityComponentBrowser::_runDirectSearch()
+    {
+        if (_channel || !_world || !_selectedEntity.is_alive() || _searchText.isEmpty())
+        {
+            _searchTimer->stop();
+            return;
+        }
+        if (_groupView && TypeBridge::registryGeneration() != _groupRegistryGen)
+        {
+            // A type came or went (a plugin reloading): the component list only
+            // re-lists on a selection, so do it here, then rebuild the groups from it
+            // — a released component's group returns once its type is back.
+            _groupRegistryGen = TypeBridge::registryGeneration();
+            _componentList->setEntity(_world, _selectedEntity);
+            _rebuildGroups(); // ends by searching again
+            return;
+        }
+        // Taken inside the guard (never wait for it holding one) and kept until the
+        // hits — values read through the components' properties — are gone. Declared
+        // first, so it is destroyed last.
+        std::optional<TypeUseScope> keep;
+        std::vector<MirrorChannel::SearchHit> hits;
+        const auto comps = _componentList->dataComponents();
+        withGuard(_guard, [&] {
+            keep.emplace();
+            std::vector<PropertyHit> found;
+            for (const auto& kc : comps)
+            {
+                const ComponentInfo ci = _componentList->componentInfo(kc.first);
+                if (!ci.rttrType.is_valid())
+                {
+                    continue;
+                }
+                void* p = _selectedEntity.get_mut(ci.id.raw_id());
+                const rttr::variant access = p ? TypeBridge::wrap(ci.rttrType, p) : rttr::variant();
+                if (!access.is_valid())
+                {
+                    continue;
+                }
+                found.clear();
+                searchProperties(rttr::instance(access), ci.rttrType, _searchText, found);
+                for (PropertyHit& h : found)
+                {
+                    hits.push_back({ kc.first, std::move(h.path), std::move(h.value) });
+                }
+            }
+        });
+        _applySearchResults(hits);
+    }
+
+    void EntityComponentBrowser::_applySearchResults(const std::vector<MirrorChannel::SearchHit>& hits)
+    {
+        QHash<QString, int> counts;
+        for (const auto& h : hits)
+        {
+            ++counts[h.component];
+        }
+        _componentList->setMatchCounts(counts, true);
+        if (!_groupView)
+        {
+            return;
+        }
+        QSet<QString> now;
+        for (const auto& h : hits)
+        {
+            if (_groupKeys.contains(h.component))
+            {
+                const QString gp = PropertyModel::groupPath(h.component, h.path);
+                _propertyEditor->setPropertyValue(gp, h.value);
+                now.insert(gp);
+            }
+        }
+        // A row that matched last round but not this one: clear it — and its fields,
+        // when it was a struct or container hit — so it drops out of the filtered
+        // view instead of lingering with stale values. (Cleared now; this round's
+        // values are queued, so a field that matches on its own still shows.)
+        for (const QString& gp : std::as_const(_hitPaths))
+        {
+            if (!now.contains(gp))
+            {
+                _propertyEditor->model()->clearValues(gp);
+            }
+        }
+        _hitPaths = now;
+        // The headers show the same counts as the list's badges.
+        _propertyEditor->model()->setGroupCounts(counts);
+    }
+
+    void EntityComponentBrowser::_enterGroupView()
+    {
+        _groupView = true;
+        _groupRegistryGen = TypeBridge::registryGeneration();
+        _groupKeys.clear(); // force the build
+        _groupFocusPath.clear();
+        _rebuildGroups();
+        _pushInterest();
+        _refreshPinnedTint();
+    }
+
+    void EntityComponentBrowser::_leaveGroupView()
+    {
+        _groupView = false;
+        _groupKeys.clear();
+        _hitPaths.clear();
+        const QString focus = _groupFocusPath;
+        // Back to the single component — the one picked last in the grouped view —
+        // with the filter still applied and the picked row selected.
+        if (_channel)
+        {
+            if (!_mirrorComponent.isEmpty())
+            {
+                _onComponentNameSelected(_mirrorComponent);
+            }
+            else
+            {
+                _propertyEditor->unbind();
+            }
+        }
+        else if (const ComponentInfo sel = [this] {
+                     TypeUseScope scope;
+                     return _selectedComponent;
+                 }();
+                 TypeBridge::has(sel.rttrType))
+        {
+            _onComponentSelected(sel);
+        }
+        else
+        {
+            _propertyEditor->unbind();
+        }
+        if (!focus.isEmpty() && !_propertyEditor->revealPath(focus) && _channel)
+        {
+            // Mirror mode: the row may be hidden until its value arrives (it can
+            // match the filter by value) — select it as soon as it shows.
+            _pendingReveal = focus;
+            _pendingRevealUntil = QDateTime::currentMSecsSinceEpoch() + 3000;
+        }
+        _refreshPinnedTint();
+    }
+
+    void EntityComponentBrowser::_rebuildGroups()
+    {
+        if (!_groupView)
+        {
+            return;
+        }
+        // Resolve the types and bind them with no release in between (a released
+        // handle would be dereferenced by the bind). Not held for the search below,
+        // which in direct mode takes the world guard.
+        std::optional<TypeUseScope> scope;
+        scope.emplace();
+        QVector<PropertyModel::Group> groups;
+        QStringList keys;
+        for (const auto& kc : _componentList->dataComponents())
+        {
+            rttr::type t = rttr::type::get_by_name(std::string());
+            if (_channel)
+            {
+                t = TypeBridge::resolveByName(_pairTypeName.value(kc.first, kc.first).toUtf8().constData());
+            }
+            else
+            {
+                t = _componentList->componentInfo(kc.first).rttrType;
+            }
+            if (!t.is_valid())
+            {
+                continue;
+            }
+            groups.append({ kc.first, kc.second, t });
+            keys.append(kc.first);
+        }
+        if (keys == _groupKeys && _propertyEditor->model()->isGrouped())
+        {
+            return; // same components — keep the tree (and what's selected in it)
+        }
+
+        _groupKeys = keys;
+        _hitPaths.clear();
+        _propertyEditor->bindGroups(groups);
+        scope.reset(); // bound: no rpe type handle of ours is used past here
+        const QString current = _channel ? _mirrorComponent : _componentList->currentComponentKey();
+        if (!current.isEmpty())
+        {
+            _propertyEditor->revealGroup(current);
+        }
+        _refreshPinnedTint(); // the keys changed: tint the new rows (e.g. after an entity switch)
+        // Fill the new tree now rather than at the next round.
+        if (_channel)
+        {
+            _channel->requestSearchRefresh();
+        }
+        else
+        {
+            _runDirectSearch();
+        }
+    }
+
+    void EntityComponentBrowser::_onGroupRowPicked(const QString& path)
+    {
+        QString key, rel;
+        if (!_groupView || !PropertyModel::splitGroupPath(path, &key, &rel) || key.isEmpty())
+        {
+            return;
+        }
+        _groupFocusPath = rel;
+        // Keep the list (and what the browser considers selected) on the row's
+        // component, without leaving the grouped view.
+        _componentList->setCurrentKeySilently(key);
+        if (_channel)
+        {
+            if (key != _mirrorComponent)
+            {
+                _mirrorComponent = key;
+                _pushInterest();
+            }
+        }
+        else
+        {
+            TypeUseScope scope; // the handle can't be released while we store it
+            const ComponentInfo ci = _componentList->componentInfo(key);
+            if (TypeBridge::has(ci.rttrType))
+            {
+                _selectedComponent = ci;
+            }
+        }
     }
 
     // NOTE: touches the world; callers must already hold the world guard (the
@@ -393,6 +934,7 @@ namespace rpe
         _selectedEntity = e;
         _liveTimer->stop();
         _componentList->setEntity(_world, e); // auto-selects first component
+        _onSearchChanged(); // search the new entity (and keep the grouped view on it)
         emit entitySelected(e);
         emit entityIdSelected(static_cast<qulonglong>(e.id()));
     }
@@ -413,6 +955,11 @@ namespace rpe
         _pairRawId.clear();
         _componentList->clearEntity();
         _propertyEditor->unbind();
+        // No entity, no grouped view (it comes back with the next selection).
+        _groupView = false;
+        _groupKeys.clear();
+        _hitPaths.clear();
+        _updateSearchTarget();
         if (_channel)
         {
             _pushInterest(); // interest for entity 0 → producer stops sending components
@@ -423,14 +970,45 @@ namespace rpe
 
     void EntityComponentBrowser::_onComponentSelected(ComponentInfo info)
     {
-        _selectedComponent = info;
-        if (!info.rttrType.is_valid())
+        _rebindPending = false;
+        _rebindTimer->stop();
+        bool bound = false;
+        {
+            // `info` was copied out of the list before this slot ran: a type release
+            // since then leaves it naming a type that's gone — no longer bridged
+            // (compared by id, never dereferenced). Check, store and bind in one
+            // read section, so no release can slip in between.
+            TypeUseScope scope;
+            if (!TypeBridge::has(info.rttrType))
+            {
+                info.rttrType = rttr::type::get_by_name(std::string());
+            }
+            _selectedComponent = info;
+            if (!_groupView && info.rttrType.is_valid())
+            {
+                _propertyEditor->bindType(info.rttrType);
+                bound = true;
+            }
+        }
+        if (_groupView)
+        {
+            // The grouped view shows every component: bring this one's group into
+            // view (outside the read section — it moves the current row, which
+            // signals the host).
+            _propertyEditor->revealGroup(_componentList->currentComponentKey());
+            emit componentSelected(info);
+            return;
+        }
+        if (!bound)
         {
             return;
         }
-
-        _propertyEditor->bindType(info.rttrType);
         withGuard(_guard, [&] {
+            TypeUseScope scope; // inside the guard: never wait for a release holding it
+            if (!TypeBridge::has(info.rttrType))
+            {
+                return; // released while we waited for the guard
+            }
             if (void* p = _liveComponentPtr())
             {
                 _liveWrapper = RttrVariantWrapper::makeLinked(info.rttrType, p);
@@ -443,6 +1021,18 @@ namespace rpe
 
     void EntityComponentBrowser::_onComponentDeselected()
     {
+        if (_groupView)
+        {
+            // The grouped view isn't about the list's selection; a component that
+            // left the entity just leaves the view.
+            {
+                TypeUseScope scope;
+                _selectedComponent = {};
+            }
+            _rebuildGroups();
+            emit componentDeselected();
+            return;
+        }
         _liveTimer->stop();
         _selectedComponent = {};
         _propertyEditor->unbind();
@@ -455,6 +1045,7 @@ namespace rpe
         // section: the component could move or be removed between the two
         // otherwise. Painting later reads only the model's cached values.
         withGuard(_guard, [&] {
+            TypeUseScope scope; // inside the guard: never wait for a release holding it
             if (void* p = _liveComponentPtr())
             {
                 _liveWrapper.relink(p);
@@ -489,9 +1080,22 @@ namespace rpe
         if (_channel)
         {
             _propertyEditor->setEditPolicy(EditPolicy::LocalEdit);
-            auto ch = _channel; // capture the shared_ptr (not 'this' indirection)
-            _propertyEditor->setEditSink([ch](const QString& path, const rttr::variant& v) {
-                ch->queueEdit(path, v);
+            // Address the edit to the entity + component it was made on, NOW: an
+            // inline editor commits on focus-out, i.e. inside the very click that
+            // selects another entity — by the time the sim applies it, the
+            // selection has moved and the same leaf path exists there too.
+            auto ch = _channel; // the shared_ptr (the channel outlives the mirror)
+            _propertyEditor->setEditSink([this, ch](const QString& path, const rttr::variant& v) {
+                QString key, rel;
+                if (PropertyModel::splitGroupPath(path, &key, &rel))
+                {
+                    // A row of the grouped view: its own component, at its own path —
+                    // and a search round right away, so the change echoes promptly.
+                    ch->queueEdit(_mirrorEntity, key, rel, v);
+                    ch->requestSearchRefresh();
+                    return;
+                }
+                ch->queueEdit(_mirrorEntity, _mirrorComponent, path, v);
             });
             // Mirror mode is fed via setEntries(); make sure the list never queries a
             // (possibly stale) world, so a filter change re-filters the feed instead.
@@ -501,7 +1105,8 @@ namespace rpe
             // always go through the channel's edit queue), so hide it.
             _writeCheck->setVisible(false);
             _mirrorTimer->start();
-            _applyEntityFilter(); // push the configured filter to the producer
+            _applyEntityFilter();  // push the configured filter to the producer
+            _applyPrefabGroups();  // …and the prefab group tags, configured or not yet
         }
         else
         {
@@ -547,16 +1152,25 @@ namespace rpe
                 // Data-carrying pairs pin too: they have no resolvable flecs name, so
                 // the pin carries the pair id (from the row) and the producer resolves
                 // it by id + ecs_get_typeid. Plain components pass rawId 0 (by-name).
-                if (_pinWidget && _mirrorEntity != 0 && !_mirrorComponent.isEmpty())
+                QString comp, rel; // a grouped-view row names its own component
+                if (!PropertyModel::splitGroupPath(path, &comp, &rel))
                 {
-                    _pinWidget->pin(_mirrorEntity, _entityList->currentLabel(), _mirrorComponent,
-                                    path, _pairRawId.value(_mirrorComponent, 0));
+                    comp = _mirrorComponent;
+                }
+                if (_pinWidget && _mirrorEntity != 0 && !comp.isEmpty())
+                {
+                    _pinWidget->pin(_mirrorEntity, _entityList->currentLabel(), comp, rel, _pairRawId.value(comp, 0));
                 }
             });
             connect(_propertyEditor, &PropertyEditor::unpinRequested, this, [this](const QString& path) {
+                QString comp, rel;
+                if (!PropertyModel::splitGroupPath(path, &comp, &rel))
+                {
+                    comp = _mirrorComponent;
+                }
                 if (_pinWidget && _mirrorEntity != 0)
                 {
-                    _pinWidget->unpin(_mirrorEntity, _mirrorComponent, path);
+                    _pinWidget->unpin(_mirrorEntity, comp, rel);
                 }
             });
             connect(w, &PinnedPropertiesWidget::pinsChanged, this, &EntityComponentBrowser::_refreshPinnedTint);
@@ -567,6 +1181,19 @@ namespace rpe
 
     void EntityComponentBrowser::_refreshPinnedTint()
     {
+        if (_groupView && _pinWidget && _channel)
+        {
+            QSet<QString> all; // the grouped view addresses rows by group path
+            for (const QString& key : _groupKeys)
+            {
+                for (const QString& p : _pinWidget->pinnedPaths(_mirrorEntity, key))
+                {
+                    all.insert(PropertyModel::groupPath(key, p));
+                }
+            }
+            _propertyEditor->setPinnedPaths(all);
+            return;
+        }
         _propertyEditor->setPinnedPaths((_pinWidget && _channel)
                                             ? _pinWidget->pinnedPaths(_mirrorEntity, _mirrorComponent)
                                             : QSet<QString>());
@@ -578,7 +1205,8 @@ namespace rpe
         {
             return;
         }
-        const QStringList paths = _mirrorComponent.isEmpty()
+        // The grouped view is fed by search rounds, not by watched paths.
+        const QStringList paths = (_mirrorComponent.isEmpty() || _groupView)
             ? QStringList()
             : _propertyEditor->visibleLeafPaths(_openFieldsOnly);
         _channel->setInterest(_mirrorEntity, _mirrorComponent, paths);
@@ -637,6 +1265,21 @@ namespace rpe
                 }
             }
             _updateAddable();
+            if (_groupView)
+            {
+                _rebuildGroups(); // only rebuilds when the set of components changed
+            }
+        }
+
+        {
+            // The hits' values come from the components' properties (maybe a
+            // plugin's): poll, use and destroy them inside one read section.
+            TypeUseScope scope;
+            MirrorChannel::SearchResults found;
+            if (_channel->pollSearchResults(found) && found.entity == _mirrorEntity && found.text == _searchText)
+            {
+                _applySearchResults(found.hits);
+            }
         }
 
         QVector<MirrorChannel::CatalogEntry> catalog;
@@ -657,18 +1300,76 @@ namespace rpe
         // it, so it can't land on the next selection.
         if (_mirrorEntity != 0)
         {
+            TypeUseScope scope; // the values may come from a plugin's properties
             for (auto& u : _channel->pollValues())
             {
+                // Drop values read from a target we've since moved away from: a pump
+                // that raced the selection change can still deliver the old entity's
+                // leaves, and they share paths with the new one.
+                if (u.entity != 0 && (u.entity != _mirrorEntity || u.component != _mirrorComponent))
+                {
+                    continue;
+                }
                 _propertyEditor->setPropertyValue(u.path, u.value);
             }
         }
         else
         {
+            TypeUseScope scope;
             _channel->pollValues(); // drain
+        }
+
+        _tryRebindReleased();
+
+        if (!_pendingReveal.isEmpty())
+        {
+            if (_groupView || _propertyEditor->revealPath(_pendingReveal)
+                || QDateTime::currentMSecsSinceEpoch() > _pendingRevealUntil)
+            {
+                _pendingReveal.clear();
+            }
         }
 
         // Re-send interest each tick so newly expanded fields start mirroring.
         _pushInterest();
+    }
+
+    bool EntityComponentBrowser::_isHiddenFromAdd(const QString& path) const
+    {
+        if (_settings.hiddenAddNamespaces.isEmpty())
+        {
+            return false;
+        }
+        // First scope segment, for either separator; a leading "::" (root) is skipped.
+        QString p = path;
+        while (p.startsWith(QStringLiteral("::")))
+        {
+            p.remove(0, 2);
+        }
+        int cut = p.size();
+        const int dc = p.indexOf(QStringLiteral("::"));
+        const int dot = p.indexOf(QLatin1Char('.'));
+        if (dc >= 0)
+        {
+            cut = dc;
+        }
+        if (dot >= 0 && dot < cut)
+        {
+            cut = dot;
+        }
+        if (cut == p.size())
+        {
+            return false; // unscoped: no namespace to hide
+        }
+        const QString top = p.left(cut);
+        for (const QString& ns : _settings.hiddenAddNamespaces)
+        {
+            if (top.compare(ns, Qt::CaseInsensitive) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     void EntityComponentBrowser::_updateAddable()
@@ -679,6 +1380,10 @@ namespace rpe
         QVector<MirrorChannel::CatalogEntry> addable;
         for (const MirrorChannel::CatalogEntry& entry : _catalog)
         {
+            if (_isHiddenFromAdd(entry.path))
+            {
+                continue;
+            }
             const bool present = entry.tag ? _currentTags.contains(entry.path)
                                            : _currentComps.contains(entry.path);
             if (!present)
@@ -691,7 +1396,11 @@ namespace rpe
 
     void EntityComponentBrowser::_onAddComponent(const QString& name)
     {
-        if (_mirrorEntity == 0 || name.isEmpty())
+        // The selected entity: _mirrorEntity in mirror mode, _selectedEntity in
+        // direct mode (where _mirrorEntity stays 0 — checking it alone made adding
+        // through the browser a silent no-op in direct mode).
+        const bool haveEntity = _channel ? _mirrorEntity != 0 : _selectedEntity.is_alive();
+        if (!haveEntity || name.isEmpty())
         {
             return;
         }
@@ -712,6 +1421,7 @@ namespace rpe
                 }
             });
             _componentList->setEntity(_world, _selectedEntity);
+            _rebuildGroups(); // the grouped view follows added / removed components
         }
     }
 
@@ -734,6 +1444,7 @@ namespace rpe
                 _selectedEntity.remove(static_cast<flecs::id_t>(rawId));
             });
             _componentList->setEntity(_world, _selectedEntity);
+            _rebuildGroups(); // the grouped view follows added / removed components
         }
     }
 
@@ -758,6 +1469,7 @@ namespace rpe
                 }
             });
             _componentList->setEntity(_world, _selectedEntity);
+            _rebuildGroups(); // the grouped view follows added / removed components
         }
     }
 
@@ -768,6 +1480,8 @@ namespace rpe
             return; // direct mode uses _onEntitySelected
         }
         _mirrorEntity = id;
+        _componentList->beginEntitySwitch(); // its listing may lack the current component
+        _onSearchChanged(); // search the new entity (and keep the grouped view on it)
         emit entityIdSelected(id); // mode-independent selection notification (GUI thread)
         _refreshPinnedTint();      // the pin set is per entity+component
         // Force a full resend: re-selecting the same entity (e.g. after a filter
@@ -800,16 +1514,36 @@ namespace rpe
         {
             return; // direct mode uses _onComponentSelected
         }
+        _rebindPending = false;
+        if (_groupView)
+        {
+            // The grouped view shows every component: picking one in the list just
+            // brings its group into view. Only a CHANGE does — the list re-emits its
+            // selection whenever the entity's rows republish (a tag added…), which
+            // must not yank the view to the header each time.
+            if (name != _mirrorComponent)
+            {
+                _mirrorComponent = name;
+                _propertyEditor->revealGroup(name);
+                _pushInterest();
+            }
+            return;
+        }
         _mirrorComponent = name;
         // `name` is the row's selection key: the component's full flecs path, or for
         // a data-carrying pair the "Rel (Target)" identity — in that case the schema
         // binds the TYPE THE PAIR CARRIES (mapped via _pairTypeName).
         const QString typeName = _pairTypeName.value(name, name);
+        TypeUseScope scope; // resolve and bind with no release in between
         const rttr::type t = TypeBridge::resolveByName(typeName.toUtf8().constData());
         if (t.is_valid())
         {
             _propertyEditor->bindType(t); // schema only — no instance/world touch
-            _propertyEditor->expandAll();
+            // Open everything the first time; after that, rows you collapsed stay
+            // collapsed across entity switches — and a collapsed row isn't mirrored
+            // at all with snapshotOpenFieldsOnly (the default), so it costs the sim
+            // nothing.
+            _propertyEditor->expandAllExceptCollapsed();
         }
         // bindType reset the property tree to empty values; force a full resend so
         // the values repopulate even when re-selecting the same component (whose

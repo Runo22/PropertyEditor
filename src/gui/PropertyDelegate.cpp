@@ -1,12 +1,20 @@
 #include "rpe/gui/PropertyDelegate.h"
 
+#include "rpe/core/TypeRelease.h"
 #include "rpe/core/TypeRenderer.h"
+#include "rpe/gui/EditorWidgets.h"
 #include "rpe/gui/PropertyModel.h"
 #include "rpe/gui/VariantEditorFactory.h"
 
+#include <QAbstractProxyModel>
 #include <QApplication>
 #include <QPainter>
+#include <QPen>
 #include <QStyle>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 
 namespace rpe
 {
@@ -41,6 +49,71 @@ namespace rpe
 
     } // namespace
 
+    namespace
+    {
+        int lockSide(const QStyleOptionViewItem& option)
+        {
+            return qBound(8, option.rect.height() * 11 / 20, 14);
+        }
+    } // namespace
+
+    int readOnlyLockWidth(const QStyleOptionViewItem& option)
+    {
+        return lockSide(option) + 6;
+    }
+
+    QColor selectedTextColor(const QStyleOptionViewItem& option)
+    {
+        const QWidget* w = option.widget;
+        const QStyle* style = w ? w->style() : QApplication::style();
+        // (Under a style sheet, QStyleSheetStyle draws selected text in the
+        // palette's HighlightedText — what `selection-color` sets.)
+        if (style && style->inherits("QWindowsVistaStyle"))
+        {
+            return option.palette.color(QPalette::Text);
+        }
+        return option.palette.color(QPalette::HighlightedText);
+    }
+
+    void paintItemReservingRight(QPainter* painter, QStyleOptionViewItem o, int reserve)
+    {
+        const QWidget* w = o.widget;
+        QStyle* style = w ? w->style() : QApplication::style();
+        if (reserve > 0 && (o.features & QStyleOptionViewItem::HasDisplay))
+        {
+            const QRect textRect = style->subElementRect(QStyle::SE_ItemViewItemText, &o, w);
+            const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, w) + 1;
+            const int room = std::max(0, std::min(textRect.width(), o.rect.right() - reserve - textRect.left()) - 2 * margin);
+            o.text = QFontMetrics(o.font).elidedText(o.text, o.textElideMode, room);
+        }
+        style->drawControl(QStyle::CE_ItemViewItem, &o, painter, w);
+    }
+
+    void paintReadOnlyLock(QPainter* painter, const QStyleOptionViewItem& option)
+    {
+        // A shackle over a body, in the text colour, faint — present, not loud.
+        const int side = lockSide(option);
+        const bool selected = option.state & QStyle::State_Selected;
+        QColor c = selected ? selectedTextColor(option) : option.palette.color(QPalette::Text);
+        c.setAlphaF(selected ? 0.75 : 0.40);
+        const QRectF box(option.rect.right() - readOnlyLockWidth(option) + 3, option.rect.center().y() - side / 2.0,
+                         side, side);
+        const QRectF body(box.left(), box.top() + box.height() * 0.45, box.width(), box.height() * 0.55);
+        const qreal sw = box.width() * 0.56;
+        const QRectF shackle(box.center().x() - sw / 2, box.top(), sw, box.height() * 0.80);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setPen(QPen(c, qMax<qreal>(1.2, side / 9.0)));
+        painter->setBrush(Qt::NoBrush);
+        painter->drawArc(shackle, 0, 180 * 16);
+        painter->drawLine(QPointF(shackle.left(), shackle.center().y()), QPointF(shackle.left(), body.top()));
+        painter->drawLine(QPointF(shackle.right(), shackle.center().y()), QPointF(shackle.right(), body.top()));
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(c);
+        painter->drawRoundedRect(body, 1.5, 1.5);
+        painter->restore();
+    }
+
     PropertyDelegate::PropertyDelegate(PropertyModel* model, QObject* parent)
         : QStyledItemDelegate(parent)
         , _model(model)
@@ -66,6 +139,20 @@ namespace rpe
             style->drawControl(QStyle::CE_ItemViewItem, &opt, painter, w);
             return;
         }
+
+        // A read-only value keeps its NORMAL look — it is information, not a
+        // disabled control — plus a small, faint lock at the right edge that says
+        // "deliberately not editable" (the reason is in the tooltip).
+        if (index.column() == 1 && !index.data(ReadOnlyRole).toString().isEmpty())
+        {
+            // The whole cell once (the highlight reaches the lock), the value elided
+            // short of it, then the lock.
+            QStyleOptionViewItem o(option);
+            initStyleOption(&o, index);
+            paintItemReservingRight(painter, o, readOnlyLockWidth(option));
+            paintReadOnlyLock(painter, option);
+            return;
+        }
         QStyledItemDelegate::paint(painter, option, index);
     }
 
@@ -79,6 +166,7 @@ namespace rpe
 
     QWidget* PropertyDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex& index) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!index.isValid())
         {
             return nullptr;
@@ -88,6 +176,17 @@ namespace rpe
         // in mirror mode the value may not have arrived yet, and right after an edit
         // the live value is the editor's transient output — both would otherwise
         // select the wrong editor (e.g. a plain line edit for a path with no browse).
+        if (index.data(InlineVectorRole).toBool())
+        {
+            // A vector row is NOT pinned: its fields keep updating underneath, and
+            // on commit only the fields the user changed are written (each through
+            // its own path), so nothing else is frozen or overwritten.
+            _editPath.clear();
+            QWidget* v = _makeVectorEditor(index, parent);
+            varedit::commitOnFocusLeave(const_cast<PropertyDelegate*>(this), v);
+            return v;
+        }
+
         const rttr::variant declared = index.data(DeclaredTypeRole).value<rttr::variant>();
         const rttr::type t = declared.is_valid()
             ? TypeRenderer::rawType(declared.get_value<rttr::type>())
@@ -107,23 +206,41 @@ namespace rpe
         _editPath = index.data(PropertyPathRole).toString();
         _editHadLocalEdit = index.data(HasLocalEditRole).toBool();
         _editCommitted = false;
-        _model->beginLocalEdit(_editPath);
+        _model->beginEditorPin(_editPath); // transient: Reset doesn't offer to undo it
+        varedit::commitOnFocusLeave(const_cast<PropertyDelegate*>(this), w);
         return w;
     }
 
     void PropertyDelegate::setEditorData(QWidget* editor, const QModelIndex& index) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!editor || !index.isValid())
         {
             return;
         }
+        if (auto* ve = qobject_cast<VectorEditor*>(editor))
+        {
+            _setVectorData(ve, index);
+            return;
+        }
         varedit::setEditorData(editor, index.data(RttrVariantRole).value<rttr::variant>());
+        const rttr::variant declared = index.data(DeclaredTypeRole).value<rttr::variant>();
+        varedit::rememberOpeningValue(editor,
+                                      declared.is_valid()
+                                          ? TypeRenderer::rawType(declared.get_value<rttr::type>())
+                                          : TypeRenderer::rawType(index.data(RttrVariantRole).value<rttr::variant>().get_type()));
     }
 
     void PropertyDelegate::setModelData(QWidget* editor, QAbstractItemModel* model, const QModelIndex& index) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!editor || !index.isValid())
         {
+            return;
+        }
+        if (auto* ve = qobject_cast<VectorEditor*>(editor))
+        {
+            _commitVector(ve, index);
             return;
         }
         // Use the declared (schema) type, not the live value — the value may be
@@ -134,13 +251,123 @@ namespace rpe
             ? TypeRenderer::rawType(declared.get_value<rttr::type>())
             : TypeRenderer::rawType(index.data(RttrVariantRole).value<rttr::variant>().get_type());
 
-        const rttr::variant newVal = varedit::readEditorData(editor, t);
-
-        if (newVal.is_valid())
+        rttr::variant edit;
         {
-            _editCommitted = true;
-            model->setData(index, QVariant::fromValue(newVal), Qt::EditRole);
+            const rttr::variant newVal = varedit::readEditorData(editor, t);
+
+            // Left as it was opened → nothing to write. Treated as a cancel, so the
+            // row goes back to following live values. (Writing it would, for a value
+            // outside the editor's Min/Max, store the CLAMPED value the user never
+            // chose.)
+            if (varedit::unchangedSinceOpen(editor, newVal) || !newVal.is_valid())
+            {
+                return;
+            }
+            // An enum VALUE is made by the code that registered the enum — maybe a
+            // plugin. Hand the write its integer instead, so nothing of the plugin's
+            // is held while the write waits for the world guard (a plugin unloading
+            // on that thread would free it); the write turns it back into the enum
+            // (bridge::coerce). The enum value itself dies here, in the read section.
+            edit = newVal.get_type().is_enumeration()
+                ? rttr::variant(static_cast<int64_t>(TypeRenderer::enumBits(newVal)))
+                : newVal;
         }
+        _editCommitted = true;
+        model->setData(index, QVariant::fromValue(edit), Qt::EditRole);
+    }
+
+    namespace
+    {
+        // The source-model index for a (possibly proxied) view index — a vector's
+        // fields are read and written on the SOURCE model, so a filter hiding some
+        // field rows can't hide them from the editor.
+        QModelIndex toSource(const QModelIndex& i)
+        {
+            if (const auto* p = qobject_cast<const QAbstractProxyModel*>(i.model()))
+            {
+                return p->mapToSource(i);
+            }
+            return i;
+        }
+
+        constexpr const char* kVectorOpening = "rpeVectorOpening";
+    } // namespace
+
+    QWidget* PropertyDelegate::_makeVectorEditor(const QModelIndex& index, QWidget* parent) const
+    {
+        const QModelIndex row = toSource(index).siblingAtColumn(0);
+        QVector<VectorEditor::Field> fields;
+        for (int r = 0; r < _model->rowCount(row); ++r)
+        {
+            const QModelIndex name = _model->index(r, 0, row);
+            const QModelIndex value = _model->index(r, 1, row);
+            VectorEditor::Field f;
+            f.name = name.data(Qt::DisplayRole).toString();
+            const rttr::variant declared = value.data(DeclaredTypeRole).value<rttr::variant>();
+            const rttr::type t = declared.is_valid() ? TypeRenderer::rawType(declared.get_value<rttr::type>())
+                                                     : rttr::type::get<double>();
+            f.integral = t != rttr::type::get<float>() && t != rttr::type::get<double>()
+                && t != rttr::type::get<long double>();
+            if (const QVariant v = value.data(MinRole); v.isValid())
+                f.min = v.toDouble();
+            else if (t == rttr::type::get<unsigned char>() || t == rttr::type::get<unsigned short>())
+                f.min = 0; // (wider unsigned types never make an inline vector)
+            if (const QVariant v = value.data(MaxRole); v.isValid())
+                f.max = v.toDouble();
+            if (const QVariant v = value.data(StepRole); v.isValid())
+                f.step = v.toDouble();
+            if (const QVariant v = value.data(DecimalsRole); v.isValid())
+                f.decimals = v.toInt();
+            fields.append(f);
+        }
+        return new VectorEditor(fields, parent);
+    }
+
+    void PropertyDelegate::_setVectorData(VectorEditor* ve, const QModelIndex& index) const
+    {
+        // Fill ONCE, on opening. The fields keep streaming live underneath; the view
+        // may call setEditorData again on a change, and that must not overwrite what
+        // the user is typing.
+        if (ve->property(kVectorOpening).isValid())
+        {
+            return;
+        }
+        const QModelIndex row = toSource(index).siblingAtColumn(0);
+        QVariantList opening;
+        for (int i = 0; i < ve->count(); ++i)
+        {
+            const rttr::variant v =
+                TypeRenderer::unwrap(_model->index(i, 1, row).data(RttrVariantRole).value<rttr::variant>());
+            if (v.is_valid())
+            {
+                ve->setValue(i, v.to_double());
+            }
+            opening << ve->value(i); // what the box SHOWS (after range clamping)
+        }
+        ve->setProperty(kVectorOpening, opening);
+    }
+
+    void PropertyDelegate::_commitVector(VectorEditor* ve, const QModelIndex& index) const
+    {
+        const QModelIndex row = toSource(index).siblingAtColumn(0);
+        const QVariantList opening = ve->property(kVectorOpening).toList();
+        for (int i = 0; i < ve->count(); ++i)
+        {
+            const double now = ve->value(i);
+            if (i < opening.size() && opening[i].toDouble() == now)
+            {
+                continue; // untouched field: write nothing
+            }
+            const QModelIndex value = _model->index(i, 1, row);
+            const rttr::variant declared = value.data(DeclaredTypeRole).value<rttr::variant>();
+            const rttr::variant v = varedit::numberAs(
+                now, declared.is_valid() ? declared.get_value<rttr::type>() : rttr::type::get<double>());
+            if (v.is_valid())
+            {
+                _model->setData(value, QVariant::fromValue(v), Qt::EditRole);
+            }
+        }
+        ve->setProperty(kVectorOpening, QVariant()); // committed; a reopen reads afresh
     }
 
     void PropertyDelegate::updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option, const QModelIndex&) const

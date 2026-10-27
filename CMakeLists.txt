@@ -96,6 +96,9 @@ set(RPE_CORE_SOURCES
     src/core/RttrBridge.cpp
     src/core/RttrVariantWrapper.cpp
     src/core/TypeBridge.cpp
+    src/core/TypeRelease.cpp
+    src/core/PropertySearch.cpp
+    src/core/ReadOnly.cpp
     src/core/OptionalSupport.cpp
     src/core/FlagsSupport.cpp)
 
@@ -135,6 +138,8 @@ if(RPE_WITH_FLECS)
         src/ecs/EcsMirror.cpp
         src/ecs/MirrorChannel.cpp
         src/ecs/ComponentScan.cpp
+        src/ecs/HealthCheck.cpp
+        src/ecs/RowActions.cpp
         resources/rpe_resources.qrc
         include/rpe/ecs/EntityListWidget.h
         include/rpe/ecs/ComponentListWidget.h
@@ -207,6 +212,24 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_plugin_unload_test test/plugin_unload_test.cpp)
     target_link_libraries(rpe_plugin_unload_test PRIVATE rpe_gui)
+
+    # A REAL DLL/.so unload (plugin_unload_test only unregisters). SharedHealth is
+    # owned by a never-unloaded common module; the plugin is loaded/unloaded at run
+    # time. Hidden visibility gives every module its own RTTR statics on Linux too,
+    # as every DLL has on Windows — otherwise the unload hazard can't show up here.
+    add_library(rpe_test_shared_components SHARED test/plugin_module_unload_common.cpp)
+    target_link_libraries(rpe_test_shared_components PRIVATE rpe_core)
+    add_library(rpe_test_unload_plugin MODULE test/plugin_module_unload_plugin.cpp)
+    target_link_libraries(rpe_test_unload_plugin PRIVATE rpe_core)
+    set_target_properties(rpe_test_shared_components rpe_test_unload_plugin PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON)
+    add_executable(rpe_plugin_module_unload_test test/plugin_module_unload_test.cpp)
+    target_link_libraries(rpe_plugin_module_unload_test PRIVATE
+        rpe_core rpe_test_shared_components ${CMAKE_DL_LIBS})
+    target_compile_definitions(rpe_plugin_module_unload_test PRIVATE
+        RPE_TEST_PLUGIN_PATH="$<TARGET_FILE:rpe_test_unload_plugin>")
+    add_dependencies(rpe_plugin_module_unload_test rpe_test_unload_plugin)
 
     add_executable(rpe_remove_flow_test test/remove_flow_test.cpp)
     target_link_libraries(rpe_remove_flow_test PRIVATE rpe_gui)
@@ -329,6 +352,81 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_flecs_rttr_namespace_mismatch_test test/flecs_rttr_namespace_mismatch_test.cpp)
     target_link_libraries(rpe_flecs_rttr_namespace_mismatch_test PRIVATE rpe_gui)
 
+    add_executable(rpe_picker_keys_test test/picker_keys_test.cpp)
+    target_link_libraries(rpe_picker_keys_test PRIVATE rpe_gui)
+
+    add_executable(rpe_prefab_group_order_test test/prefab_group_order_test.cpp)
+    target_link_libraries(rpe_prefab_group_order_test PRIVATE rpe_gui)
+
+    add_executable(rpe_component_add_tree_test test/component_add_tree_test.cpp)
+    target_link_libraries(rpe_component_add_tree_test PRIVATE rpe_gui)
+
+    add_executable(rpe_scan_cost_test test/scan_cost_test.cpp)
+    target_link_libraries(rpe_scan_cost_test PRIVATE rpe_gui)
+
+    add_executable(rpe_edit_target_test test/edit_target_test.cpp)
+    target_link_libraries(rpe_edit_target_test PRIVATE rpe_gui)
+
+    add_executable(rpe_entity_list_structural_test test/entity_list_structural_test.cpp)
+    target_link_libraries(rpe_entity_list_structural_test PRIVATE rpe_gui)
+
+    add_executable(rpe_required_component_match_test test/required_component_match_test.cpp)
+    target_link_libraries(rpe_required_component_match_test PRIVATE rpe_gui)
+
+    add_executable(rpe_expansion_memory_test test/expansion_memory_test.cpp)
+    target_link_libraries(rpe_expansion_memory_test PRIVATE rpe_gui)
+
+    add_executable(rpe_component_discovery_test test/component_discovery_test.cpp)
+    target_link_libraries(rpe_component_discovery_test PRIVATE rpe_gui)
+
+    add_executable(rpe_read_only_test test/read_only_test.cpp)
+    target_link_libraries(rpe_read_only_test PRIVATE rpe_gui)
+
+    add_executable(rpe_health_check_test test/health_check_test.cpp)
+    target_link_libraries(rpe_health_check_test PRIVATE rpe_gui)
+
+    add_executable(rpe_editor_commit_test test/editor_commit_test.cpp)
+    target_link_libraries(rpe_editor_commit_test PRIVATE rpe_gui)
+
+    add_executable(rpe_visual_editors_test test/visual_editors_test.cpp)
+    target_link_libraries(rpe_visual_editors_test PRIVATE rpe_gui)
+
+    # A stand-in plugin: a SEPARATE shared library registering hinted types, so the
+    # cross-module metadata lookup is exercised for real.
+    add_library(rpe_test_hint_plugin SHARED test/plugin/hint_plugin.cpp)
+    target_link_libraries(rpe_test_hint_plugin PRIVATE rpe_core)
+    add_executable(rpe_plugin_hints_test test/plugin_hints_test.cpp)
+    target_link_libraries(rpe_plugin_hints_test PRIVATE rpe_gui rpe_test_hint_plugin)
+
+    # A plugin UNLOADED and reloaded while its component is on screen (dlopen /
+    # LoadLibrary at run time — never linked). Built to unload like a Windows DLL:
+    # no GCC "unique" symbols (they pin it in memory), hidden visibility (its RTTR
+    # registration manager stays its own instead of being interposed by the host's).
+    add_library(rpe_test_reload_plugin MODULE test/plugin/reload_plugin.cpp)
+    target_link_libraries(rpe_test_reload_plugin PRIVATE rpe_core ${RPE_FLECS_TARGET})
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(rpe_test_reload_plugin PRIVATE -fno-gnu-unique)
+    endif()
+    set_target_properties(rpe_test_reload_plugin PROPERTIES
+        CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    add_executable(rpe_plugin_reload_test test/plugin_reload_test.cpp)
+    target_link_libraries(rpe_plugin_reload_test PRIVATE rpe_gui ${CMAKE_DL_LIBS})
+    add_dependencies(rpe_plugin_reload_test rpe_test_reload_plugin)
+    target_compile_definitions(rpe_plugin_reload_test PRIVATE
+        RPE_RELOAD_PLUGIN_PATH="$<TARGET_FILE:rpe_test_reload_plugin>")
+
+    add_executable(rpe_preferred_component_test test/preferred_component_test.cpp)
+    target_link_libraries(rpe_preferred_component_test PRIVATE rpe_gui)
+
+    add_executable(rpe_review_fixes_test test/review_fixes_test.cpp)
+    target_link_libraries(rpe_review_fixes_test PRIVATE rpe_gui)
+
+    add_executable(rpe_search_all_test test/search_all_test.cpp)
+    target_link_libraries(rpe_search_all_test PRIVATE rpe_gui)
+
+    add_executable(rpe_type_release_test test/type_release_test.cpp)
+    target_link_libraries(rpe_type_release_test PRIVATE rpe_core)
+
     add_executable(rpe_same_rttr_name_test test/same_rttr_name_test.cpp)
     target_link_libraries(rpe_same_rttr_name_test PRIVATE rpe_gui)
 
@@ -355,7 +453,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 get_property(_rpe_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
 foreach(_t IN LISTS _rpe_targets)
     get_target_property(_ttype ${_t} TYPE)
-    if(_ttype STREQUAL "EXECUTABLE" AND NOT _t STREQUAL "rpe_demo")
+    if((_ttype STREQUAL "EXECUTABLE" AND NOT _t STREQUAL "rpe_demo") OR _t MATCHES "^rpe_test_")
         # tests, shots, benches and dev tools
         set_target_properties(${_t} PROPERTIES FOLDER "rpe/tests")
     else()

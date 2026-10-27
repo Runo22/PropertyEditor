@@ -1,9 +1,11 @@
 #include "rpe/core/RttrBridge.h"
+#include "rpe/core/FlagsSupport.h"
 #include "rpe/core/OptionalSupport.h"
 #include "rpe/core/TypeRenderer.h"
 
 #include <filesystem>
 
+#include <rttr/enumeration.h>
 #include <rttr/variant_associative_view.h>
 #include <rttr/variant_sequential_view.h>
 
@@ -205,6 +207,37 @@ namespace rpe::bridge
             {
                 return rttr::variant(std::filesystem::u8path(value.get_value<std::string>()));
             }
+        }
+
+        // Enum target from a number: editors hand an enum edit over as its integer
+        // (an enum VALUE is made by the code that registered the enum — maybe a
+        // plugin — so rpe never holds one across a wait; see
+        // PropertyDelegate::setModelData). The named value with those bits, or a
+        // flags enum's combined mask (FlagsBridge, RPE_REGISTER_FLAGS).
+        if (raw.is_enumeration() && value.get_type().is_arithmetic())
+        {
+            bool ok = false;
+            const int64_t bits = value.to_int64(&ok);
+            if (!ok)
+            {
+                return rttr::variant();
+            }
+            if (FlagsBridge::canBuild(raw))
+            {
+                rttr::variant v = FlagsBridge::build(raw, bits);
+                if (v.is_valid())
+                {
+                    return v;
+                }
+            }
+            for (const rttr::variant& ev : raw.get_enumeration().get_values())
+            {
+                if (TypeRenderer::enumBits(ev) == bits)
+                {
+                    return ev;
+                }
+            }
+            return rttr::variant();
         }
 
         rttr::variant copy = value;
