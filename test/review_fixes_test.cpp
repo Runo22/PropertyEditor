@@ -612,7 +612,7 @@ int main(int argc, char** argv)
                     if (p.blue() > p.red() + 25)
                         ++tinted;
                 }
-            check("the match tint shows over a style sheet's ::item background", tinted > 20);
+            check("the matched text's accent colour shows over a style sheet's ::item background", tinted > 20);
         }
         ed.setFilterText(QString());
         app.setStyleSheet(QString());

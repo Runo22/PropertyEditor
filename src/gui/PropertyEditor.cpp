@@ -68,10 +68,10 @@ namespace rpe
             QString _text;
         };
 
-        // The NAME column. The style draws every row's text as usual — its colours
-        // (style-sheet ::item rules included), its font — and while a filter is
-        // active the matched part gets a translucent accent tint over it, never a
-        // re-coloured or re-drawn text. Group headers (the grouped view) are the
+        // The NAME column. Without a filter (or a match) the style draws the row as
+        // usual. With one, the style still draws everything but the text, and the
+        // text is drawn in the view's font and the row's colour with the matched
+        // part bold in the accent colour. Group headers (the grouped view) are the
         // view's own font in bold, with their match count appended.
         class NameDelegate : public QStyledItemDelegate
         {
@@ -112,38 +112,64 @@ namespace rpe
                 }
                 const QWidget* w = o.widget;
                 QStyle* style = w ? w->style() : QApplication::style();
-                // Where the match sits in the text the style is about to draw (left
-                // aligned after the style's text margin, possibly elided).
-                const QRect textRect = style->subElementRect(QStyle::SE_ItemViewItemText, &o, w);
+                // The text area as the style lays it out (after any icon), less the
+                // style's own text margin.
                 const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, w) + 1;
-                const QFontMetrics fm(o.font);
-                const QString shown = fm.elidedText(o.text, o.textElideMode, textRect.width() - 2 * margin);
-                QRect hl;
-                if (shown == o.text || at + needle.size() < shown.size())
-                {
-                    const int x = textRect.left() + margin + fm.horizontalAdvance(o.text.left(at));
-                    const int width = fm.horizontalAdvance(o.text.mid(at, needle.size()));
-                    hl = QRect(x - 1, textRect.center().y() - fm.height() / 2, width + 2, fm.height()) & textRect;
-                }
-                // The ACTIVE accent, whatever has focus: typing in the filter leaves
-                // the tree inactive, and an inactive highlight is grey on Windows. On
-                // a selected row, the colour the style draws selected text in.
-                // Painted OVER the item, translucent: anything the style (or a style
-                // sheet's ::item background) paints under the text would cover a tint
-                // drawn first.
+                const QRect r = style->subElementRect(QStyle::SE_ItemViewItemText, &o, w).adjusted(margin, 0, -margin, 0);
+                const QString text = o.text;
+
+                // Everything but the text — background, selection, hover, focus,
+                // icon — by the style, as on every other row.
+                o.text.clear();
+                style->drawControl(QStyle::CE_ItemViewItem, &o, p, w);
+
+                // The text, in the row's own colour (ForegroundRole included), with
+                // the match re-coloured in bold. Drawn with QPainter in the view's
+                // font — the same text rendering the style uses.
                 const bool selected = o.state & QStyle::State_Selected;
-                QColor tint = selected ? selectedTextColor(o) : o.palette.color(QPalette::Active, QPalette::Highlight);
-                tint.setAlpha(selected ? 70 : 95);
-                QStyledItemDelegate::paint(p, option, index);
-                if (!hl.isEmpty())
+                const QColor base = selected ? selectedTextColor(o) : o.palette.color(QPalette::Text);
+                // The ACTIVE accent (typing in the filter leaves the tree inactive,
+                // and an inactive highlight is grey on Windows): lightened on a dark
+                // background, darkened on a light one — judged by the row's TEXT
+                // colour, which a style sheet always sets, unlike the palette's Base.
+                // On a selected row the accent is the background: weight only.
+                const QColor accent = o.palette.color(QPalette::Active, QPalette::Highlight);
+                const bool darkBackground = base.lightness() > 128;
+                const QColor mark = selected ? base : (darkBackground ? accent.lighter(150) : accent.darker(115));
+
+                QFont bold = o.font;
+                bold.setBold(true);
+                const QFontMetrics fm(o.font);
+                const QFontMetrics fmBold(bold);
+                const QString before = text.left(at);
+                const QString hit = text.mid(at, needle.size());
+                const QString after = text.mid(at + needle.size());
+                p->save();
+                p->setClipRect(r);
+                const int flags = Qt::AlignVCenter | Qt::AlignLeft | Qt::TextSingleLine;
+                if (fm.horizontalAdvance(before) + fmBold.horizontalAdvance(hit) + fm.horizontalAdvance(after) > r.width())
                 {
-                    p->save();
-                    p->setRenderHint(QPainter::Antialiasing, true);
-                    p->setPen(Qt::NoPen);
-                    p->setBrush(tint);
-                    p->drawRoundedRect(hl, 2, 2);
-                    p->restore();
+                    // Doesn't fit: elided, plain — the match may be cut off anyway.
+                    p->setPen(base);
+                    p->setFont(o.font);
+                    p->drawText(r, flags, fm.elidedText(text, o.textElideMode, r.width()));
                 }
+                else
+                {
+                    QRect seg = r;
+                    p->setFont(o.font);
+                    p->setPen(base);
+                    p->drawText(seg, flags, before);
+                    seg.setLeft(seg.left() + fm.horizontalAdvance(before));
+                    p->setFont(bold);
+                    p->setPen(mark);
+                    p->drawText(seg, flags, hit);
+                    seg.setLeft(seg.left() + fmBold.horizontalAdvance(hit));
+                    p->setFont(o.font);
+                    p->setPen(base);
+                    p->drawText(seg, flags, after);
+                }
+                p->restore();
             }
 
         private:

@@ -383,22 +383,24 @@ int main(int argc, char** argv)
         app.setPalette(QPalette());
     }
     {
-        // Names keep the STYLE's text colour and font while filtering (a style-sheet
-        // ::item colour, a pixel font size): the delegate only tints behind the
-        // match, it never re-draws the text itself.
+        // While filtering, rows WITHOUT a match (the parents leading to one) are
+        // still drawn by the style — a style sheet's ::item colour included; a row
+        // with a match has its text drawn with the match in the accent colour.
         app.setStyleSheet(QStringLiteral("QWidget { background: #2b2b2b; color: #dddddd; font-size: 15px; }"
                                          " QTreeView::item { color: #ffcc66; }"));
-        Physics ph;
+        Transform tr;
         rpe::PropertyEditor ed;
-        ed.editObject(ph);
+        ed.editObject(tr);
         ed.resize(400, 200);
         ed.show();
-        auto countOrange = [&] {
-            QCoreApplication::processEvents();
-            const QImage img = ed.view()->viewport()->grab().toImage();
+        ed.setFilterText(QStringLiteral("x"));
+        ed.view()->expandAll();
+        QCoreApplication::processEvents();
+        auto countOrange = [&](const QRect& rect) {
+            const QImage img = ed.view()->viewport()->grab(rect).toImage();
             int n = 0;
             for (int y = 0; y < img.height(); ++y)
-                for (int x = 0; x < std::min(img.width(), 200); ++x)
+                for (int x = 0; x < img.width(); ++x)
                 {
                     const QColor c = img.pixelColor(x, y);
                     if (c.red() > 200 && c.green() > 150 && c.green() < 230 && c.blue() < 140)
@@ -406,10 +408,12 @@ int main(int argc, char** argv)
                 }
             return n;
         };
-        const int before = countOrange();
-        ed.setFilterText(QStringLiteral("speed"));
-        const int during = countOrange();
-        check("names keep the style sheet's ::item colour while filtering", before > 20 && during > 20);
+        QModelIndex parentRow;
+        for (int r = 0; r < ed.view()->model()->rowCount(); ++r)
+            if (ed.view()->model()->index(r, 0).data().toString() == QStringLiteral("position"))
+                parentRow = ed.view()->model()->index(r, 0);
+        check("a row without a match keeps the style sheet's ::item colour while filtering",
+              parentRow.isValid() && countOrange(ed.view()->visualRect(parentRow)) > 20);
         app.setStyleSheet(QString());
     }
     {
