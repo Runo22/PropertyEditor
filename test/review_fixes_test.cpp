@@ -33,7 +33,9 @@
 #include <QTreeView>
 #include <QVBoxLayout>
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <string>

@@ -684,28 +684,25 @@ namespace rpe
     namespace
     {
         // The representable range of an arithmetic type (false for others).
+        template <class T>
+        bool rangeOf(rttr::type t, double& lo, double& hi)
+        {
+            if (t != rttr::type::get<T>())
+            {
+                return false;
+            }
+            lo = static_cast<double>(std::numeric_limits<T>::lowest());
+            hi = static_cast<double>(std::numeric_limits<T>::max());
+            return true;
+        }
+
         bool numericRange(rttr::type t, double& lo, double& hi)
         {
-            auto range = [&](auto tag) {
-                using T = decltype(tag);
-                lo = static_cast<double>(std::numeric_limits<T>::lowest());
-                hi = static_cast<double>(std::numeric_limits<T>::max());
-                return true;
-            };
-            if (t == rttr::type::get<char>()) return range(char {});
-            if (t == rttr::type::get<signed char>()) return range((signed char) {});
-            if (t == rttr::type::get<unsigned char>()) return range((unsigned char) {});
-            if (t == rttr::type::get<short>()) return range(short {});
-            if (t == rttr::type::get<unsigned short>()) return range((unsigned short) {});
-            if (t == rttr::type::get<int>()) return range(int {});
-            if (t == rttr::type::get<unsigned int>()) return range((unsigned int) {});
-            if (t == rttr::type::get<long>()) return range(long {});
-            if (t == rttr::type::get<unsigned long>()) return range((unsigned long) {});
-            if (t == rttr::type::get<long long>()) return range((long long) {});
-            if (t == rttr::type::get<unsigned long long>()) return range((unsigned long long) {});
-            if (t == rttr::type::get<float>()) return range(float {});
-            if (t == rttr::type::get<double>()) return range(double {});
-            return false;
+            return rangeOf<char>(t, lo, hi) || rangeOf<signed char>(t, lo, hi) || rangeOf<unsigned char>(t, lo, hi)
+                || rangeOf<short>(t, lo, hi) || rangeOf<unsigned short>(t, lo, hi) || rangeOf<int>(t, lo, hi)
+                || rangeOf<unsigned int>(t, lo, hi) || rangeOf<long>(t, lo, hi) || rangeOf<unsigned long>(t, lo, hi)
+                || rangeOf<long long>(t, lo, hi) || rangeOf<unsigned long long>(t, lo, hi) || rangeOf<float>(t, lo, hi)
+                || rangeOf<double>(t, lo, hi);
         }
     } // namespace
 
