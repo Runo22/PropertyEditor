@@ -175,24 +175,42 @@ namespace rpe
         return state().releases.load(std::memory_order_acquire);
     }
 
+    namespace
+    {
+        bool releasedDeep(rttr::type t, const std::vector<rttr::type>& released, int depth)
+        {
+            if (!t.is_valid() || depth > 4)
+            {
+                return false;
+            }
+            const rttr::type raw = t.get_raw_type();
+            const rttr::type wrapped = t.is_wrapper() ? t.get_wrapped_type().get_raw_type() : raw;
+            for (const rttr::type& r : released)
+            {
+                if (t == r || raw == r || wrapped == r)
+                {
+                    return true;
+                }
+            }
+            // A container / optional / smart pointer OF a released type
+            // (std::vector<T>, std::map<K, T>, std::optional<T>, …): its template
+            // arguments.
+            for (const rttr::type& arg : raw.get_template_arguments())
+            {
+                if (releasedDeep(arg, released, depth + 1))
+                {
+                    return true;
+                }
+            }
+            return wrapped != raw && releasedDeep(wrapped, released, depth + 1);
+        }
+    } // namespace
+
     bool isReleased(rttr::type t, const std::vector<rttr::type>& released)
     {
-        if (!t.is_valid())
-        {
-            return false;
-        }
         // Called while the released types' module is still loaded, so following
         // t's own links is safe.
-        const rttr::type raw = t.get_raw_type();
-        const rttr::type wrapped = t.is_wrapper() ? t.get_wrapped_type().get_raw_type() : raw;
-        for (const rttr::type& r : released)
-        {
-            if (t == r || raw == r || wrapped == r)
-            {
-                return true;
-            }
-        }
-        return false;
+        return releasedDeep(t, released, 0);
     }
 
     namespace detail
@@ -214,15 +232,46 @@ namespace rpe
                 }
                 else
                 {
-                    s.cv.wait(lk, [&] { return !s.writer; });
+                    const bool reading = t_depth > 0;
+                    if (reading && s.writer)
+                    {
+                        // Another thread is releasing and waits for THIS thread's read
+                        // section to end: step out of it while we wait (as TypeUseGap
+                        // does), or each waits for the other forever.
+                        --s.readers;
+                        s.cv.notify_all();
+                        s.cv.wait(lk, [&] { return !s.writer; });
+                        ++s.readers;
+                    }
+                    else
+                    {
+                        s.cv.wait(lk, [&] { return !s.writer; });
+                    }
                     s.writer = true;
                     s.writerId = me;
                     // Wait for every OTHER thread's read section to end (this thread
                     // may itself be inside one).
-                    const int mine = t_depth > 0 ? 1 : 0;
+                    const int mine = reading ? 1 : 0;
                     s.cv.wait(lk, [&] { return s.readers == mine; });
                 }
             }
+            // Whatever happens below (a handler list that can't be copied, …), the
+            // writer flag must not stay set: it would block every reader for good.
+            struct WriterReset
+            {
+                State& s;
+                bool active;
+                ~WriterReset()
+                {
+                    if (!active)
+                        return;
+                    {
+                        std::lock_guard<std::mutex> lk(s.mutex);
+                        s.writer = false;
+                    }
+                    s.cv.notify_all();
+                }
+            } reset { s, !nested };
             s.releases.fetch_add(1, std::memory_order_acq_rel);
 
             std::vector<TypeReleaseHandler> handlers;
@@ -245,17 +294,8 @@ namespace rpe
                 }
                 catch (...)
                 {
-                    // A handler must not leave the release half-done (the lock held).
+                    // A handler must not leave the release half-done.
                 }
-            }
-
-            if (!nested)
-            {
-                {
-                    std::lock_guard<std::mutex> lk(s.mutex);
-                    s.writer = false;
-                }
-                s.cv.notify_all();
             }
         }
     } // namespace detail

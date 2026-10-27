@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace rpe
 {
@@ -69,7 +70,7 @@ namespace rpe
 
         // The NAME column. The style draws every row's text as usual — its colours
         // (style-sheet ::item rules included), its font — and while a filter is
-        // active the matched part gets a translucent accent tint behind it, never a
+        // active the matched part gets a translucent accent tint over it, never a
         // re-coloured or re-drawn text. Group headers (the grouped view) are the
         // view's own font in bold, with their match count appended.
         class NameDelegate : public QStyledItemDelegate
@@ -125,29 +126,24 @@ namespace rpe
                     hl = QRect(x - 1, textRect.center().y() - fm.height() / 2, width + 2, fm.height()) & textRect;
                 }
                 // The ACTIVE accent, whatever has focus: typing in the filter leaves
-                // the tree inactive, and an inactive highlight is grey on Windows.
-                const bool overlay = o.state & (QStyle::State_Selected | QStyle::State_MouseOver);
-                QColor tint = o.palette.color(QPalette::Active, overlay && (o.state & QStyle::State_Selected)
-                                                                     ? QPalette::HighlightedText
-                                                                     : QPalette::Highlight);
-                tint.setAlpha(overlay ? 70 : 105);
-                auto drawTint = [&] {
-                    if (hl.isEmpty())
-                        return;
+                // the tree inactive, and an inactive highlight is grey on Windows. On
+                // a selected row, the colour the style draws selected text in.
+                // Painted OVER the item, translucent: anything the style (or a style
+                // sheet's ::item background) paints under the text would cover a tint
+                // drawn first.
+                const bool selected = o.state & QStyle::State_Selected;
+                QColor tint = selected ? selectedTextColor(o) : o.palette.color(QPalette::Active, QPalette::Highlight);
+                tint.setAlpha(selected ? 70 : 95);
+                QStyledItemDelegate::paint(p, option, index);
+                if (!hl.isEmpty())
+                {
                     p->save();
                     p->setRenderHint(QPainter::Antialiasing, true);
                     p->setPen(Qt::NoPen);
                     p->setBrush(tint);
                     p->drawRoundedRect(hl, 2, 2);
                     p->restore();
-                };
-                // Behind the text on a plain row; over it where the style fills the
-                // row (selection / hover), which would otherwise paint over the tint.
-                if (!overlay)
-                    drawTint();
-                QStyledItemDelegate::paint(p, option, index);
-                if (overlay)
-                    drawTint();
+                }
             }
 
         private:
@@ -208,10 +204,19 @@ namespace rpe
         // Search scope: this object / all of them (the host decides what "all" is).
         _scopeBtn = new QToolButton(_toolbar);
         _scopeBtn->setCheckable(true);
+        // Icon + "All" in both states — the button doesn't change width when toggled
+        // — and no Tab stop of its own (Ctrl+Shift+F is the keyboard way).
+        _scopeBtn->setText(tr("All"));
+        _scopeBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        _scopeBtn->setFocusPolicy(Qt::NoFocus);
         _scopeBtn->setToolTip(tr("Search all components of this entity (Ctrl+Shift+F)"));
+        // Same box in both states (only the colours change), so toggling never moves
+        // the filter box.
         _scopeBtn->setStyleSheet(QStringLiteral(
-            "QToolButton:checked { background: palette(highlight); color: palette(highlighted-text);"
-            " border: 1px solid palette(highlight); border-radius: 3px; padding: 1px 6px; }"));
+            "QToolButton { border: 1px solid transparent; border-radius: 3px; padding: 1px 6px; }"
+            " QToolButton:hover { border-color: palette(mid); }"
+            " QToolButton:checked { background: palette(highlight); color: palette(highlighted-text);"
+            " border-color: palette(highlight); }"));
         _scopeBtn->setVisible(false);
         tb->addWidget(_scopeBtn);
         // The glyph is drawn in the button's text colour — known only once the
@@ -219,15 +224,16 @@ namespace rpe
         _scopeBtn->installEventFilter(this);
         connect(_scopeBtn, &QToolButton::toggled, this, [this](bool on) {
             _updateScopeIcon();
-            _scopeBtn->setText(on ? tr("All") : QString());
-            _scopeBtn->setToolButtonStyle(on ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
             _filter->setPlaceholderText(on ? tr("Search all components…") : tr("Filter properties…"));
             emit searchAllToggled(on);
         });
         _updateScopeIcon();
-        auto* scopeKey = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F), this);
-        scopeKey->setContext(Qt::WidgetWithChildrenShortcut);
-        connect(scopeKey, &QShortcut::activated, this, [this] {
+        // Disabled until setSearchAllAvailable(true): an ENABLED shortcut on the same
+        // keys as a host action makes Qt treat both as ambiguous, and neither fires.
+        _scopeKey = new QShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F), this);
+        _scopeKey->setContext(Qt::WidgetWithChildrenShortcut);
+        _scopeKey->setEnabled(false);
+        connect(_scopeKey, &QShortcut::activated, this, [this] {
             if (!_searchAllAvailable)
             {
                 return;
@@ -243,6 +249,13 @@ namespace rpe
 
         _resetBtn = new QToolButton(_toolbar);
         _resetBtn->setText(tr("Reset"));
+        // Shown only while something is frozen — but its room is kept, so the
+        // filter box doesn't change width every time a value freezes or resumes.
+        {
+            QSizePolicy sp = _resetBtn->sizePolicy();
+            sp.setRetainSizeWhenHidden(true);
+            _resetBtn->setSizePolicy(sp);
+        }
         // Spell out what "Reset" does, since the short label can read like "reset to
         // defaults": it only releases FROZEN values and resumes live updates — it does
         // not change any value in the world.
@@ -291,11 +304,6 @@ namespace rpe
         connect(_view->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& cur) {
             emit currentPathChanged(cur.isValid() ? cur.siblingAtColumn(0).data(PropertyPathRole).toString() : QString());
         });
-        // Grouped view: a header's count is what its rows show after filtering.
-        connect(_proxy, &QAbstractItemModel::rowsInserted, this, &PropertyEditor::_scheduleGroupCounts);
-        connect(_proxy, &QAbstractItemModel::rowsRemoved, this, &PropertyEditor::_scheduleGroupCounts);
-        connect(_proxy, &QAbstractItemModel::modelReset, this, &PropertyEditor::_scheduleGroupCounts);
-        connect(_proxy, &QAbstractItemModel::layoutChanged, this, &PropertyEditor::_scheduleGroupCounts);
 
         // Keep the model's notion of expansion in sync with the view, so collapsed
         // struct rows can show a "[a, b]" summary that disappears on expand.
@@ -369,57 +377,11 @@ namespace rpe
         _pushExpansionState();
         _updateResetEnabled();
         _emptyHint->setVisible(false);
-        _scheduleGroupCounts();
     }
 
     void PropertyEditor::setGroupInstanceProvider(std::function<rttr::instance(const QString&)> provider)
     {
         _model->setGroupInstanceProvider(std::move(provider));
-    }
-
-    void PropertyEditor::_scheduleGroupCounts()
-    {
-        if (!_model->isGrouped() || _groupCountsPending)
-        {
-            return;
-        }
-        _groupCountsPending = true;
-        QTimer::singleShot(0, this, [this] {
-            _groupCountsPending = false;
-            _updateGroupCounts();
-        });
-    }
-
-    void PropertyEditor::_updateGroupCounts()
-    {
-        if (!_model->isGrouped())
-        {
-            return;
-        }
-        // A header's count = its visible rows that have no visible children (the
-        // matches themselves, not the structs leading to them).
-        QHash<QString, int> counts;
-        for (int g = 0; g < _proxy->rowCount({}); ++g)
-        {
-            const QModelIndex header = _proxy->index(g, 0, {});
-            int n = 0;
-            QList<QModelIndex> stack;
-            for (int r = 0; r < _proxy->rowCount(header); ++r)
-                stack.append(_proxy->index(r, 0, header));
-            while (!stack.isEmpty())
-            {
-                const QModelIndex i = stack.takeLast();
-                const int rows = _proxy->rowCount(i);
-                if (rows == 0)
-                {
-                    ++n;
-                }
-                for (int r = 0; r < rows; ++r)
-                    stack.append(_proxy->index(r, 0, i));
-            }
-            counts.insert(header.data(GroupKeyRole).toString(), _filter->text().trimmed().isEmpty() ? 0 : n);
-        }
-        _model->setGroupCounts(counts);
     }
 
     bool PropertyEditor::revealPath(const QString& path)
@@ -453,9 +415,24 @@ namespace rpe
 
     // ── search scope ──────────────────────────────────────────────────────────────
 
+    void PropertyEditor::setSearchAllShortcut(const QKeySequence& keys)
+    {
+        _scopeKey->setKey(keys);
+        _scopeKey->setEnabled(_searchAllAvailable && !keys.isEmpty());
+        _scopeBtn->setToolTip(keys.isEmpty() ? tr("Search all components of this entity")
+                                             : tr("Search all components of this entity (%1)")
+                                                   .arg(keys.toString(QKeySequence::NativeText)));
+    }
+
+    QKeySequence PropertyEditor::searchAllShortcut() const
+    {
+        return _scopeKey->key();
+    }
+
     void PropertyEditor::setSearchAllAvailable(bool on)
     {
         _searchAllAvailable = on;
+        _scopeKey->setEnabled(on && !_scopeKey->key().isEmpty());
         _scopeBtn->setVisible(on);
         if (!on)
         {
@@ -581,6 +558,37 @@ namespace rpe
         {
             return _model->allLeafPaths();
         }
+        if (!_filter->text().trimmed().isEmpty())
+        {
+            // While filtering, a row can be hidden only because its value hasn't
+            // arrived yet (it may match by VALUE). Watching just the shown rows
+            // would never fetch it, and it would stay hidden: watch every leaf —
+            // and every array, whose elements exist only once its value is read.
+            QStringList out;
+            QList<QModelIndex> stack { QModelIndex() };
+            while (!stack.isEmpty())
+            {
+                const QModelIndex parent = stack.takeLast();
+                for (int r = 0; r < _model->rowCount(parent); ++r)
+                {
+                    const QModelIndex idx = _model->index(r, 0, parent);
+                    if (idx.data(IsArrayRole).toBool())
+                    {
+                        out.append(idx.data(PropertyPathRole).toString());
+                    }
+                    if (_model->rowCount(idx) == 0)
+                    {
+                        if (!idx.data(IsArrayRole).toBool())
+                            out.append(idx.data(PropertyPathRole).toString());
+                    }
+                    else
+                    {
+                        stack.append(idx);
+                    }
+                }
+            }
+            return out;
+        }
 
         // Walk the proxy tree, descending only into expanded rows, collecting leaves.
         QStringList out;
@@ -673,6 +681,34 @@ namespace rpe
         return t.is_arithmetic() && t != rttr::type::get<bool>();
     }
 
+    namespace
+    {
+        // The representable range of an arithmetic type (false for others).
+        bool numericRange(rttr::type t, double& lo, double& hi)
+        {
+            auto range = [&](auto tag) {
+                using T = decltype(tag);
+                lo = static_cast<double>(std::numeric_limits<T>::lowest());
+                hi = static_cast<double>(std::numeric_limits<T>::max());
+                return true;
+            };
+            if (t == rttr::type::get<char>()) return range(char {});
+            if (t == rttr::type::get<signed char>()) return range((signed char) {});
+            if (t == rttr::type::get<unsigned char>()) return range((unsigned char) {});
+            if (t == rttr::type::get<short>()) return range(short {});
+            if (t == rttr::type::get<unsigned short>()) return range((unsigned short) {});
+            if (t == rttr::type::get<int>()) return range(int {});
+            if (t == rttr::type::get<unsigned int>()) return range((unsigned int) {});
+            if (t == rttr::type::get<long>()) return range(long {});
+            if (t == rttr::type::get<unsigned long>()) return range((unsigned long) {});
+            if (t == rttr::type::get<long long>()) return range((long long) {});
+            if (t == rttr::type::get<unsigned long long>()) return range((unsigned long long) {});
+            if (t == rttr::type::get<float>()) return range(float {});
+            if (t == rttr::type::get<double>()) return range(double {});
+            return false;
+        }
+    } // namespace
+
     void PropertyEditor::_applyScrub(int dx, Qt::KeyboardModifiers mods)
     {
         if (!_scrubValue.isValid())
@@ -693,11 +729,26 @@ namespace rpe
         {
             step *= 10.0; // coarse
         }
+        // Whole steps only (one per kPixelsPerStep): the value moves — and is
+        // written — when the drag crosses into the next step, not on every pixel.
         constexpr double kPixelsPerStep = 4.0;
-        double v = _scrubStart + (dx / kPixelsPerStep) * step;
+        double v = _scrubStart + std::round(dx / kPixelsPerStep) * step;
         if (!floating)
         {
             v = std::round(v);
+        }
+        else if (const QVariant dec = _scrubValue.data(DecimalsRole); dec.isValid())
+        {
+            const double scale = std::pow(10.0, std::clamp(dec.toInt(), 0, 12));
+            v = std::round(v * scale) / scale; // the editor's precision
+        }
+        else
+        {
+            // Two digits past the step's own: drops float noise (0.30000000004),
+            // keeps steps like 0.25 exact.
+            const int digits = std::clamp(static_cast<int>(std::ceil(-std::log10(step))) + 2, 0, 12);
+            const double scale = std::pow(10.0, digits);
+            v = std::round(v * scale) / scale;
         }
         if (const QVariant lo = _scrubValue.data(MinRole); lo.isValid())
         {
@@ -706,6 +757,13 @@ namespace rpe
         if (const QVariant hi = _scrubValue.data(MaxRole); hi.isValid())
         {
             v = std::min(v, hi.toDouble());
+        }
+        // And the type's own range — an unsigned value stops at 0 instead of the
+        // drag silently doing nothing below it.
+        double typeLo = 0, typeHi = 0;
+        if (numericRange(t, typeLo, typeHi))
+        {
+            v = std::clamp(v, typeLo, typeHi);
         }
         if (v == _scrubLast)
         {
@@ -879,7 +937,6 @@ namespace rpe
             _view->expandAll();
         }
         _pushExpansionState();
-        _scheduleGroupCounts();
         emit filterTextChanged(text.trimmed());
     }
 
@@ -912,7 +969,11 @@ namespace rpe
         connect(menu.addAction(tr("Copy \"name = value\"")), &QAction::triggered, this,
                 [name, value] { QApplication::clipboard()->setText(name + QStringLiteral(" = ") + value); });
         menu.addSeparator();
-        if (!isReadOnly())
+        // Freezing makes sense only for a row with a value of its own that could
+        // change: not a group header, not a read-only value (it would just stop
+        // updating, amber, for no edit that could ever come).
+        const bool freezable = !srcIdx.data(IsGroupRole).toBool() && srcIdx.siblingAtColumn(1).data(ReadOnlyRole).toString().isEmpty();
+        if (!isReadOnly() && (freezable || hasLocalEdit))
         {
             if (!hasLocalEdit)
             {

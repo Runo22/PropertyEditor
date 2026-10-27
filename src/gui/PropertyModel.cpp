@@ -140,7 +140,8 @@ namespace rpe
         {
             return;
         }
-        _releasedTypeName = QString::fromStdString(_boundType.get_name().to_string());
+        // A grouped view has no single bound type (its _boundType is void): no name.
+        _releasedTypeName = _grouped ? QString() : QString::fromStdString(_boundType.get_name().to_string());
         _root->releaseReflection(); // keeps the rows (views hold indexes), empties them
         _boundType = rttr::type::get<void>();
         {
@@ -279,6 +280,28 @@ namespace rpe
             const QModelIndex i = createIndex(r, 0, _root->children()[r]);
             emit dataChanged(i, i, { Qt::DisplayRole, GroupCountRole });
         }
+    }
+
+    void PropertyModel::clearValues(const QString& path)
+    {
+        TypeUseScope scope;
+        PropertyNode* node = _findNode(path);
+        if (!node)
+        {
+            return;
+        }
+        std::function<void(PropertyNode*)> clear = [&](PropertyNode* n) {
+            if (!n->hasLocalEdit())
+            {
+                n->setLiveValue(rttr::variant());
+            }
+            for (PropertyNode* c : n->children())
+            {
+                clear(c);
+            }
+        };
+        clear(node);
+        _emitDirtyRanges(_root.get());
     }
 
     QModelIndex PropertyModel::groupIndex(const QString& key) const
@@ -989,10 +1012,13 @@ namespace rpe
         {
             // Mirror mode: hand the edit off, show it optimistically, and resume
             // live updates (the sim thread will echo the applied value back).
+            // Shown as the property's own type (an enum edit arrives as its integer —
+            // see PropertyDelegate::setModelData); the sink gets the portable value.
+            const rttr::variant shown = bridge::coerce(newVal, node->type());
             node->setLocalEdit(false);
-            node->setLiveValue(newVal);
+            node->setLiveValue(shown.is_valid() ? shown : newVal);
             _editSink(node->path(), newVal);
-            emit propertyEdited(node->path(), newVal);
+            emit propertyEdited(node->path(), node->liveValue());
             emit localEditsChanged();
             return true;
         }
@@ -1003,7 +1029,6 @@ namespace rpe
         if (_editPolicy == EditPolicy::WriteBack && (grouped ? bool(_groupInstanceProvider) : bool(_instanceProvider)))
         {
             bool wrote = false;
-            rttr::variant actual;
             bool released = false;
             {
                 // The provider may hand back a pointer into data owned by another
@@ -1022,8 +1047,13 @@ namespace rpe
                     rttr::instance inst = grouped ? _groupInstanceProvider(groupKey) : _instanceProvider();
                     if (inst.is_valid() && bridge::setValueByPath(inst, relPath, newVal))
                     {
-                        // Read back so the display reflects any coercion the object applied.
-                        actual = bridge::getValueByPath(inst, relPath);
+                        // Read back so the display reflects any coercion the object
+                        // applied — stored in the node HERE, inside the read section:
+                        // the read-back value is made by the property's (maybe a
+                        // plugin's) code and must not outlive it on this stack.
+                        const rttr::variant actual = bridge::getValueByPath(inst, relPath);
+                        node->setLocalEdit(false);
+                        node->setLiveValue(actual.is_valid() ? actual : bridge::coerce(newVal, node->type()));
                         wrote = true;
                     }
                 });
@@ -1034,8 +1064,6 @@ namespace rpe
             }
             if (wrote)
             {
-                node->setLocalEdit(false);
-                node->setLiveValue(actual.is_valid() ? actual : newVal);
                 emit propertyEdited(node->path(), node->liveValue());
                 emit localEditsChanged();
                 return true;
@@ -1043,9 +1071,10 @@ namespace rpe
             // Write failed — fall through to a local draft so the edit is not lost.
         }
 
-        node->setLocalEditValue(newVal);
+        const rttr::variant draft = bridge::coerce(newVal, node->type());
+        node->setLocalEditValue(draft.is_valid() ? draft : newVal);
         node->setLocalEdit(true);
-        emit propertyEdited(node->path(), newVal);
+        emit propertyEdited(node->path(), node->localEditValue());
         emit localEditsChanged();
         return true;
     }

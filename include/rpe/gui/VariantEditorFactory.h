@@ -3,6 +3,8 @@
 #include <QString>
 #include <QWidget>
 
+class QAbstractItemDelegate;
+
 #include <optional>
 
 #include <rttr/type.h>
@@ -55,6 +57,14 @@ namespace rpe::varedit
     // editor's range (Min/Max) and pressing Enter would silently write the
     // clamped value back.
     void rememberOpeningValue(QWidget* editor, rttr::type t);
+
+    // Composite editors (a slider + spin box, the x/y/z boxes, path + Browse…) keep
+    // focus on an INNER widget, so the delegate never sees the editor itself lose
+    // focus: clicking elsewhere left it open and the edit unwritten. This commits
+    // and closes `editor` when focus moves to another widget of the same window —
+    // not when a menu or dialog the editor opened takes it. No-op for editors
+    // without a focus proxy (Qt's delegate already handles those).
+    void commitOnFocusLeave(QAbstractItemDelegate* delegate, QWidget* editor);
 
     // `value` as a variant of the numeric type `t` (float, double, or an integer
     // type — rounded, and range-checked by RTTR's conversion). Invalid when it

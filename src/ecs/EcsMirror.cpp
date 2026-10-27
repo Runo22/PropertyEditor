@@ -152,6 +152,10 @@ namespace rpe
         _selCompIds.clear();
         _selRows.clear();
         _lastCompRows.clear();
+        // A search round in flight holds the old world's component ids and types:
+        // resuming it against the new world would read new components through old
+        // types. Start over.
+        _search = {};
         _lastPrefabs.clear(); // prefab ids belong to the old world
         // Re-diagnose against the new world: its tags/prefabs are different entities.
         _lastPrefabGroups.clear();
@@ -213,10 +217,15 @@ namespace rpe
         // runs but no-ops (it checks `alive` under the same lock before touching
         // `this`), costing nothing per frame; the world reaps it at fini, or attach()
         // revives it (the system has a fixed name, so there is only ever one).
-        if (_haveSystem || _haveQuery)
         {
+            // Under the pump lock (both pump modes take it): no pump is running, so
+            // the search round (sim-thread state) can be dropped from any thread.
             std::lock_guard<std::mutex> lk(_alive->pumpMutex);
-            _alive->alive.store(false, std::memory_order_release);
+            if (_haveSystem || _haveQuery)
+            {
+                _alive->alive.store(false, std::memory_order_release);
+            }
+            _search = {};
         }
         // Drop our handles. The flecs C++ handle move-assignment only overwrites the
         // stored pointer — it never calls into the world — so this is safe even if

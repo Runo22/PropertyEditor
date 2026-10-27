@@ -125,7 +125,10 @@ namespace rpe
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        Entry entry { t, wrap, clone };
+        Entry entry;
+        entry.type = t;
+        entry.wrap = wrap;
+        entry.clone = clone;
         entry.fullName = t.get_name().to_string();
         entry.normFull = normalizeScopes(entry.fullName);
         entry.leaf = shortName(entry.fullName);
@@ -178,11 +181,10 @@ namespace rpe
         {
             return;
         }
-        bool wasBridged = false;
         {
             auto& r = registry();
             std::lock_guard<std::mutex> lk(r.mutex);
-            wasBridged = r.map.erase(id) > 0;
+            r.map.erase(id);
             // Drop any aliases pointing at this type so a stale name can't resolve to a
             // freed (unloaded-plugin) entry.
             for (auto it = r.aliases.begin(); it != r.aliases.end();)
@@ -197,11 +199,13 @@ namespace rpe
         }
         // The release point: everything rpe holds of `t` is dropped now, while the
         // module that defines it is still loaded (see rpe/core/TypeRelease.h).
-        // Only for a type that was bridged (a second call has nothing left to
-        // release) and that RTTR still has: if its module is already gone, the
-        // type_data is freed and reading it to release anything would crash —
-        // that's the "unregister BEFORE unloading" rule, too late to help here.
-        if (wasBridged && rttrStillHas(id))
+        // Bridged or not (a plugin object shown through editObject<T> or a
+        // VariantEditor holds its type too), as long as RTTR still has the type:
+        // if its module is already gone, the type_data is freed and reading it to
+        // release anything would crash — that's the "unregister BEFORE unloading"
+        // rule, too late to help here. A second call releases again; the handlers
+        // find nothing left, which is harmless.
+        if (rttrStillHas(id))
         {
             detail::releaseTypes({ t });
         }
@@ -512,13 +516,15 @@ namespace rpe
 
     bool TypeBridge::has(rttr::type t)
     {
-        if (!t.is_valid())
+        // By id only (never dereferenced): safe on a handle whose type was released.
+        const auto id = t.get_id();
+        if (id == 0)
         {
             return false;
         }
         auto& r = registry();
         std::lock_guard<std::mutex> lk(r.mutex);
-        return r.map.find(t.get_id()) != r.map.end();
+        return r.map.find(id) != r.map.end();
     }
 
     std::vector<rttr::type> TypeBridge::registeredTypes()

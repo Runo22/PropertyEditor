@@ -3,6 +3,7 @@
 #include "PickerKeys.h"
 #include "rpe/ecs/RowActions.h"
 #include "rpe/core/TypeRelease.h"
+#include "rpe/gui/PropertyDelegate.h" // paintItemReservingRight
 #include "rpe/core/TypeBridge.h"
 #include "rpe/ecs/ComponentScan.h"
 
@@ -203,24 +204,8 @@ namespace rpe
             {
                 const int kind = index.data(CompKindRole).toInt();
 
-                // Reserve room on the right so the text doesn't run under the icon,
-                // plus a badge chip for tag/pair rows.
-                QStyleOptionViewItem o(opt);
-                if (enabled)
-                    o.rect.adjust(0, 0, -o.rect.height(), 0);
-                if (kind == 1 || kind == 2)
-                {
-                    // Presence rows (tag / dataless pair): nothing to inspect —
-                    // render dimmed + italic so they read as state, not data.
-                    o.font.setItalic(true);
-                    QColor dim = opt.palette.color(QPalette::Text);
-                    dim.setAlpha(150);
-                    o.palette.setColor(QPalette::Text, dim);
-                }
-                if (kind != 0)
-                {
-                    o.rect.adjust(0, 0, -o.rect.height() - 30, 0);
-                }
+                // Room kept clear on the right: the trash icon, a tag/pair chip, a
+                // match-count pill.
                 const int matches = matchActive ? matchCounts.value(index.data(CompKeyRole).toString(), 0) : 0;
                 const QString pill = matches > 0 ? QString::number(matches) : QString();
                 QFont pillFont = opt.font;
@@ -231,28 +216,31 @@ namespace rpe
                 else if (pillFont.pixelSize() > 0)
                     pillFont.setPixelSize(std::max(1, pillFont.pixelSize() * 85 / 100));
                 const int pillW = pill.isEmpty() ? 0 : QFontMetrics(pillFont).horizontalAdvance(pill) + 12;
+                int textReserve = enabled ? opt.rect.height() : 0;
+                if (kind != 0)
+                    textReserve += opt.rect.height() + 30;
                 if (matchActive)
+                    textReserve += pillW + 8;
+
+                QStyleOptionViewItem o(opt);
+                initStyleOption(&o, index);
+                // Presence rows (tag / dataless pair): nothing to inspect — italic and
+                // faded, so they read as state, not data. Rows without a search match
+                // fade further, so the eye goes to the ones that have. Faded with the
+                // painter's OPACITY, not the palette: a style sheet's ::item colour
+                // would override a palette tweak.
+                qreal opacity = 1.0;
+                if (kind == 1 || kind == 2)
                 {
-                    o.rect.adjust(0, 0, -(pillW + 8), 0);
-                    // No match here: dim the row, so the eye goes to the ones that have.
-                    if (matches == 0 && !(opt.state & QStyle::State_Selected))
-                    {
-                        QColor dim = o.palette.color(QPalette::Text);
-                        dim.setAlpha(90);
-                        o.palette.setColor(QPalette::Text, dim);
-                    }
+                    o.font.setItalic(true);
+                    opacity = 0.6;
                 }
-                if (o.rect != opt.rect)
-                {
-                    // The row's background (selection / hover) spans the full width,
-                    // under the pill and the trash too; the item itself paints in
-                    // the narrower rect so its text stops short of them.
-                    QStyleOptionViewItem full(opt);
-                    initStyleOption(&full, index);
-                    const QWidget* w = full.widget;
-                    (w ? w->style() : QApplication::style())->drawPrimitive(QStyle::PE_PanelItemViewItem, &full, p, w);
-                }
-                QStyledItemDelegate::paint(p, o, index);
+                if (matchActive && matches == 0 && !(opt.state & QStyle::State_Selected))
+                    opacity = std::min(opacity, 0.4);
+                p->save();
+                p->setOpacity(opacity);
+                paintItemReservingRight(p, o, textReserve);
+                p->restore();
                 if (!pill.isEmpty())
                 {
                     const int reserve = enabled ? opt.rect.height() : 0;
@@ -739,7 +727,13 @@ namespace rpe
 
     void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
     {
-        _components.clear();
+        {
+            // _components holds rttr::type handles a type release (a plugin
+            // unloading, on another thread) rewrites: touch it only in a read
+            // section — never held across the world guard or a signal.
+            TypeUseScope scope;
+            _components.clear();
+        }
         _mirrorRows.clear();
 
         // Collect under the guard (entity/component reads touch the world);
@@ -749,6 +743,7 @@ namespace rpe
         QVector<int> dataKinds; // 0 = component, 3 = data-carrying pair (badge)
         QVector<MirrorChannel::ComponentRow> extraRows; // tags + dataless pairs
         withGuard(_guard, [&] {
+            TypeUseScope scope; // inside the guard: never wait for a release holding it
             if (!world || !e.is_alive())
             {
                 return;
@@ -845,6 +840,7 @@ namespace rpe
         // Sort names and their parallel ComponentInfos together, alphabetically by
         // the displayed leaf name (item UserRole stays the index into _components).
         {
+            TypeUseScope scope;
             QVector<int> order(names.size());
             for (int i = 0; i < names.size(); ++i)
             {
@@ -888,6 +884,14 @@ namespace rpe
         const bool sameEntity = entityId != 0 && entityId == _listedEntity;
         _listedEntity = entityId;
 
+        QVector<qulonglong> rawIds;
+        {
+            TypeUseScope scope;
+            for (const ComponentInfo& c : std::as_const(_components))
+            {
+                rawIds.append(static_cast<qulonglong>(c.id.raw_id()));
+            }
+        }
         _list->blockSignals(true);
         _list->clear();
         for (int i = 0; i < names.size(); ++i)
@@ -896,7 +900,7 @@ namespace rpe
             item->setData(Qt::UserRole, i);
             item->setData(CompKeyRole, keys[i]);
             item->setData(CompKindRole, dataKinds[i]);
-            item->setData(CompRawIdRole, static_cast<qulonglong>(_components[i].id.raw_id()));
+            item->setData(CompRawIdRole, i < rawIds.size() ? rawIds[i] : 0ull);
         }
         for (const auto& r : extraRows)
         {
@@ -997,7 +1001,10 @@ namespace rpe
                 del->clearConfirm();
         }
         _mirrorRows = rows;
-        _components.clear(); // mirror mode has no world-backed infos
+        {
+            TypeUseScope scope;
+            _components.clear(); // mirror mode has no world-backed infos
+        }
 
         // Preserve selection across the rebuild by PATH (Qt::UserRole). Also remember
         // its row, so if that component was DELETED we can select the neighbour that
@@ -1215,6 +1222,7 @@ namespace rpe
 
     ComponentInfo ComponentListWidget::componentInfo(const QString& key) const
     {
+        TypeUseScope scope;
         for (int i = 0; i < _list->count(); ++i)
         {
             const QListWidgetItem* it = _list->item(i);
@@ -1269,7 +1277,10 @@ namespace rpe
     void ComponentListWidget::clearEntity()
     {
         _listedEntity = 0;
-        _components.clear();
+        {
+            TypeUseScope scope;
+            _components.clear();
+        }
         _mirrorRows.clear();
         _list->clear();
         emit componentDeselected();
@@ -1297,9 +1308,19 @@ namespace rpe
         {
             emit componentNameSelected(item->text());
             const int idx = ud.toInt();
-            if (idx >= 0 && idx < _components.size())
+            ComponentInfo info;
+            bool have = false;
             {
-                emit componentSelected(_components[idx]);
+                TypeUseScope scope; // copy under the read section, emit outside it
+                if (idx >= 0 && idx < _components.size())
+                {
+                    info = _components[idx];
+                    have = true;
+                }
+            }
+            if (have)
+            {
+                emit componentSelected(info);
             }
         }
     }

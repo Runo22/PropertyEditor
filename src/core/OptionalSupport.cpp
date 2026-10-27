@@ -41,7 +41,8 @@ namespace rpe
             auto& r = registry();
             std::lock_guard<std::mutex> lk(r.mutex);
             const auto it = r.map.find(t.get_id());
-            return it != r.map.end() && it->second.name == t.get_name().to_string() ? &it->second : nullptr;
+            // string_view compare: no allocation on this per-lookup path.
+            return it != r.map.end() && rttr::string_view(it->second.name) == t.get_name() ? &it->second : nullptr;
         }
     } // namespace
 

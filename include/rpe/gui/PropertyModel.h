@@ -104,6 +104,10 @@ namespace rpe
         void setGroupInstanceProvider(std::function<rttr::instance(const QString& key)> provider);
         // Match counts shown on the group headers (GroupCountRole).
         void setGroupCounts(const QHash<QString, int>& counts);
+        // Forget the values of the row at `path` and everything below it (GUI
+        // thread; frozen rows keep theirs) — e.g. a grouped search hit that stopped
+        // matching: its fields must not linger with values from an older round.
+        void clearValues(const QString& path);
         QModelIndex groupIndex(const QString& key) const;
         // The row at `path` (column 0), or an invalid index.
         QModelIndex indexForPath(const QString& path) const;

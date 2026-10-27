@@ -95,13 +95,17 @@ These need no hint; they kick in by shape.
 
 A struct with **2–4 numeric fields** (`Vec2`, `Vec3`, `Color4`, `Size2`, …) can be
 edited **on its own row**: double-click the `[1, 2, 3]` summary and every field
-gets a compact box side by side. Fields named `x/y/z/w` or `r/g/b/a` carry a
-coloured axis chip (red/green/blue/grey); other names show as a small label.
-The row still expands as usual to edit one field.
+gets a compact box side by side. When the fields ARE axes — all named from
+`x/y/z/w`, or all from `r/g/b/a` — each carries a coloured axis chip
+(red/green/blue/grey); otherwise (a `Rect{x, y, w, h}`, a `Size{width, height}`)
+each shows its name. The row still expands as usual to edit one field.
 
 - Each field keeps its own `Min`/`Max`/`Step`/`Decimals`.
 - Only the fields you **changed** are written — the others keep their live value
   (in the mirror, each changed field is a separate edit).
+- Clicking anywhere else in the window commits and closes it, like any other
+  editor (the slider editor too). A picker it opens (a menu, a file or colour
+  dialog) doesn't.
 - Not offered when the struct is read-only, any field is read-only, a field is a
   `bool`, a struct, or an integer type that gets a line edit (`unsigned int`,
   `long`, 64-bit).
@@ -113,11 +117,12 @@ value; the cursor turns into a ↔ over names that scrub.
 
 | | |
 |---|---|
-| step | the `Step` hint, else 0.1 (floats) / 1 (integers) per 4 px |
+| step | the `Step` hint, else 0.1 (floats) / 1 (integers) per 4 px — whole steps only: the value (and a write) changes when the drag crosses into the next step, not on every pixel |
+| precision | rounded to the `Decimals` hint (else to the step's precision) |
 | Shift | fine — step × 0.1 |
 | Ctrl | coarse — step × 10 |
 | Esc (while dragging) | restores the starting value |
-| range | clamped to `Min`/`Max` |
+| range | clamped to `Min`/`Max`, and to the type's own range (an unsigned value stops at 0) |
 
 A plain click still just selects the row — nothing changes until the mouse
 moves past the platform drag distance, and the value starts from where you

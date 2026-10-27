@@ -13,6 +13,8 @@
 #include <functional>
 
 class QTreeView;
+class QShortcut;
+class QKeySequence;
 class QLineEdit;
 class QToolButton;
 class QLabel;
@@ -62,6 +64,8 @@ namespace rpe
 
         // Leaf dot-paths that are currently visible (all ancestors expanded). With
         // `onlyExpanded == false`, returns every leaf path regardless of expansion.
+        // While the filter has text, every leaf (and array) counts as visible: a row
+        // can be hidden only because the value it would match hasn't arrived yet.
         QStringList visibleLeafPaths(bool onlyExpanded = true) const;
 
         // Convenience for static objects: bind the type and continuously edit `obj`.
@@ -117,11 +121,17 @@ namespace rpe
         }
         void setSearchAll(bool on);
         bool isSearchAll() const;
+        // The keys that toggle it (default Ctrl+Shift+F; active only while the scope
+        // is available). If the host binds the same keys, Qt fires neither — pick
+        // other keys here, or pass an empty sequence for none.
+        void setSearchAllShortcut(const QKeySequence& keys);
+        QKeySequence searchAllShortcut() const;
         QString filterText() const;
         void setFilterText(const QString& text);
 
         // Grouped view (see PropertyModel::bindGroups): one header per group, the
-        // filter applying across all of them; headers show their match count.
+        // filter applying across all of them. A header shows the match count the
+        // host sets with model()->setGroupCounts().
         void bindGroups(const QVector<PropertyModel::Group>& groups);
         void setGroupInstanceProvider(std::function<rttr::instance(const QString& key)> provider);
 
@@ -199,12 +209,10 @@ namespace rpe
         QLineEdit* _filter = nullptr;
         QToolButton* _resetBtn = nullptr;
         QToolButton* _scopeBtn = nullptr;
+        QShortcut* _scopeKey = nullptr;
         void _updateScopeIcon(); // drawn in the button's current text colour
         bool _searchAllAvailable = false;
-        // Grouped view: recount each header's visible matches (coalesced).
-        void _scheduleGroupCounts();
-        void _updateGroupCounts();
-        bool _groupCountsPending = false;
+
         // Explains an empty panel when the bound type reflects no properties, instead
         // of leaving a silent blank (see _updateEmptyHint).
         QLabel* _emptyHint = nullptr;

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 
@@ -159,6 +160,38 @@ int main()
         }
         sim.join();
         check("a TypeUseGap around a lock avoids the reader/lock-owner deadlock", guiWrote && simDone.load());
+    }
+
+    // ── two releases at once, one from inside a read section ───────────────────
+    {
+        // A is in a read section. B starts a release and waits for A to leave it.
+        // A then starts its own release: it must step out while it waits for B, or
+        // B waits for A's read section and A waits for B's release — forever.
+        std::atomic<bool> aDone { false }, bDone { false };
+        std::thread a([&] {
+            rpe::TypeUseScope reading;
+            std::this_thread::sleep_for(40ms); // B is the writer by now, waiting for us
+            rpe::detail::releaseTypes({ alpha });
+            aDone = true;
+        });
+        std::this_thread::sleep_for(10ms); // A holds its read section first
+        std::thread b([&] {
+            rpe::detail::releaseTypes({ beta });
+            bDone = true;
+        });
+        for (int i = 0; i < 200 && !(aDone && bDone); ++i)
+            std::this_thread::sleep_for(10ms);
+        check("a release from inside a read section while another waits doesn't deadlock", aDone && bDone);
+        if (aDone && bDone)
+        {
+            a.join();
+            b.join();
+        }
+        else
+        {
+            fflush(stdout);
+            std::_Exit(1); // the threads are stuck: report and leave
+        }
     }
 
     // ── nested release from a handler ──────────────────────────────────────────

@@ -128,6 +128,22 @@ namespace rpe
 
                     if (raw.is_sequential_container() || raw.is_associative_container())
                     {
+                        // Reading a container COPIES it — skip that when its text
+                        // can't match anyway: numbers only, and a needle that can't
+                        // occur in a number.
+                        if (!nameHit && !numeric)
+                        {
+                            const auto args = raw.get_template_arguments();
+                            bool allNumbers = args.begin() != args.end();
+                            for (const rttr::type& a : args)
+                            {
+                                allNumbers = allNumbers && isNumber(a);
+                            }
+                            if (allNumbers)
+                            {
+                                continue;
+                            }
+                        }
                         const rttr::variant v = p.get_value(obj);
                         if (nameHit || containerMatches(v))
                         {

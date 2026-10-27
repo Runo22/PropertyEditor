@@ -19,6 +19,18 @@ namespace rpe
     int readOnlyLockWidth(const QStyleOptionViewItem& option);
     void paintReadOnlyLock(QPainter* painter, const QStyleOptionViewItem& option);
 
+    // Paint an item (an option already filled by initStyleOption) ONCE across its
+    // full rect — background, selection, hover, focus — with its text elided so it
+    // stops `reserve` px short of the right edge, for decorations painted after it.
+    // (Painting the background, then the item again in a narrower rect, doubled a
+    // translucent selection and drew a second border on Windows / style sheets.)
+    void paintItemReservingRight(QPainter* painter, QStyleOptionViewItem option, int reserve);
+
+    // The colour the style draws a SELECTED row's text in — HighlightedText,
+    // except under the Windows native style, which keeps the normal text colour on
+    // its light selection. Decorations on a selected row should use this.
+    QColor selectedTextColor(const QStyleOptionViewItem& option);
+
     // ─────────────────────────────────────────────────────────────────────────────
     //  PropertyDelegate — provides type-appropriate inline editors for column 1.
     //

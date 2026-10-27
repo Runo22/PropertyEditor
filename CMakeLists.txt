@@ -418,6 +418,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_preferred_component_test test/preferred_component_test.cpp)
     target_link_libraries(rpe_preferred_component_test PRIVATE rpe_gui)
 
+    add_executable(rpe_review_fixes_test test/review_fixes_test.cpp)
+    target_link_libraries(rpe_review_fixes_test PRIVATE rpe_gui)
+
     add_executable(rpe_search_all_test test/search_all_test.cpp)
     target_link_libraries(rpe_search_all_test PRIVATE rpe_gui)
 

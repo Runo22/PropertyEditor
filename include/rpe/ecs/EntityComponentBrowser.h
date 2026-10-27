@@ -317,7 +317,12 @@ namespace rpe
         QStringList _groupKeys;       // the components the grouped view shows
         QSet<QString> _hitPaths;      // grouped rows filled by the last round
         QString _groupFocusPath;      // row last picked in the grouped view (component-relative)
+        // Mirror mode: the row to select once its value has arrived (a row matching
+        // the filter by value is hidden until then). Tried on each poll, for a while.
+        QString _pendingReveal;
+        qint64 _pendingRevealUntil = 0; // QDateTime::currentMSecsSinceEpoch() deadline
         QTimer* _searchTimer = nullptr; // direct mode: search rounds
+        quint64 _groupRegistryGen = 0; // direct mode: bridge registry the groups were listed at
         RttrVariantWrapper _groupWrapper; // direct mode: WriteBack target of a grouped edit
 
         // ── A plugin unloading (rpe/core/TypeRelease.h) ──────────────────────────

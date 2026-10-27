@@ -26,7 +26,8 @@ namespace rpe
         FlagsBridge::BuildFn lookup(Registry& r, rttr::type t)
         {
             const auto it = r.map.find(t.get_id());
-            if (it == r.map.end() || it->second.name != t.get_name().to_string())
+            // string_view compare: no allocation on this per-lookup path.
+            if (it == r.map.end() || rttr::string_view(it->second.name) != t.get_name())
             {
                 return nullptr;
             }

@@ -12,6 +12,7 @@
 #include <QPen>
 #include <QStyle>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -61,12 +62,39 @@ namespace rpe
         return lockSide(option) + 6;
     }
 
+    QColor selectedTextColor(const QStyleOptionViewItem& option)
+    {
+        const QWidget* w = option.widget;
+        const QStyle* style = w ? w->style() : QApplication::style();
+        // (Under a style sheet, QStyleSheetStyle draws selected text in the
+        // palette's HighlightedText — what `selection-color` sets.)
+        if (style && style->inherits("QWindowsVistaStyle"))
+        {
+            return option.palette.color(QPalette::Text);
+        }
+        return option.palette.color(QPalette::HighlightedText);
+    }
+
+    void paintItemReservingRight(QPainter* painter, QStyleOptionViewItem o, int reserve)
+    {
+        const QWidget* w = o.widget;
+        QStyle* style = w ? w->style() : QApplication::style();
+        if (reserve > 0 && (o.features & QStyleOptionViewItem::HasDisplay))
+        {
+            const QRect textRect = style->subElementRect(QStyle::SE_ItemViewItemText, &o, w);
+            const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, w) + 1;
+            const int room = std::max(0, std::min(textRect.width(), o.rect.right() - reserve - textRect.left()) - 2 * margin);
+            o.text = QFontMetrics(o.font).elidedText(o.text, o.textElideMode, room);
+        }
+        style->drawControl(QStyle::CE_ItemViewItem, &o, painter, w);
+    }
+
     void paintReadOnlyLock(QPainter* painter, const QStyleOptionViewItem& option)
     {
         // A shackle over a body, in the text colour, faint — present, not loud.
         const int side = lockSide(option);
         const bool selected = option.state & QStyle::State_Selected;
-        QColor c = option.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
+        QColor c = selected ? selectedTextColor(option) : option.palette.color(QPalette::Text);
         c.setAlphaF(selected ? 0.75 : 0.40);
         const QRectF box(option.rect.right() - readOnlyLockWidth(option) + 3, option.rect.center().y() - side / 2.0,
                          side, side);
@@ -117,25 +145,11 @@ namespace rpe
         // "deliberately not editable" (the reason is in the tooltip).
         if (index.column() == 1 && !index.data(ReadOnlyRole).toString().isEmpty())
         {
-            const int lockW = readOnlyLockWidth(option);
-
-            // Background/selection across the WHOLE cell, so the highlight doesn't
-            // stop short of the lock...
-            QStyleOptionViewItem bg(option);
-            initStyleOption(&bg, index);
-            bg.text.clear();
-            bg.icon = QIcon();
-            bg.features &= ~(QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration);
-            const QWidget* w = bg.widget;
-            QStyle* style = w ? w->style() : QApplication::style();
-            style->drawControl(QStyle::CE_ItemViewItem, &bg, painter, w);
-
-            // ...the value itself in the remaining width (elided, never under the lock)...
-            QStyleOptionViewItem text(option);
-            text.rect.setRight(option.rect.right() - lockW);
-            QStyledItemDelegate::paint(painter, text, index);
-
-            // ...and the lock.
+            // The whole cell once (the highlight reaches the lock), the value elided
+            // short of it, then the lock.
+            QStyleOptionViewItem o(option);
+            initStyleOption(&o, index);
+            paintItemReservingRight(painter, o, readOnlyLockWidth(option));
             paintReadOnlyLock(painter, option);
             return;
         }
@@ -168,7 +182,9 @@ namespace rpe
             // on commit only the fields the user changed are written (each through
             // its own path), so nothing else is frozen or overwritten.
             _editPath.clear();
-            return _makeVectorEditor(index, parent);
+            QWidget* v = _makeVectorEditor(index, parent);
+            varedit::commitOnFocusLeave(const_cast<PropertyDelegate*>(this), v);
+            return v;
         }
 
         const rttr::variant declared = index.data(DeclaredTypeRole).value<rttr::variant>();
@@ -191,6 +207,7 @@ namespace rpe
         _editHadLocalEdit = index.data(HasLocalEditRole).toBool();
         _editCommitted = false;
         _model->beginEditorPin(_editPath); // transient: Reset doesn't offer to undo it
+        varedit::commitOnFocusLeave(const_cast<PropertyDelegate*>(this), w);
         return w;
     }
 
@@ -234,20 +251,29 @@ namespace rpe
             ? TypeRenderer::rawType(declared.get_value<rttr::type>())
             : TypeRenderer::rawType(index.data(RttrVariantRole).value<rttr::variant>().get_type());
 
-        const rttr::variant newVal = varedit::readEditorData(editor, t);
+        rttr::variant edit;
+        {
+            const rttr::variant newVal = varedit::readEditorData(editor, t);
 
-        // Left as it was opened → nothing to write. Treated as a cancel, so the row
-        // goes back to following live values. (Writing it would, for a value outside
-        // the editor's Min/Max, store the CLAMPED value the user never chose.)
-        if (varedit::unchangedSinceOpen(editor, newVal))
-        {
-            return;
+            // Left as it was opened → nothing to write. Treated as a cancel, so the
+            // row goes back to following live values. (Writing it would, for a value
+            // outside the editor's Min/Max, store the CLAMPED value the user never
+            // chose.)
+            if (varedit::unchangedSinceOpen(editor, newVal) || !newVal.is_valid())
+            {
+                return;
+            }
+            // An enum VALUE is made by the code that registered the enum — maybe a
+            // plugin. Hand the write its integer instead, so nothing of the plugin's
+            // is held while the write waits for the world guard (a plugin unloading
+            // on that thread would free it); the write turns it back into the enum
+            // (bridge::coerce). The enum value itself dies here, in the read section.
+            edit = newVal.get_type().is_enumeration()
+                ? rttr::variant(static_cast<int64_t>(TypeRenderer::enumBits(newVal)))
+                : newVal;
         }
-        if (newVal.is_valid())
-        {
-            _editCommitted = true;
-            model->setData(index, QVariant::fromValue(newVal), Qt::EditRole);
-        }
+        _editCommitted = true;
+        model->setData(index, QVariant::fromValue(edit), Qt::EditRole);
     }
 
     namespace

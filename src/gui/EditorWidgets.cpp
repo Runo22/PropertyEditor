@@ -541,10 +541,24 @@ namespace rpe
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(3);
 
+        // Axis chips only when the fields ARE axes — all of x/y/z/w, or all of
+        // r/g/b/a. A Rect{x, y, w, h} would otherwise get a red X, a grey W and a
+        // plain "h": names it is, then.
+        const auto inSet = [&](const QString& set) {
+            for (const Field& f : fields)
+            {
+                const QString n = f.name.trimmed().toLower();
+                if (n.size() != 1 || !set.contains(n))
+                    return false;
+            }
+            return true;
+        };
+        const bool axes = inSet(QStringLiteral("xyzw")) || inSet(QStringLiteral("rgba"));
+
         for (const Field& f : fields)
         {
             // The label: a coloured one-letter chip for an axis, the name otherwise.
-            const QColor axis = axisColor(f.name);
+            const QColor axis = axes ? axisColor(f.name) : QColor();
             auto* label = new QLabel(axis.isValid() ? f.name.trimmed().toUpper() : f.name, this);
             label->setAlignment(Qt::AlignCenter);
             label->setMinimumWidth(14);

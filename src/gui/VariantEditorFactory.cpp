@@ -7,6 +7,9 @@
 #include "rpe/gui/EditorWidgets.h"
 #include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
 
+#include <QApplication>
+#include <QAbstractItemDelegate>
+#include <QPointer>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
@@ -562,6 +565,31 @@ namespace rpe::varedit
         const QVariant before = editor->property(kOpeningValue);
         const QVariant now = fingerprint(newVal);
         return before.isValid() && now.isValid() && before == now;
+    }
+
+    void commitOnFocusLeave(QAbstractItemDelegate* delegate, QWidget* editor)
+    {
+        if (!delegate || !editor || !editor->focusProxy())
+        {
+            return;
+        }
+        QPointer<QAbstractItemDelegate> d(delegate);
+        // `editor` is the connection's context: destroying it disconnects.
+        QObject::connect(qApp, &QApplication::focusChanged, editor, [d, editor](QWidget*, QWidget* now) {
+            if (!d || !now || now == editor || editor->isAncestorOf(now) || editor->property("rpeLeft").toBool())
+            {
+                return;
+            }
+            // A picker the editor opened (menu, file / colour dialog) is not leaving.
+            if (QApplication::activePopupWidget() || QApplication::activeModalWidget()
+                || now->window() != editor->window())
+            {
+                return;
+            }
+            editor->setProperty("rpeLeft", true); // once: closing moves focus again
+            emit d->commitData(editor);
+            emit d->closeEditor(editor, QAbstractItemDelegate::NoHint);
+        });
     }
 
     rttr::variant numberAs(double value, rttr::type t)

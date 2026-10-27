@@ -6,6 +6,7 @@
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/gui/PropertyDelegate.h"
 #include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
+#include "rpe/core/RttrBridge.h"
 #include "rpe/core/TypeRelease.h"
 #include "rpe/gui/VariantEditorFactory.h"
 
@@ -141,16 +142,9 @@ namespace rpe
                 }
                 // Same read-only look as the property grid: full-cell background, the
                 // value in the remaining width, a faint lock at the right edge.
-                QStyleOptionViewItem bg(option);
-                initStyleOption(&bg, index);
-                bg.text.clear();
-                bg.icon = QIcon();
-                bg.features &= ~(QStyleOptionViewItem::HasDisplay | QStyleOptionViewItem::HasDecoration);
-                const QWidget* w = bg.widget;
-                (w ? w->style() : QApplication::style())->drawControl(QStyle::CE_ItemViewItem, &bg, painter, w);
-                QStyleOptionViewItem text(option);
-                text.rect.setRight(option.rect.right() - readOnlyLockWidth(option));
-                QStyledItemDelegate::paint(painter, text, index);
+                QStyleOptionViewItem o(option);
+                initStyleOption(&o, index);
+                paintItemReservingRight(painter, o, readOnlyLockWidth(option));
                 paintReadOnlyLock(painter, option);
             }
 
@@ -176,6 +170,7 @@ namespace rpe
                     // An editor is actually open on this row now: pause live refresh
                     // for it until it closes (see the closeEditor connection).
                     _arm(index.row());
+                    varedit::commitOnFocusLeave(const_cast<PinnedValueDelegate*>(this), editor);
                 }
                 return editor;
             }
@@ -193,11 +188,17 @@ namespace rpe
             {
                 TypeUseScope scope;
                 const rttr::type t = pinLeafType(_tree->topLevelItem(index.row()), *_values);
-                const rttr::variant v = varedit::readEditorData(editor, t);
-                if (v.is_valid() && !varedit::unchangedSinceOpen(editor, v))
+                rttr::variant edit;
                 {
-                    _commit(index.row(), v); // left unchanged → no write (see unchangedSinceOpen)
+                    const rttr::variant v = varedit::readEditorData(editor, t);
+                    if (!v.is_valid() || varedit::unchangedSinceOpen(editor, v))
+                    {
+                        return; // left unchanged → no write (see unchangedSinceOpen)
+                    }
+                    // An enum travels as its integer (see PropertyDelegate::setModelData).
+                    edit = v.get_type().is_enumeration() ? rttr::variant(static_cast<int64_t>(TypeRenderer::enumBits(v))) : v;
                 }
+                _commit(index.row(), edit);
             }
 
             void updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option, const QModelIndex&) const override
@@ -398,7 +399,10 @@ namespace rpe
         // too — otherwise the watch list would be the back door around it.
         const QString readOnly = rawId != 0
             ? QString()
-            : readOnlyReason(TypeBridge::resolveByName(component.toUtf8().constData()), path);
+            : [&] {
+                  TypeUseScope scope; // resolve and read with no release in between
+                  return readOnlyReason(TypeBridge::resolveByName(component.toUtf8().constData()), path);
+              }();
         item->setData(0, PinReadOnlyRole, readOnly);
         if (readOnly.isEmpty())
         {
@@ -508,7 +512,10 @@ namespace rpe
         // user edit), then queue it to the sim thread exactly like the property grid.
         // The next mirror poll re-confirms it (and updates LastValueRole).
         _updating = true;
-        item->setText(kValueColumn, TypeRenderer::toDisplayString(v));
+        {
+            TypeUseScope scope; // the display value is the property's own type (an enum)
+            item->setText(kValueColumn, TypeRenderer::toDisplayString(bridge::coerce(v, pinLeafType(item, _lastValues))));
+        }
         _updating = false;
         _channel->queuePinEdit(_itemKey(item), v);
     }

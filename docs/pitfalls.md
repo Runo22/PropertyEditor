@@ -142,6 +142,10 @@ Rules:
 - **Don't unregister a type another live module still uses.** The bridge holds one
   entry per type, no reference count: the first module to unregister removes it
   for everyone.
+- **Flags / `std::optional` registrations** (`RPE_REGISTER_FLAGS`,
+  `RPE_REGISTER_OPTIONAL`) answer only for a type of the same name; a reloaded
+  plugin registers them again with its registration, which replaces the old
+  entry.
 - **Any thread works**, and the release never waits for another thread to *run*
   — only for one to finish a short internal read section. A GUI thread blocked
   while the sim thread reloads the plugin (or the other way round) is fine.
@@ -152,6 +156,17 @@ Rules:
   plugin component, or a component several modules use): register them — RTTR
   and `registerType<T>()` — only in a module that never unloads (the host, or a
   common components library loaded before any plugin), *before* plugins load.
+- **Template types too.** `std::vector<float>`, `std::array<float, 3>`,
+  `std::map<std::string, int>`, `std::optional<T>`… belong to the first module
+  that uses them — if that's plugin A, unloading A frees them under plugin B.
+  In the host, before loading plugins:
+  `rpe::ownTypes<std::vector<float>, std::map<std::string, int>>();`
+  (`rpe/core/TypeRelease.h`).
+- **Slots on rpe signals must not wait for the world lock.** `propertyEdited`
+  and friends can be emitted while rpe holds a read section; a thread that is
+  unregistering a plugin's types while holding the world's `AccessGuard` waits
+  for that section to end. A slot that locks the same guard deadlocks both —
+  queue that work (`Qt::QueuedConnection`).
   RTTR gives a type's data to the first module that asks for it; if a plugin is
   first, unloading it frees the type under the host. rpe does this for every
   type it names itself (`QString`, `QColor`, `std::string`, chrono, …).

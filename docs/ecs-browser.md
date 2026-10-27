@@ -95,7 +95,8 @@ request is remembered and applied when it appears.
 2. otherwise the first of `Settings::preferredComponents` the entity has — names
    as full path (`game.Player` / `game::Player`) or a trailing part (`Player`);
    `browser.setPreferredComponents({...})` sets just this;
-3. otherwise the default: direct mode the first row, mirror mode nothing.
+3. otherwise the default: direct mode the first row; mirror mode the row where
+   the previous selection was (nothing on the very first entity).
 
 A component **removed from the entity you're on** hands the selection to the row
 that took its place — the preference is for arriving at an entity, not for that.
@@ -158,7 +159,8 @@ components too**:
   every component with a match and dims the ones without — so "it's in Weapon"
   is visible without leaving the component you're on. The grid itself still
   filters only the selected component.
-- **The scope button** (the layers icon beside the filter, or `Ctrl+Shift+F`)
+- **The scope button** (the layers icon beside the filter, or `Ctrl+Shift+F` —
+  see below to change the keys)
   switches the grid to **all components**: every match, grouped under a header
   per component (with its count), live values, matched text highlighted.
 - **Rows there edit in place**, with the usual editors, and the edit goes to that
@@ -180,11 +182,18 @@ with 40 components (~1000 fields, 40 arrays of 64 floats, Release build): the
 99.9th-percentile pump went from 0.20 ms to 0.30 ms for a name search like
 `speed`, 0.34 ms for a number like `1.25` (the worst case: every number is
 rendered to text — skipped entirely when the text can't occur in a number).
+The budget is checked between components, so ONE component can't be split: a
+component holding a very large container still costs its whole read in one
+pump (containers of numbers are skipped when the text can't occur in a number;
+a container's text is matched on its first 256 elements).
 Direct mode searches on the GUI thread on the same timer.
 
 `PropertyEditor` on its own has no scope button; `setSearchAllAvailable(true)`
 shows it, and a host feeds the results with `bindGroups()` (see
-`PropertyModel::bindGroups`). The search itself is `rpe::searchProperties`
+`PropertyModel::bindGroups`) and the header counts with
+`model()->setGroupCounts()`. Its key is `Ctrl+Shift+F` by default — if your
+application uses those keys, Qt fires neither; pick others with
+`setSearchAllShortcut(…)` (an empty sequence turns it off). The search itself is `rpe::searchProperties`
 (`rpe/core/PropertySearch.h`).
 
 ## Tags & pairs

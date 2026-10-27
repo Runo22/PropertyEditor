@@ -28,7 +28,11 @@ namespace rpe
     //
     //  Rules for the host:
     //   • unregister every bridged type of a plugin BEFORE unloading it;
-    //   • don't unload from inside an rpe signal handler or menu callback — queue it.
+    //   • don't unload from inside an rpe signal handler or menu callback — queue it;
+    //   • rpe's signals (propertyEdited, …) can be emitted inside a read section: a
+    //     slot must not WAIT for a lock that a plugin-unloading thread may hold while
+    //     it unregisters (typically the world's AccessGuard) — that thread waits for
+    //     the read section to end. Queue such work (Qt::QueuedConnection).
     // ─────────────────────────────────────────────────────────────────────────────
 
     // A read section over reflected data (a model's types, properties, values).
@@ -68,11 +72,26 @@ namespace rpe
     int addTypeReleaseHandler(TypeReleaseHandler handler);
     void removeTypeReleaseHandler(int handle);
 
+    // Make the CALLING module the owner of these types' RTTR data. RTTR gives a
+    // type's data to the first module that asks for it, and frees it when that
+    // module unloads — under every other module using it. rpe_core owns the types
+    // it names itself (QString, QColor, std::string, chrono, …); call this in the
+    // host (a module that never unloads), before loading plugins, for the TEMPLATE
+    // types plugin components use: std::vector<float>, std::array<float, 3>,
+    // std::map<std::string, int>, std::optional<T>, …
+    template <class... Ts>
+    void ownTypes()
+    {
+        (static_cast<void>(rttr::type::get<Ts>()), ...);
+    }
+
     // Bumped by every release.
     uint64_t typeReleaseCount();
 
-    // True if `t` — or the type it wraps / points to / holds as array elements — is
-    // one of `released`. Compares handles only (never touches the type's data).
+    // True if `t` — or the type it wraps / points to, or a template argument of it
+    // (std::vector<T>, std::map<K, T>, std::optional<T>, …, recursively) — is one of
+    // `released`. Call it from a release handler (the released module is still
+    // loaded then, so following t's links is safe).
     bool isReleased(rttr::type t, const std::vector<rttr::type>& released);
 
     namespace detail

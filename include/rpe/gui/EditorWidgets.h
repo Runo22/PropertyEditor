@@ -194,7 +194,7 @@ namespace rpe
             double min = -1e15;     // the field's own Min/Max/Step/Decimals hints
             double max = 1e15;
             double step = 0;        // 0 → 0.1 (floating) / 1 (integral)
-            int decimals = 3;
+            int decimals = 4; // as the scalar spin box's default
         };
 
         explicit VectorEditor(const QVector<Field>& fields, QWidget* parent = nullptr);

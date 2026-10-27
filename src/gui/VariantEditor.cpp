@@ -54,12 +54,14 @@ namespace rpe
 
     void VariantEditor::setVariant(const rttr::variant& v)
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         _wrapper = RttrVariantWrapper(v);
         _rebind();
     }
 
     void VariantEditor::updateVariant(const rttr::variant& v)
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         // Values-only path: replace the owned copy and re-read through the existing
         // schema. Locally-edited rows (including the one behind an open inline
         // editor, which is pinned while editing) are skipped by refresh(), so live
@@ -76,12 +78,14 @@ namespace rpe
 
     void VariantEditor::setLinked(rttr::type type, void* obj)
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         _wrapper = RttrVariantWrapper::makeLinked(type, obj);
         _rebind();
     }
 
     void VariantEditor::clear()
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         _wrapper.clear();
         _editor->unbind();
         _typeLabel->setText(tr("<no value>"));
@@ -89,6 +93,7 @@ namespace rpe
 
     void VariantEditor::_rebind()
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         if (!_wrapper.isValid())
         {
             clear();
@@ -102,6 +107,7 @@ namespace rpe
 
     void VariantEditor::refreshFromSource()
     {
+        TypeUseScope scope; // _wrapper is what a type release drops (see the handler)
         if (_wrapper.isValid())
         {
             _editor->refresh(_wrapper.instance());
