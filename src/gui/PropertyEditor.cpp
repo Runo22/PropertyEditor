@@ -20,7 +20,6 @@
 #include <QShortcut>
 #include <QSortFilterProxyModel>
 #include <QStyledItemDelegate>
-#include <QTextDocument>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeView>
@@ -68,10 +67,11 @@ namespace rpe
             QString _text;
         };
 
-        // The NAME column while a filter is active: the matched part of each name in
-        // the highlight colour, and a group header's match count after its label.
-        // Without a filter (and outside the grouped view) it paints exactly like the
-        // default delegate.
+        // The NAME column. The style draws every row's text as usual — its colours
+        // (style-sheet ::item rules included), its font — and while a filter is
+        // active the matched part gets a translucent accent tint behind it, never a
+        // re-coloured or re-drawn text. Group headers (the grouped view) are the
+        // view's own font in bold, with their match count appended.
         class NameDelegate : public QStyledItemDelegate
         {
         public:
@@ -81,66 +81,73 @@ namespace rpe
             {
             }
 
+        protected:
+            void initStyleOption(QStyleOptionViewItem* o, const QModelIndex& index) const override
+            {
+                QStyledItemDelegate::initStyleOption(o, index);
+                if (index.data(IsGroupRole).toBool())
+                {
+                    o->font.setBold(true); // the view's font, bold — not the app default
+                    o->fontMetrics = QFontMetrics(o->font);
+                    const int n = index.data(GroupCountRole).toInt();
+                    if (n > 0)
+                    {
+                        o->text += QStringLiteral("  \u00B7  %1").arg(n);
+                    }
+                }
+            }
+
+        public:
             void paint(QPainter* p, const QStyleOptionViewItem& option, const QModelIndex& index) const override
             {
                 const QString needle = _needle();
-                const bool group = index.data(IsGroupRole).toBool();
-                if (needle.isEmpty() && !group)
+                QStyleOptionViewItem o(option);
+                initStyleOption(&o, index);
+                const int at = needle.isEmpty() ? -1 : o.text.indexOf(needle, 0, Qt::CaseInsensitive);
+                if (at < 0)
                 {
                     QStyledItemDelegate::paint(p, option, index);
                     return;
                 }
-                QStyleOptionViewItem o(option);
-                initStyleOption(&o, index);
-                const QString text = o.text;
-                o.text.clear();
                 const QWidget* w = o.widget;
                 QStyle* style = w ? w->style() : QApplication::style();
-                style->drawControl(QStyle::CE_ItemViewItem, &o, p, w);
-                const QRect r = style->subElementRect(QStyle::SE_ItemViewItemText, &o, w).adjusted(2, 0, -2, 0);
-
-                const bool selected = o.state & QStyle::State_Selected;
-                const QColor base = o.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
+                // Where the match sits in the text the style is about to draw (left
+                // aligned after the style's text margin, possibly elided).
+                const QRect textRect = style->subElementRect(QStyle::SE_ItemViewItemText, &o, w);
+                const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, w) + 1;
+                const QFontMetrics fm(o.font);
+                const QString shown = fm.elidedText(o.text, o.textElideMode, textRect.width() - 2 * margin);
+                QRect hl;
+                if (shown == o.text || at + needle.size() < shown.size())
+                {
+                    const int x = textRect.left() + margin + fm.horizontalAdvance(o.text.left(at));
+                    const int width = fm.horizontalAdvance(o.text.mid(at, needle.size()));
+                    hl = QRect(x - 1, textRect.center().y() - fm.height() / 2, width + 2, fm.height()) & textRect;
+                }
                 // The ACTIVE accent, whatever has focus: typing in the filter leaves
                 // the tree inactive, and an inactive highlight is grey on Windows.
-                // Lightened on a dark background, darkened on a light one, so it
-                // reads as a tint of the text rather than a selection. On a selected
-                // row the accent IS the background: mark the match by weight there.
-                const QColor accent = o.palette.color(QPalette::Active, QPalette::Highlight);
-                const bool darkBase = o.palette.color(QPalette::Active, QPalette::Base).lightness() < 128;
-                const QColor mark = selected ? base : (darkBase ? accent.lighter(150) : accent.darker(115));
-                QString html;
-                const int at = needle.isEmpty() ? -1 : text.indexOf(needle, 0, Qt::CaseInsensitive);
-                if (at >= 0)
-                {
-                    html = text.left(at).toHtmlEscaped()
-                        + QStringLiteral("<b style='color:%1'>").arg(mark.name())
-                        + text.mid(at, needle.size()).toHtmlEscaped() + QStringLiteral("</b>")
-                        + text.mid(at + needle.size()).toHtmlEscaped();
-                }
-                else
-                {
-                    html = text.toHtmlEscaped();
-                }
-                if (group)
-                {
-                    html = QStringLiteral("<b>%1</b>").arg(html);
-                    const int n = index.data(GroupCountRole).toInt();
-                    if (n > 0)
-                    {
-                        const QColor muted = selected ? base : o.palette.color(QPalette::PlaceholderText);
-                        html += QStringLiteral("&nbsp;&nbsp;<span style='color:%1'>&middot; %2</span>").arg(muted.name()).arg(n);
-                    }
-                }
-                QTextDocument doc;
-                doc.setDefaultFont(o.font);
-                doc.setDocumentMargin(0);
-                doc.setHtml(QStringLiteral("<span style='color:%1; white-space:pre'>%2</span>").arg(base.name(), html));
-                p->save();
-                p->setClipRect(r);
-                p->translate(r.left(), r.top() + (r.height() - doc.size().height()) / 2.0);
-                doc.drawContents(p);
-                p->restore();
+                const bool overlay = o.state & (QStyle::State_Selected | QStyle::State_MouseOver);
+                QColor tint = o.palette.color(QPalette::Active, overlay && (o.state & QStyle::State_Selected)
+                                                                     ? QPalette::HighlightedText
+                                                                     : QPalette::Highlight);
+                tint.setAlpha(overlay ? 70 : 105);
+                auto drawTint = [&] {
+                    if (hl.isEmpty())
+                        return;
+                    p->save();
+                    p->setRenderHint(QPainter::Antialiasing, true);
+                    p->setPen(Qt::NoPen);
+                    p->setBrush(tint);
+                    p->drawRoundedRect(hl, 2, 2);
+                    p->restore();
+                };
+                // Behind the text on a plain row; over it where the style fills the
+                // row (selection / hover), which would otherwise paint over the tint.
+                if (!overlay)
+                    drawTint();
+                QStyledItemDelegate::paint(p, option, index);
+                if (overlay)
+                    drawTint();
             }
 
         private:

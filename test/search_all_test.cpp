@@ -237,6 +237,8 @@ static void runBrowser(bool mirrorMode)
                 physicsHeader = view->model()->index(r, 0);
         check(tag + "a header carries its match count", waitFor([&] { return physicsHeader.data(rpe::GroupCountRole).toInt() == 2; }));
         check(tag + "headers aren't editable", !(physicsHeader.siblingAtColumn(1).flags() & Qt::ItemIsEditable));
+        check(tag + "headers carry no FontRole (a QFont() there would be the app font, not the view's)",
+              !physicsHeader.data(Qt::FontRole).isValid());
     }
 
     // ── by value, and nested ───────────────────────────────────────────────────
@@ -378,6 +380,36 @@ int main(int argc, char** argv)
             }
         check("the matched text is in the ACTIVE accent while the filter has focus (not the grey inactive one)", blue > 20);
         app.setPalette(QPalette());
+    }
+    {
+        // Names keep the STYLE's text colour and font while filtering (a style-sheet
+        // ::item colour, a pixel font size): the delegate only tints behind the
+        // match, it never re-draws the text itself.
+        app.setStyleSheet(QStringLiteral("QWidget { background: #2b2b2b; color: #dddddd; font-size: 15px; }"
+                                         " QTreeView::item { color: #ffcc66; }"));
+        Physics ph;
+        rpe::PropertyEditor ed;
+        ed.editObject(ph);
+        ed.resize(400, 200);
+        ed.show();
+        auto countOrange = [&] {
+            QCoreApplication::processEvents();
+            const QImage img = ed.view()->viewport()->grab().toImage();
+            int n = 0;
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = 0; x < std::min(img.width(), 200); ++x)
+                {
+                    const QColor c = img.pixelColor(x, y);
+                    if (c.red() > 200 && c.green() > 150 && c.green() < 230 && c.blue() < 140)
+                        ++n;
+                }
+            return n;
+        };
+        const int before = countOrange();
+        ed.setFilterText(QStringLiteral("speed"));
+        const int during = countOrange();
+        check("names keep the style sheet's ::item colour while filtering", before > 20 && during > 20);
+        app.setStyleSheet(QString());
     }
     {
         // The scope glyph is drawn in the button's text colour once styling is

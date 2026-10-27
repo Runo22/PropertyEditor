@@ -225,7 +225,11 @@ namespace rpe
                 const QString pill = matches > 0 ? QString::number(matches) : QString();
                 QFont pillFont = opt.font;
                 pillFont.setBold(true);
-                pillFont.setPointSizeF(pillFont.pointSizeF() * 0.85);
+                // A style sheet may size fonts in PIXELS (pointSizeF() is then -1).
+                if (pillFont.pointSizeF() > 0)
+                    pillFont.setPointSizeF(pillFont.pointSizeF() * 0.85);
+                else if (pillFont.pixelSize() > 0)
+                    pillFont.setPixelSize(std::max(1, pillFont.pixelSize() * 85 / 100));
                 const int pillW = pill.isEmpty() ? 0 : QFontMetrics(pillFont).horizontalAdvance(pill) + 12;
                 if (matchActive)
                 {
@@ -287,7 +291,10 @@ namespace rpe
                     fg.setAlpha(170);
                     p->setPen(fg);
                     QFont bf = opt.font;
-                    bf.setPointSizeF(bf.pointSizeF() * 0.8);
+                    if (bf.pointSizeF() > 0) // pixel-sized under a style sheet: pointSizeF() is -1
+                        bf.setPointSizeF(bf.pointSizeF() * 0.8);
+                    else if (bf.pixelSize() > 0)
+                        bf.setPixelSize(std::max(1, bf.pixelSize() * 8 / 10));
                     p->setFont(bf);
                     p->drawText(badge, Qt::AlignCenter, label);
                     p->restore();

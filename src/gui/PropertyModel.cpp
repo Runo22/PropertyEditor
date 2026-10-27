@@ -10,7 +10,6 @@
 
 #include <QBrush>
 #include <QColor>
-#include <QFont>
 #include <QMetaObject>
 
 #include <algorithm>
@@ -1114,13 +1113,7 @@ namespace rpe
             case Qt::DisplayRole:
             case Qt::ToolTipRole:
                 return index.column() == 0 ? node->displayName() : QString();
-            case Qt::FontRole:
-            {
-                QFont f;
-                f.setBold(true);
-                return f;
-            }
-            case IsGroupRole:
+            case IsGroupRole: // (bold: the view's delegate — a FontRole QFont would be the app default font)
                 return true;
             case GroupKeyRole:
                 return _groupKeys.value(node);
