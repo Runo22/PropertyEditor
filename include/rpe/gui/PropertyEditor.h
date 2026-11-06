@@ -4,11 +4,17 @@
 
 #include "rpe/gui/PropertyModel.h"
 
+#include <QHash>
+#include <QPersistentModelIndex>
+#include <QSet>
+#include <QString>
 #include <QWidget>
 
 #include <functional>
 
 class QTreeView;
+class QShortcut;
+class QKeySequence;
 class QLineEdit;
 class QToolButton;
 class QLabel;
@@ -58,6 +64,8 @@ namespace rpe
 
         // Leaf dot-paths that are currently visible (all ancestors expanded). With
         // `onlyExpanded == false`, returns every leaf path regardless of expansion.
+        // While the filter has text, every leaf (and array) counts as visible: a row
+        // can be hidden only because the value it would match hasn't arrived yet.
         QStringList visibleLeafPaths(bool onlyExpanded = true) const;
 
         // Convenience for static objects: bind the type and continuously edit `obj`.
@@ -84,6 +92,12 @@ namespace rpe
         // ── Chrome ───────────────────────────────────────────────────────────────
         void setToolbarVisible(bool visible);
         void expandAll();
+        // expandAll(), except rows the user has COLLAPSED by hand while this type
+        // was bound stay collapsed. Remembered per bound RTTR type for the editor's
+        // lifetime, so switching entities (same component) or re-selecting the
+        // component keeps the tree the way you left it. Bulk operations (filtering,
+        // expandAll itself) are not remembered — only explicit per-row collapses.
+        void expandAllExceptCollapsed();
 
         PropertyModel* model() const
         {
@@ -94,11 +108,66 @@ namespace rpe
             return _view;
         }
 
+        // ── Search scope ─────────────────────────────────────────────────────────
+        // A scope button beside the filter: "this object" (off) or "all of them"
+        // (on). The editor only shows it and reports it; a host that can search
+        // further (EntityComponentBrowser: all components of the entity) feeds the
+        // results through bindGroups. Hidden unless made available. Ctrl+Shift+F
+        // turns it on and focuses the filter.
+        void setSearchAllAvailable(bool on);
+        bool isSearchAllAvailable() const
+        {
+            return _searchAllAvailable;
+        }
+        void setSearchAll(bool on);
+        bool isSearchAll() const;
+        // The keys that toggle it (default Ctrl+Shift+F; active only while the scope
+        // is available). If the host binds the same keys, Qt fires neither — pick
+        // other keys here, or pass an empty sequence for none.
+        void setSearchAllShortcut(const QKeySequence& keys);
+        QKeySequence searchAllShortcut() const;
+        QString filterText() const;
+        void setFilterText(const QString& text);
+
+        // Grouped view (see PropertyModel::bindGroups): one header per group, the
+        // filter applying across all of them. A header shows the match count the
+        // host sets with model()->setGroupCounts().
+        void bindGroups(const QVector<PropertyModel::Group>& groups);
+        void setGroupInstanceProvider(std::function<rttr::instance(const QString& key)> provider);
+
+        // Expand to, scroll to and select the row at `path` (false if it's absent
+        // or filtered out). revealGroup scrolls a group's header to the top.
+        bool revealPath(const QString& path);
+        void revealGroup(const QString& key);
+
+        // Drag a number's NAME left/right to change it (on by default) — the
+        // pointer shows a horizontal-resize cursor over such names. Shift = fine,
+        // Ctrl = coarse; Esc during the drag restores the starting value. The
+        // step is the property's Step hint (else 0.1 for floats, 1 for integers),
+        // the result kept within its Min/Max hints. Read-only values don't scrub.
+        void setDragToScrubEnabled(bool on);
+        bool isDragToScrubEnabled() const
+        {
+            return _scrubEnabled;
+        }
+
+    protected:
+        bool eventFilter(QObject* obj, QEvent* ev) override;
+
     signals:
         void propertyEdited(const QString& path, const rttr::variant& newValue);
         // Pin/unpin requests from the context menu (only when pinning is enabled).
         void pinRequested(const QString& path);
         void unpinRequested(const QString& path);
+        // The bound type was released — a plugin is unloading (see
+        // rpe/core/TypeRelease.h) — and the editor unbound itself. Rebind once the
+        // type is registered again (EntityComponentBrowser does this by itself).
+        void boundTypeReleased(const QString& typeName);
+        // The filter text / the scope button changed (see setSearchAllAvailable).
+        void filterTextChanged(const QString& text);
+        void searchAllToggled(bool on);
+        // The current row changed: its path (PropertyPathRole), empty when none.
+        void currentPathChanged(const QString& path);
 
     private slots:
         void _onFilterChanged(const QString& text);
@@ -108,8 +177,27 @@ namespace rpe
     private:
         void _setupUi();
         void _pushExpansionState();
+        // Rows the user collapsed by hand, per bound type name (see
+        // expandAllExceptCollapsed).
+        QHash<QString, QSet<QString>> _collapsedByType;
+        QString _boundTypeName;
+        // True while the editor itself expands/collapses in bulk (bind, expandAll,
+        // filtering). QTreeView emits a per-row signal even for those, and they
+        // must not be mistaken for the user's own choices.
+        bool _bulkExpanding = false;
         // Enable the Reset control only while the current component has a frozen value.
         void _updateResetEnabled();
+        // Drag-to-scrub (see setDragToScrubEnabled).
+        bool _isScrubbable(const QModelIndex& nameIndex) const;
+        void _applyScrub(int dx, Qt::KeyboardModifiers mods);
+        void _endScrub(bool restore);
+        bool _scrubEnabled = true;
+        bool _scrubArmed = false; // pressed on a scrubbable name; not dragging yet
+        bool _scrubbing = false;  // past the drag threshold
+        QPersistentModelIndex _scrubValue; // the value cell (proxy index)
+        int _scrubPressX = 0;
+        double _scrubStart = 0;
+        double _scrubLast = 0;
         // Show/hide the "no reflected properties" hint for the just-bound type.
         void _updateEmptyHint(rttr::type t);
 
@@ -120,6 +208,11 @@ namespace rpe
         QWidget* _toolbar = nullptr;
         QLineEdit* _filter = nullptr;
         QToolButton* _resetBtn = nullptr;
+        QToolButton* _scopeBtn = nullptr;
+        QShortcut* _scopeKey = nullptr;
+        void _updateScopeIcon(); // drawn in the button's current text colour
+        bool _searchAllAvailable = false;
+
         // Explains an empty panel when the bound type reflects no properties, instead
         // of leaving a silent blank (see _updateEmptyHint).
         QLabel* _emptyHint = nullptr;

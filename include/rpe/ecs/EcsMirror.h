@@ -3,6 +3,7 @@
 #include "rpe/core/rttr_prelude.h"
 
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -139,6 +140,7 @@ namespace rpe
                                         // (spread over pumps by the scan budget)
             double maxScanMs = 0.0;     // worst completed scan cycle since attach()
             double lastCatalogMs = 0.0; // duration of the most recent catalog scan
+            quint64 catalogScans = 0;   // add-component catalog rescans since attach()
         };
         PumpStats pumpStats() const
         {
@@ -156,13 +158,18 @@ namespace rpe
             _scanBudgetMs.store(ms, std::memory_order_relaxed);
         }
 
-        // Wall-clock intervals for the two FULL-WORLD scans the pump performs on the
-        // simulation thread: the entity list (every entity + its components) and the
-        // add-component catalog (every component type). These are the expensive,
-        // bursty parts of a pump — running them per-N-pumps (the old behaviour) tied
-        // their cost to the frame rate and produced periodic frame-time spikes.
-        // Defaults: entity list 500 ms, catalog 2000 ms. 0 = scan every pump.
+        // Wall-clock intervals for the periodic scans the pump performs on the
+        // simulation thread: the entity list (every entity + its components), and the
+        // spawnable-prefab list for the add-entity picker. Running them per-N-pumps
+        // (the old behaviour) tied their cost to the frame rate and produced periodic
+        // frame-time spikes.
+        // Defaults: entity list 500 ms, prefabs 2000 ms. 0 = scan every pump.
         // Structural changes and filter changes force an immediate rescan regardless.
+        //
+        // The add-COMPONENT catalog is not on a timer at all: it is rescanned only
+        // when a component type is registered or a bridge registration lands, since
+        // nothing else can change it. (The parameter keeps its old name for source
+        // compatibility.)
         void setScanIntervalsMs(int entityListMs, int catalogMs);
 
         // ── GUI thread: intent ───────────────────────────────────────────────────
@@ -215,6 +222,10 @@ namespace rpe
         // Core of pump(). Always runs on the sim thread with the world merged and
         // the workers idle (frame-end trampoline, or manual pump() after progress()).
         void _pumpImpl(const flecs::world& world);
+        // Resolve a queued edit's target (entity + component selection key) to a live
+        // component pointer, its RTTR type and flecs id. False if it no longer exists.
+        bool _resolveEditTarget(const flecs::world& world, qulonglong entity, const QString& compKey,
+                                void*& ptr, rttr::type& type, uint64_t& compId);
         static void _installTrampoline(ecs_world_t* world, void* ctx);
         // Frame-end pump (System mode): scheduled by the per-frame task via
         // ecs_run_post_frame; runs on the sim thread with the world merged.
@@ -228,6 +239,19 @@ namespace rpe
         std::mutex _spawnMutex;                       // guards _spawnConfig (GUI set / sim read)
         std::function<void(flecs::entity)> _spawnConfig;
         QVector<MirrorChannel::PrefabEntry> _lastPrefabs; // publish dedup (sim thread)
+        // Group tags the host configured that the world does not (yet) know, so the
+        // warning is emitted once per name instead of on every scan (sim thread).
+        QSet<QString> _unresolvedGroups;
+        // Last group-tag set seen from the intent queue: a change forces a prefab
+        // rescan (the resync path only re-publishes the cached list).
+        QStringList _lastPrefabGroups;
+        // Catalog is rescanned when the component set changes, not on a timer.
+        bool _catalogScanned = false;
+        int _catalogCompCount = -1;
+        uint64_t _catalogBridgeGen = 0;
+        std::chrono::steady_clock::time_point _lastCatalogFullScan {}; // safety rescan clock
+        // "tags resolve but no prefab carries them" is diagnosed once per tag set.
+        bool _warnedNoPrefabMatch = false;
 
         // Liveness/synchronisation token shared with the system callback and any
         // deferred install, so they no-op safely if this EcsMirror is destroyed
@@ -287,6 +311,13 @@ namespace rpe
         QVector<EntityEntry> _scanStaging;
         QHash<const void*, quint8> _scanVerdict; // table → bit0 bridged, bit1 required
         bool _scanActive = false;
+        bool _scanTruncated = false; // this cycle hit the list cap
+        uint64_t _queryReqId = 0;    // required id the entity query is narrowed to
+        bool _queryBuilt = false;    // _entityQuery reflects _queryReqId
+        QString _warnedRequired;     // last required name a warning was emitted for
+        // Pin component names findComponentEntity couldn't find, with the world state
+        // (component count, bridge generation) at the time — see the pins block.
+        QHash<QString, QPair<int, uint64_t>> _pinMissing;
         double _scanWorkMs = 0.0;
         QString _scanReqShort; // required-filter leaf, frozen for the cycle
 
@@ -305,6 +336,29 @@ namespace rpe
         // name (a findComponentEntity walk / registry lookup otherwise — per pump);
         // the display-string dedup is cleared whenever the pin set changes so new
         // pins publish immediately.
+        // Search all components (see MirrorChannel::setSearch): one round is a list
+        // of the entity's components, worked through a slice per pump under a time
+        // budget, its hits published when the last component is done.
+        struct SearchComp
+        {
+            QString key;
+            uint64_t id = 0;
+            rttr::type type = rttr::type::get<void>();
+        };
+        struct SearchState
+        {
+            qulonglong entity = 0;
+            QString text;
+            bool running = false;
+            size_t next = 0;
+            std::vector<SearchComp> comps;
+            std::vector<MirrorChannel::SearchHit> hits;
+            std::chrono::steady_clock::time_point due {};
+        };
+        SearchState _search;
+        int _releaseHandle = 0; // rpe/core/TypeRelease.h
+        void _pumpSearch(const flecs::world& world, const MirrorChannel::Intent& in);
+
         struct PinResolve
         {
             uint64_t compId = 0;

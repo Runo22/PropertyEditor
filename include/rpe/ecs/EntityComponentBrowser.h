@@ -10,10 +10,12 @@
 
 #include <QIcon>
 #include <QMetaType>
+#include <QPair>
 #include <QSet>
 #include <QVector>
 #include <QWidget>
 
+#include <functional>
 #include <memory>
 
 #include "rpe/ecs/flecs_prelude.h"
@@ -70,6 +72,21 @@ namespace rpe
             EditPolicy editPolicy = EditPolicy::LocalEdit;
             // Show the add/remove-component controls ("+" and per-row "×").
             bool allowComponentEditing = false;
+            // Top-level namespaces whose components the "Add component" picker does
+            // NOT offer (matched case-insensitively against the first scope segment,
+            // so "settings" hides settings.Graphics, settings::audio::Mix, …). Meant
+            // for world-wide configuration components that are never added per
+            // entity. Clear the list to offer everything.
+            QStringList hiddenAddNamespaces { QStringLiteral("settings") };
+            // Components to select when an entity is selected and there's no
+            // previous component selection to keep (the first entity, or one that
+            // lacks the component you were on): the first of these the entity has.
+            // None of them → the default (direct mode: the first row; mirror mode:
+            // nothing). Full path ("game.Player", "game::Player") or a trailing part.
+            QStringList preferredComponents;
+            // Drag a number's NAME to change its value (PropertyEditor's drag to
+            // scrub). Host-controlled only — there is no in-UI toggle.
+            bool dragToScrub = true;
             // Panel arrangement.
             Layout layout = Layout::Wide;
             // GUI poll cadence (ms) for the mirror and the direct-mode live refresh.
@@ -78,6 +95,7 @@ namespace rpe
         };
 
         explicit EntityComponentBrowser(QWidget* parent = nullptr);
+        ~EntityComponentBrowser() override;
 
         void setWorld(flecs::world* world);
         void setLiveUpdateIntervalMs(int ms);
@@ -148,6 +166,14 @@ namespace rpe
         // The tags the prefab picker groups by (+ optional icons). The tag names are
         // forwarded to the producer (which computes each prefab's group and filters
         // the list by the required component); the icons stay GUI-side.
+        //
+        // Name each tag the way the WORLD knows it — its full path
+        // ("game::npc::Enemy") or an alias registered with world.use(). The producer
+        // resolves it with world.lookup(), whose separator is "::", so a dotted
+        // spelling ("game.npc.Enemy") will NOT be found.
+        //
+        // Order-independent: call it before or after setMirror(), the groups are
+        // remembered either way.
         void setPrefabGroups(const QVector<PrefabGroup>& groups);
 
         // ── Deletion + custom context-menu actions ───────────────────────────────
@@ -155,25 +181,45 @@ namespace rpe
         // mode queues a destroy on the sim thread; direct mode destructs under the
         // guard). Off by default.
         void setEntityRemovingEnabled(bool on);
-        // Add an app-specific entry to the ENTITY right-click menu (runs on the GUI
-        // thread with the clicked entity's id). Sits beside the built-in Delete.
-        void addEntityAction(const EntityAction& action);
-        // Add an app-specific entry to the COMPONENT right-click menu (runs with the
-        // selected entity's id, the component key and its flecs id).
-        void addComponentAction(const ComponentAction& action);
+        // ── Right-click menu extensions ─────────────────────────────────────────
+        // Static entries: a fixed label + callback, optionally filed under a submenu
+        // path (EntityAction::menu, e.g. { "Debug", "Physics" }). Callbacks run on
+        // the GUI thread; component entries also get the selected entity's id.
+        // Each add returns a handle: a plugin that adds entries must remove them
+        // before it unloads (the callbacks live in its code).
+        int addEntityAction(const EntityAction& action);
+        int addComponentAction(const ComponentAction& action);
+        void removeEntityAction(int handle);
+        void removeComponentAction(int handle);
 
-        // Dynamic menu hooks — called each time a right-click menu is built, handed
-        // the live QMenu so the host can add entity-/component-specific entries at
-        // open time (conditional labels, submenus, …). More flexible than the static
-        // addEntityAction / addComponentAction; both can be used together.
-        void setEntityMenuHook(std::function<void(qulonglong entityId, QMenu& menu)> hook);
-        void setComponentMenuHook(
-            std::function<void(qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu)> hook);
+        // Dynamic hooks — called each time a menu opens, handed the live QMenu so
+        // entries can depend on the entity/component (conditional labels, checkable
+        // actions, submenus). Use rpe::subMenu(menu, { "Debug" }) to share a submenu
+        // with static entries and other hooks.
+        //  • add*MenuHook: any number (one per plugin, say), run in the order added;
+        //    the handle goes to removeMenuHook.
+        //  • set*MenuHook: the single host hook, replaced on each call (nullptr
+        //    clears it); runs before the added hooks.
+        using EntityMenuHook = std::function<void(qulonglong entityId, QMenu& menu)>;
+        using ComponentMenuHook =
+            std::function<void(qulonglong entityId, const QString& component, qulonglong rawId, QMenu& menu)>;
+        int addEntityMenuHook(EntityMenuHook hook);
+        int addComponentMenuHook(ComponentMenuHook hook);
+        void removeMenuHook(int handle);
+        void setEntityMenuHook(EntityMenuHook hook);
+        void setComponentMenuHook(ComponentMenuHook hook);
 
         // Bundled get/set of all the above options. setSettings applies every field
         // (filter, snapshot policy, edit policy, component-editing, layout, timers);
         // settings() returns the current configuration.
         void setSettings(const Settings& s);
+        // Top-level namespaces hidden from the "Add component" picker — see
+        // Settings::hiddenAddNamespaces (default: "settings").
+        void setHiddenAddNamespaces(const QStringList& namespaces);
+        // Settings::preferredComponents / Settings::dragToScrub on their own.
+        void setPreferredComponents(const QStringList& names);
+        void setDragToScrubEnabled(bool on);
+
         Settings settings() const
         {
             return _settings;
@@ -252,6 +298,44 @@ namespace rpe
         void _onRemoveComponent(const QString& name);
 
     private:
+        // ── Search all components ────────────────────────────────────────────────
+        // The property filter, applied to every component of the selected entity:
+        // a match count per component in the list while the filter has text, and —
+        // with the editor's scope button on — every match in one grouped, editable
+        // tree. The search itself runs producer-side in mirror mode (time-sliced, see
+        // EcsMirror), on a timer here in direct mode.
+        void _onSearchChanged();
+        void _updateSearchTarget(); // the entity being searched changed
+        void _applySearchResults(const std::vector<MirrorChannel::SearchHit>& hits);
+        void _runDirectSearch();
+        void _enterGroupView();
+        void _leaveGroupView();
+        void _rebuildGroups();
+        void _onGroupRowPicked(const QString& path);
+        bool _groupView = false;
+        QString _searchText;
+        QStringList _groupKeys;       // the components the grouped view shows
+        QSet<QString> _hitPaths;      // grouped rows filled by the last round
+        QString _groupFocusPath;      // row last picked in the grouped view (component-relative)
+        // Mirror mode: the row to select once its value has arrived (a row matching
+        // the filter by value is hidden until then). Tried on each poll, for a while.
+        QString _pendingReveal;
+        qint64 _pendingRevealUntil = 0; // QDateTime::currentMSecsSinceEpoch() deadline
+        QTimer* _searchTimer = nullptr; // direct mode: search rounds
+        quint64 _groupRegistryGen = 0; // direct mode: bridge registry the groups were listed at
+        RttrVariantWrapper _groupWrapper; // direct mode: WriteBack target of a grouped edit
+
+        // ── A plugin unloading (rpe/core/TypeRelease.h) ──────────────────────────
+        // Any thread: drop what this browser holds of the released types.
+        void _onTypesReleased(const std::vector<rttr::type>& released);
+        // GUI: the property editor unbound itself → rebind once the type is back.
+        void _onBoundTypeReleased();
+        void _tryRebindReleased();
+        int _releaseHandle = 0;
+        bool _rebindPending = false;
+        QTimer* _rebindTimer = nullptr; // direct mode: retries while a rebind is pending
+        quint64 _rebindGen = ~quint64(0);
+
         void _setupUi();
         void _applyLayout(Layout layout);
         void* _liveComponentPtr() const;
@@ -263,6 +347,11 @@ namespace rpe
         // Apply the required-component filter (from _settings) to the entity list and,
         // in mirror mode, to the producer.
         void _applyEntityFilter();
+        // Push the configured prefab groups: icons to the widget, tag names to the
+        // producer. Re-run whenever the channel changes.
+        void _applyPrefabGroups();
+        // True when `path`'s top-level namespace is in Settings::hiddenAddNamespaces.
+        bool _isHiddenFromAdd(const QString& path) const;
 
         flecs::world* _world = nullptr;
         EntityListWidget* _entityList = nullptr;
@@ -298,8 +387,21 @@ namespace rpe
         QHash<QString, QString> _pairTypeName;
         QHash<QString, qulonglong> _pairRawId; // pair key → flecs pair id (for pinning)
         bool _entityAddingEnabled = false;
-        QVector<EntityAction> _entityActions;
-        QVector<ComponentAction> _componentActions;
+        // Remembered so setMirror() can (re)push the tags to a channel that did not
+        // exist yet when the host configured them — see _applyPrefabGroups().
+        QVector<PrefabGroup> _prefabGroups;
+        // Menu extensions, each with the handle its add* returned.
+        QVector<QPair<int, EntityAction>> _entityActions;
+        QVector<QPair<int, ComponentAction>> _componentActions;
+        QVector<QPair<int, EntityMenuHook>> _entityMenuHooks;
+        QVector<QPair<int, ComponentMenuHook>> _componentMenuHooks;
+        EntityMenuHook _entityMenuHook;       // the set*MenuHook slot
+        ComponentMenuHook _componentMenuHook; // the set*MenuHook slot
+        int _nextMenuHandle = 1;
+        void _pushEntityActions();
+        void _pushComponentActions();
+        void _installMenuHooks();
+        qulonglong _menuEntityId() const;
         Settings _settings;
 
         PinnedPropertiesWidget* _pinWidget = nullptr; // optional watch list (host-owned)

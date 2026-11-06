@@ -147,6 +147,12 @@ namespace rpe
             _cachedDisplay = s;
         }
 
+        // Drop every reflected handle and value in this subtree (types become void,
+        // properties invalid, values empty) — for a plugin unload: what remains is
+        // rpe-owned (names, paths, cached display text), safe to read or destroy
+        // after the plugin's module is gone. See rpe/core/TypeRelease.h.
+        void releaseReflection();
+
         // ── Sequential-container bookkeeping ─────────────────────────────────────
         int arraySize() const
         {

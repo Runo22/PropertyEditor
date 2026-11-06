@@ -1,6 +1,7 @@
 // EntityComponentBrowser::selectEntity(flecs::entity) — direct call AND across a
 // queued connection (Q_ARG(flecs::entity, e)), proving the metatype registration.
 #include <rpe/core/TypeBridge.h>
+#include <rpe/ecs/ComponentListWidget.h>
 #include <rpe/ecs/EntityComponentBrowser.h>
 #include <rpe/ecs/EntityListWidget.h>
 
@@ -59,6 +60,10 @@ int main(int argc, char** argv)
     browser.setWorld(&world); // direct mode; the list populates + auto-selects the top
     QCoreApplication::processEvents();
     check("list populated (top auto-selected == Alpha)", currentId(browser) == static_cast<qulonglong>(alpha.id()));
+    {
+        auto* cl = browser.componentList()->findChild<QListWidget*>();
+        check("...and the auto-selected entity's components are listed (not wiped by setWorld)", cl && cl->count() == 1);
+    }
 
     // ── Direct call with a flecs::entity ──────────────────────────────────────
     check("selectEntity(entity) returns true", browser.selectEntity(beta) == true);

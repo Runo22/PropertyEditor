@@ -30,6 +30,7 @@ namespace rpe
 
     public:
         explicit VariantEditor(QWidget* parent = nullptr);
+        ~VariantEditor() override;
 
         // Edit an owned copy of `v`. Retrieve the (possibly edited) value via variant().
         // Rebuilds the whole tree — use updateVariant() for subsequent value updates.
@@ -81,6 +82,7 @@ namespace rpe
         RttrVariantWrapper _wrapper;
         PropertyEditor* _editor = nullptr;
         QLabel* _typeLabel = nullptr;
+        int _releaseHandle = 0; // rpe/core/TypeRelease.h: a released type drops the value
     };
 
 } // namespace rpe

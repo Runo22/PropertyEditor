@@ -1,0 +1,266 @@
+# Pitfalls, edge cases & things to avoid
+
+Most of these were found the hard way. Start with the symptom table; the sections
+below explain each case. When in doubt, run
+[`rpe::checkHealth(world)`](health-checks.md) first — it catches many of them.
+
+## Contents
+
+- [Symptom → cause](#symptom--cause)
+- [Threading](#threading)
+- [Registration & names](#registration--names)
+- [Plugins & builds](#plugins--builds)
+- [Prefabs & flecs](#prefabs--flecs)
+- [Editing semantics](#editing-semantics)
+- [Performance](#performance)
+- [Limits by design](#limits-by-design)
+
+## Symptom → cause
+
+| Symptom | Likely cause | Look at |
+|---|---|---|
+| Component not listed, or missing from the Add menu | not bridged; plugin links its own `rpe_core`; namespace hidden (`settings`); entity already has it | `checkComponents` → `unbridged-rttr-type`; [Add-menu checklist](ecs-browser.md#my-component-isnt-in-the-add-menu) |
+| Values look **shifted** / wrong fields for a component | the component is bound to the **wrong type** (same short name, different namespace) | `checkComponents` → `size-mismatch`, `same-type-twice`, `ambiguous-name` |
+| Component listed but shows **no fields** | its bridged type has no RTTR properties (registration in a translation unit the linker dropped, or under another type) | `checkTypeRegistry` → `no-properties` |
+| `Min`/`Max`/`Label`… ignored on a plugin's type | raw string keys, or a plugin built against old headers | [Hints from plugins](#hints-from-plugins) |
+| Add-entity picker is flat (no groups) | group tag not found (dotted name), on instances instead of prefabs, or used as a pair | `checkPrefabGroups` |
+| Entity list **empty** with a required component | the name doesn't resolve — a scoped name only matches its scope | `checkRequiredComponent` |
+| Process **aborts** when spawning a prefab | a **move-only** component on the prefab | [Move-only components on prefabs](#move-only-components-on-prefabs) |
+| Crashes that make no sense, "stack smashing", impossible values | two flecs versions in one process, or objects compiled against different headers | `checkFlecsBuild`; [Mixed builds](#mixed-builds) |
+| Crash after reloading a plugin whose component was on screen (`is_wrapper`, `get_metadata`, a destructor) | the plugin was unloaded without `unregisterType` first, or its types were first registered by the plugin | [Unloading a plugin](#unloading-a-plugin) |
+| Crash later inside the mirror's pump (`world.lookup`) | the world was touched from a thread that isn't running `progress()` (e.g. `attach()` from the main thread) | [Threading](#threading) |
+| Mirror pumps at **half** the expected rate | `setMaxPumpRateHz` set equal to the sim's frame rate | [Performance → rate cap aliasing](#performance) |
+| A typed value **snaps back** | read-only (no setter / locked type), or the editor's `Min`/`Max` range | [Editing semantics](#editing-semantics) |
+| An `rpe::editor::*` hint seems to do nothing | an rpe older than the fix that reads `const char*` hint values; or `Slider` without both `Min` and `Max` | [editor-hints](editor-hints.md#rpeeditor-values) |
+| Uncapped sim spends time in the mirror | no rate cap — the mirror pumps every frame | [Performance](#performance) |
+
+## Threading
+
+- **A flecs world allows one thread at a time.** Everything that touches it —
+  creating entities/components, `mirror.attach()` (it installs a system), your
+  plugin's `world.component<T>()` — runs on the thread that runs `progress()`.
+  `attach()` only defers itself automatically when called *inside*
+  `progress()`; called from the main thread while the sim thread is running, it
+  races and crashes later.
+- **The GUI never touches the world in mirror mode.** Only the channel calls
+  (`setInterest`, `poll*`, `queueEdit`, `setPins`, `setMaxPumpRateHz`) are
+  thread-safe. The world-taking [health checks](health-checks.md) belong on the
+  sim thread too.
+- **Widgets are GUI-thread only** — except `PropertyEditor::setPropertyValue`,
+  which coalesces from any thread. `browser->setMirror()` marshals itself to the
+  GUI thread if called from elsewhere; prefer calling it on the GUI thread.
+- **Direct mode with another thread owning the world:** install
+  `setWorldAccess(guard)` so every world touch runs under your lock, or use
+  mirror mode.
+- **Destruction order is free:** destroying the `EcsMirror` on the sim thread
+  before the GUI is fine — the GUI holds the channel, which just goes quiet.
+
+See [threading-mirror.md](threading-mirror.md#which-thread-does-what).
+
+## Registration & names
+
+- **Same short name in two namespaces** (`game::Stats`, `ai::Stats`): register
+  both under their **full** names in RTTR and bridge both. Never rely on the
+  short name alone — the tie-break is deterministic, not correct.
+- **flecs name ≠ C++ name:** if you re-scope or rename components when
+  registering them with flecs, tell TypeBridge —
+  `registerType<T>("render::")` (a namespace, completed with T's leaf) or the
+  full name — or better, `rpe::bindComponent<T>(world)` **after** your own
+  `world.component<T>(…)`.
+- **`bindComponent` before flecs knows the type does nothing** — it never
+  registers or renames a component (doing so made flecs raise a redefinition
+  error). Call it after.
+- **Prefab group tags and `world.lookup()`:** `lookup` splits on `::`, so a
+  **dotted** tag name (`game.npc.Enemy`) is never found. Use `game::npc::Enemy`
+  or a `world.use()` alias.
+- **Required component:** give the full path (`game::Player` or `game.Player`).
+  A scoped name only ever matches that scope; a bare leaf matching several
+  components picks the shortest path (and the mirror warns once).
+- **Same entity names are fine** — entities are identified by id. Only names
+  within one flecs *scope* must be unique; spawned instances are uniquified
+  (`Zombie`, `Zombie (1)`, …). Your own `set_name` with a duplicate in the same
+  scope makes flecs abort.
+- **Namespaces named like flecs:** only the real `flecs` scope is treated as
+  built-in. (A user namespace like `flecsx` was hidden by older versions.)
+
+## Plugins & builds
+
+### Hints from plugins
+
+Use the `rpe::hint::*` constants, never `"rpe.min"`-style strings, and rebuild
+plugins against the current headers. RTTR compares a string metadata key by
+address, and each module has its own copy of a literal — so string keys from a
+plugin are invisible to rpe. See
+[editor-hints](editor-hints.md#why-the-constants-and-never-strings).
+
+### One `rpe_core`, one flecs
+
+- `rpe_core` must be **shared** and linked by host and plugins alike: the
+  TypeBridge registry lives there. A static copy per module splits it.
+- Host, rpe and plugins must use **one flecs library of one version**. rpe's own
+  build fetches a pinned flecs; if your application uses another, build rpe
+  against yours (see [getting-started](getting-started.md#use-your-flecs)).
+  `checkFlecsBuild()` reports a mismatch as an Error.
+
+### Mixed builds
+
+Objects compiled against **different versions of a header** in one binary —
+two flecs versions, or a partial rebuild after a header changed (e.g. editing
+headers while a build runs) — produce crashes that make no sense: "stack
+smashing detected", fields with impossible values. When in doubt: clean rebuild.
+
+### Unloading a plugin
+
+RTTR frees a module's types when the module unloads, and every value read
+through its properties carries pointers into its code (on Windows even a plain
+`double`: each DLL has its own copy of RTTR's value code). Anything still holding
+one crashes on the next touch — an `is_wrapper()` or `get_metadata()` on freed
+type data, a value's destructor jumping into the unloaded DLL.
+
+Before the DLL is unloaded:
+
+- **`rpe::TypeBridge::unregisterType<T>()` for each of its bridged types.** This
+  is rpe's release point: everything rpe holds of `T` — and of every type inside
+  it — is dropped right there, on the calling thread, while the plugin is still
+  loaded. The views reset on their own thread afterwards and the browser rebinds
+  the selected component by name once it's registered again.
+- **`removeEntityAction` / `removeComponentAction` / `removeMenuHook`** with the
+  handles its menu entries returned — the stored callbacks are its code too.
+
+Rules:
+
+- **Unregister, then unload — from an explicit shutdown function**, not a
+  global/static destructor (those run during the unload itself, in an order you
+  don't control relative to RTTR's own cleanup). Unloading without
+  `unregisterType` leaves rpe holding the plugin's data. A late `unregisterType`
+  (a second shutdown, or after the unload) doesn't crash, but it's too late to
+  release anything then.
+- **Simplest: don't really unload.** A plugin can be "removed" — systems stopped,
+  types unregistered — while its module stays mapped:
+  `QLibrary::PreventUnloadHint`, `GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_PIN, …)`,
+  `RTLD_NODELETE`. Then nothing of it can dangle.
+- **Don't unregister a type another live module still uses.** The bridge holds one
+  entry per type, no reference count: the first module to unregister removes it
+  for everyone.
+- **Flags / `std::optional` registrations** (`RPE_REGISTER_FLAGS`,
+  `RPE_REGISTER_OPTIONAL`) answer only for a type of the same name; a reloaded
+  plugin registers them again with its registration, which replaces the old
+  entry.
+- **Any thread works**, and the release never waits for another thread to *run*
+  — only for one to finish a short internal read section. A GUI thread blocked
+  while the sim thread reloads the plugin (or the other way round) is fine.
+- **Don't unload from inside an rpe callback** (a browser signal handler, a
+  menu action) — nor block there waiting for a thread that unloads: rpe code is
+  still on the stack, holding the types. Queue it.
+- **Types the host shares with plugins** (a `Vec3` in a host header used by a
+  plugin component, or a component several modules use): register them — RTTR
+  and `registerType<T>()` — only in a module that never unloads (the host, or a
+  common components library loaded before any plugin), *before* plugins load.
+- **Template types too.** `std::vector<float>`, `std::array<float, 3>`,
+  `std::map<std::string, int>`, `std::optional<T>`… belong to the first module
+  that uses them — if that's plugin A, unloading A frees them under plugin B.
+  In the host, before loading plugins:
+  `rpe::ownTypes<std::vector<float>, std::map<std::string, int>>();`
+  (`rpe/core/TypeRelease.h`).
+- **Slots on rpe signals must not wait for the world lock.** `propertyEdited`
+  and friends can be emitted while rpe holds a read section; a thread that is
+  unregistering a plugin's types while holding the world's `AccessGuard` waits
+  for that section to end. A slot that locks the same guard deadlocks both —
+  queue that work (`Qt::QueuedConnection`).
+  RTTR gives a type's data to the first module that asks for it; if a plugin is
+  first, unloading it frees the type under the host. rpe does this for every
+  type it names itself (`QString`, `QColor`, `std::string`, chrono, …).
+- A plugin should use `addEntityMenuHook` / `addComponentMenuHook`, never the
+  single-slot `set*MenuHook`: a second plugin calling `set*` replaces the first.
+
+**Test on Linux like Windows behaves:** build plugins with hidden visibility
+(`-fvisibility=hidden -fvisibility-inlines-hidden`). With default visibility,
+GCC/Clang can merge RTTR's per-module statics across `.so` files (and "unique"
+symbols can keep a `.so` from unloading at all), so an unload bug that crashes on
+Windows may never show on Linux.
+
+Your own widgets/code that keep plugin values or types (`rttr::variant`,
+`rttr::type`, `rttr::property`) need the same care: drop them before the unload.
+`rpe::addTypeReleaseHandler` (in `rpe/core/TypeRelease.h`) calls you at the
+release point.
+
+## Prefabs & flecs
+
+### Move-only components on prefabs
+
+flecs v4's default `OnInstantiate` policy **copies** a prefab's components into
+each instance — and a move-only component has an illegal copy hook, so
+`is_a(prefab)` **aborts the process**. That includes spawning from the browser's
+Add-entity menu.
+
+| Policy | `is_a(prefab)` | Writing it on the instance |
+|---|---|---|
+| default (copy into instance) | **abort** | — |
+| `(OnInstantiate, DontInherit)` | ✅ instance doesn't get it | — |
+| `(OnInstantiate, Inherit)` | ✅ shared | **abort** on the first write (needs a copy) |
+
+Use `DontInherit`, and add the component per instance in the spawn configurator
+(`add<T>()` default-constructs, no copy):
+
+```cpp
+world.component<Speaker>().add(flecs::OnInstantiate, flecs::DontInherit);
+mirror.setSpawnConfigurator([](flecs::entity e) { e.add<Speaker>(); });
+```
+
+### Group tags belong on the prefab
+
+The picker asks `prefab.has(tag)`. A tag added to the **instances** (in the
+configurator, say) or used as a **pair** (`prefab.add(tag, target)`) never groups
+anything.
+
+## Editing semantics
+
+- **Mirror mode ignores `EditPolicy`.** Edits always go to the sim thread through
+  the channel. `liveUpdateIntervalMs` is direct-mode only, too.
+- **Edits land on the entity they were made on** — even if the selection moved
+  before the sim applied them. If you queue edits through the channel yourself,
+  address them: `channel->queueEdit(entity, component, path, value)`.
+- **Read-only values never open an editor** (no setter, `ReadOnly` hint, locked
+  type). Anything *below* a getter-only struct is read-only too — editing it
+  would write into a temporary copy.
+- **`Min`/`Max` is an editor range, not validation.** An out-of-range value from
+  the simulation shows as-is; its editor opens clamped to the range, but an
+  unchanged commit writes nothing — only a value you actually change is
+  written.
+- **`Min`/`Max`/`Step` don't apply to `unsigned int`, `long` or 64-bit
+  integers** — they get a line edit so large values are never clamped.
+- **Drive the required-component filter through `Settings`.** A direct
+  `EcsMirror::setRequiredComponent()` is overwritten the next time the browser
+  re-applies its settings.
+- **`setWorld()` and `setMirror()` are exclusive** — setting one leaves the other
+  mode.
+
+## Performance
+
+- **Cap the mirror on uncapped sims:** `mirror.setMaxPumpRateHz(60)`. Without
+  it the mirror pumps every frame (hundreds or thousands of times a second) for
+  a GUI that polls at ~30 Hz.
+- **Rate cap aliasing.** The cap is a strict minimum gap. Set it *equal* to the
+  sim's frame rate and frame jitter makes it skip every other frame — half rate.
+  Use a cap clearly above the normal frame rate (60 for a 30 Hz sim), or `0`.
+- **Collapse what you don't need.** With `snapshotOpenFieldsOnly` (the default)
+  collapsed rows aren't read on the sim thread at all, and the tree remembers
+  what you collapsed per type across entity switches. (Small structs of ≤ 4
+  fields stay watched to render their `[a, b]` summary.)
+- **Use a required component** on big worlds: the entity scan only visits
+  entities that carry it.
+- **Debug builds** are several times slower in every scan. Measure with
+  `mirror.pumpStats()` (`lastPumpMs`, `maxPumpMs`, `lastScanMs`,
+  `catalogScans`); the definitive A/B is `mirror.detach()`.
+
+## Limits by design
+
+- The entity list shows at most **5000** rows (in id order when it caps); the
+  selected entity is always kept in it.
+- **Map keys** aren't editable; string keys containing `.` or `]` can't be
+  addressed by path.
+- **`std::string_view` / `std::wstring_view`** are always read-only.
+- **Flags enums** need `RPE_REGISTER_FLAGS(E)` to *edit* combined values.
+- **`TypeBridge::clone()`** returns an invalid variant for move-only types.
+- **flecs pairs without data** are badge rows only; pairs carrying data edit the
+  carried type.

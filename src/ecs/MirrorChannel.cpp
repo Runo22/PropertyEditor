@@ -1,5 +1,7 @@
 #include "rpe/ecs/MirrorChannel.h"
 
+#include "rpe/core/TypeRelease.h"
+
 namespace rpe
 {
 
@@ -30,13 +32,94 @@ namespace rpe
     void MirrorChannel::queueEdit(const QString& path, rttr::variant value)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _edits.emplace_back(path, std::move(value));
+        _edits.push_back(EditRequest { _inEntity, _inComponent, path, std::move(value) });
+    }
+
+    void MirrorChannel::queueEdit(qulonglong entity, const QString& component, const QString& path,
+                                  rttr::variant value)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _edits.push_back(EditRequest { entity, component, path, std::move(value) });
+    }
+
+    MirrorChannel::MirrorChannel()
+    {
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>&) { _onTypesReleased(); });
+    }
+
+    MirrorChannel::~MirrorChannel()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+    }
+
+    void MirrorChannel::_onTypesReleased()
+    {
+        // Every value, not just the released type's: on Windows a variant made by a
+        // plugin's property getter carries the PLUGIN's copy of RTTR's value code,
+        // whatever the value's type (even a double). The views ask for a resend.
+        std::lock_guard<std::mutex> lk(_m);
+        _outValues.clear();
+        _outPinValues.clear();
+        _edits.clear();
+        _pinEdits.clear();
+        _outSearch = {};
+        _outSearchDirty = false;
+        _resync = true;
+    }
+
+    void MirrorChannel::setSearch(qulonglong entity, const QString& text)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _searchEntity = text.isEmpty() ? 0 : entity;
+        _searchText = _searchEntity ? text : QString();
+        if (!_searchEntity)
+        {
+            _outSearch = {};
+            _outSearchDirty = false;
+        }
+    }
+
+    void MirrorChannel::requestSearchRefresh()
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _searchNow = true;
+    }
+
+    bool MirrorChannel::pollSearchResults(SearchResults& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outSearchDirty)
+        {
+            return false;
+        }
+        out = std::move(_outSearch);
+        _outSearch = {};
+        _outSearchDirty = false;
+        return true;
+    }
+
+    void MirrorChannel::publishSearchResults(SearchResults&& results)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        // A round for a search the GUI has since changed or stopped is stale.
+        if (results.entity != _searchEntity || results.text != _searchText)
+        {
+            return;
+        }
+        _outSearch = std::move(results);
+        _outSearchDirty = true;
     }
 
     void MirrorChannel::requestResync()
     {
         std::lock_guard<std::mutex> lk(_m);
         _resync = true;
+    }
+
+    void MirrorChannel::requestCatalogRefresh()
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _catalogRefresh = true;
     }
 
     void MirrorChannel::queueStructural(StructuralKind kind, qulonglong entity, const QString& component)
@@ -201,7 +284,7 @@ namespace rpe
         v.reserve(static_cast<size_t>(_outValues.size()));
         for (auto it = _outValues.cbegin(); it != _outValues.cend(); ++it)
         {
-            v.push_back({ it.key(), it.value() });
+            v.push_back(it.value());
         }
         _outValues.clear();
         return v;
@@ -224,6 +307,12 @@ namespace rpe
         in.pinEdits.swap(_pinEdits);
         in.resync = _resync;
         _resync = false;
+        in.catalogRefresh = _catalogRefresh;
+        _catalogRefresh = false;
+        in.searchEntity = _searchEntity;
+        in.searchText = _searchText;
+        in.searchNow = _searchNow;
+        _searchNow = false;
         return in;
     }
 
@@ -282,7 +371,8 @@ namespace rpe
         std::lock_guard<std::mutex> lk(_m);
         for (auto& v : values)
         {
-            _outValues.insert(v.path, std::move(v.value)); // coalesce: latest per path
+            const QString key = v.path; // copy first: `v` is moved into the hash
+            _outValues.insert(key, std::move(v)); // coalesce: latest per path
         }
     }
 

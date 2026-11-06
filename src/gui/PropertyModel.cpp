@@ -1,7 +1,11 @@
 #include "rpe/gui/PropertyModel.h"
 
+#include "rpe/core/ReadOnly.h"
+#include "rpe/core/TypeBridge.h"
+
 #include "rpe/core/EditorHints.h"
 #include "rpe/core/RttrBridge.h"
+#include "rpe/core/TypeRelease.h"
 #include "rpe/core/TypeRenderer.h"
 
 #include <QBrush>
@@ -22,12 +26,16 @@ namespace rpe
 
         // RTTR has no public default/invalid property constructor; querying a missing
         // property on `void` yields a copyable invalid property we use as a sentinel.
+        // Joins a group key to a row path (grouped view). A control character: it can't
+        // occur in a component key or a property path.
+        constexpr QChar kGroupSep(0x1F);
+
         rttr::property invalidProperty()
         {
             return rttr::type::get<void>().get_property(std::string());
         }
 
-        QString metaString(const rttr::property& p, const char* key)
+        QString metaString(const rttr::property& p, hint::Key key)
         {
             if (!p.is_valid())
             {
@@ -38,12 +46,21 @@ namespace rpe
             {
                 return {};
             }
+            // A `const char*` VARIABLE — every rpe::editor::* constant — is stored as
+            // a const char*, which RTTR's to_string() can't convert (a string LITERAL
+            // is stored as std::string and converts fine). Read it directly, or
+            // metadata(hint::Editor, rpe::editor::Color) silently means nothing.
+            if (m.get_type() == rttr::type::get<const char*>())
+            {
+                const char* c = m.get_value<const char*>();
+                return c ? QString::fromUtf8(c) : QString();
+            }
             bool ok = false;
             const std::string s = m.to_string(&ok);
             return ok ? QString::fromStdString(s) : QString();
         }
 
-        bool metaBool(const rttr::property& p, const char* key, bool def)
+        bool metaBool(const rttr::property& p, hint::Key key, bool def)
         {
             if (!p.is_valid())
             {
@@ -59,7 +76,7 @@ namespace rpe
 
         // Returns the metadata value as a QVariant(double) if present & numeric, else
         // an invalid QVariant (so the delegate can apply its own default).
-        QVariant metaNumber(const rttr::property& p, const char* key)
+        QVariant metaNumber(const rttr::property& p, hint::Key key)
         {
             if (!p.is_valid())
             {
@@ -84,9 +101,67 @@ namespace rpe
     {
         qRegisterMetaType<rttr::variant>("rttr::variant");
         _resetRoot();
+        _releaseHandle = addTypeReleaseHandler(
+            [this](const std::vector<rttr::type>& released) { _onTypesReleased(released); });
     }
 
-    PropertyModel::~PropertyModel() = default;
+    PropertyModel::~PropertyModel()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
+        TypeUseScope scope; // the tree's destructor may run a plugin's variant code
+        _root.reset();
+    }
+
+    namespace
+    {
+        bool treeUses(const PropertyNode* node, const std::vector<rttr::type>& released)
+        {
+            if (isReleased(node->type(), released))
+            {
+                return true;
+            }
+            for (const PropertyNode* c : node->children())
+            {
+                if (treeUses(c, released))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    } // namespace
+
+    void PropertyModel::_onTypesReleased(const std::vector<rttr::type>& released)
+    {
+        // Any thread; no other thread is inside a TypeUseScope. The released module
+        // is still loaded, so reading its types (and destroying its values) is fine
+        // HERE — and never again after this returns.
+        if (!isReleased(_boundType, released) && !treeUses(_root.get(), released))
+        {
+            return;
+        }
+        // A grouped view has no single bound type (its _boundType is void): no name.
+        _releasedTypeName = _grouped ? QString() : QString::fromStdString(_boundType.get_name().to_string());
+        _root->releaseReflection(); // keeps the rows (views hold indexes), empties them
+        _boundType = rttr::type::get<void>();
+        {
+            QMutexLocker lk(&_pendingMutex);
+            _pendingUpdates.clear();
+        }
+        _released.store(true, std::memory_order_release);
+        // Resetting the model (signals, views) belongs on its own thread.
+        QMetaObject::invokeMethod(this, [this] { _finishRelease(); }, Qt::QueuedConnection);
+    }
+
+    void PropertyModel::_finishRelease()
+    {
+        if (!_released.exchange(false))
+        {
+            return;
+        }
+        unbind();
+        emit boundTypeReleased(_releasedTypeName);
+    }
 
     void PropertyModel::_resetRoot()
     {
@@ -99,8 +174,15 @@ namespace rpe
 
     void PropertyModel::bindType(rttr::type type)
     {
+        TypeUseScope scope;
+        _released.store(false); // a fresh tree supersedes a pending release
         beginResetModel();
+        _roCache.clear();
         _resetRoot();
+        _grouped = false;
+        _groupKeys.clear();
+        _groupCounts.clear();
+        _editorPinPath.clear();
         _boundType = type;
         _expandedPaths.clear();
         if (type.is_valid())
@@ -113,11 +195,145 @@ namespace rpe
 
     void PropertyModel::unbind()
     {
+        TypeUseScope scope;
         beginResetModel();
+        _roCache.clear();
         _resetRoot();
+        _grouped = false;
+        _groupKeys.clear();
+        _groupCounts.clear();
+        _editorPinPath.clear();
         _boundType = rttr::type::get<void>();
         _expandedPaths.clear();
         endResetModel();
+    }
+
+    // ── grouped view ────────────────────────────────────────────────────────────────
+
+    QString PropertyModel::groupPath(const QString& key, const QString& relPath)
+    {
+        return key + kGroupSep + relPath;
+    }
+
+    bool PropertyModel::splitGroupPath(const QString& path, QString* key, QString* relPath)
+    {
+        const int at = path.indexOf(kGroupSep);
+        if (at < 0)
+        {
+            if (key)
+                key->clear();
+            if (relPath)
+                *relPath = path;
+            return false;
+        }
+        if (key)
+            *key = path.left(at);
+        if (relPath)
+            *relPath = path.mid(at + 1);
+        return true;
+    }
+
+    void PropertyModel::bindGroups(const QVector<Group>& groups)
+    {
+        TypeUseScope scope;
+        _released.store(false);
+        beginResetModel();
+        _roCache.clear();
+        _resetRoot();
+        _boundType = rttr::type::get<void>();
+        _expandedPaths.clear();
+        _grouped = true;
+        _groupKeys.clear();
+        _groupCounts.clear();
+        _editorPinPath.clear();
+        for (const Group& g : groups)
+        {
+            // The header's path is "key<sep>", so its rows' paths come out as
+            // groupPath(key, "position.x").
+            auto* header = new PropertyNode(g.label, g.key + kGroupSep, g.type, invalidProperty(), _root.get());
+            header->setExpandable(true);
+            _root->children().append(header);
+            _groupKeys.insert(header, g.key);
+            if (g.type.is_valid() && g.type != rttr::type::get<void>())
+            {
+                _buildTree(header, g.type, header->path());
+            }
+        }
+        _collectNodes(_root.get(), _nodeByPath);
+        endResetModel();
+    }
+
+    void PropertyModel::setGroupInstanceProvider(std::function<rttr::instance(const QString&)> provider)
+    {
+        _groupInstanceProvider = std::move(provider);
+    }
+
+    void PropertyModel::setGroupCounts(const QHash<QString, int>& counts)
+    {
+        if (counts == _groupCounts)
+        {
+            return;
+        }
+        _groupCounts = counts;
+        for (int r = 0; _grouped && r < _root->children().size(); ++r)
+        {
+            const QModelIndex i = createIndex(r, 0, _root->children()[r]);
+            emit dataChanged(i, i, { Qt::DisplayRole, GroupCountRole });
+        }
+    }
+
+    void PropertyModel::clearValues(const QString& path)
+    {
+        TypeUseScope scope;
+        PropertyNode* node = _findNode(path);
+        if (!node)
+        {
+            return;
+        }
+        std::function<void(PropertyNode*)> clear = [&](PropertyNode* n) {
+            if (!n->hasLocalEdit())
+            {
+                n->setLiveValue(rttr::variant());
+            }
+            for (PropertyNode* c : n->children())
+            {
+                clear(c);
+            }
+        };
+        clear(node);
+        _emitDirtyRanges(_root.get());
+    }
+
+    QModelIndex PropertyModel::groupIndex(const QString& key) const
+    {
+        for (int r = 0; _grouped && r < _root->children().size(); ++r)
+        {
+            PropertyNode* n = _root->children()[r];
+            if (_groupKeys.value(n) == key)
+            {
+                return createIndex(r, 0, n);
+            }
+        }
+        return {};
+    }
+
+    QModelIndex PropertyModel::indexForPath(const QString& path) const
+    {
+        PropertyNode* n = _findNode(path);
+        return n ? _indexFromNode(n, 0) : QModelIndex();
+    }
+
+    const PropertyNode* PropertyModel::_groupOf(const PropertyNode* node) const
+    {
+        if (!_grouped || !node || node == _root.get())
+        {
+            return nullptr;
+        }
+        while (node->parent() && node->parent() != _root.get())
+        {
+            node = node->parent();
+        }
+        return node;
     }
 
     void PropertyModel::_buildTree(PropertyNode* parent, rttr::type type, const QString& prefix)
@@ -125,7 +341,9 @@ namespace rpe
         for (auto& prop : TypeRenderer::rawType(type).get_properties())
         {
             const QString name = QString::fromStdString(prop.get_name().to_string());
-            const QString path = prefix.isEmpty() ? name : prefix + QLatin1Char('.') + name;
+            // A group header's path ends in the separator: its rows join without a dot.
+            const QString path = (prefix.isEmpty() || prefix.endsWith(kGroupSep)) ? prefix + name
+                                                                                   : prefix + QLatin1Char('.') + name;
             const rttr::type pt = prop.get_type();
 
             auto* node = new PropertyNode(name, path, pt, prop, parent);
@@ -173,7 +391,9 @@ namespace rpe
 
     void PropertyModel::refresh(const rttr::instance& obj)
     {
-        if (!obj.is_valid() || !_root)
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
+        if (!obj.is_valid() || !_root || _grouped) // a grouped view is fed by path
+
         {
             return;
         }
@@ -458,6 +678,7 @@ namespace rpe
 
     void PropertyModel::_flushPending()
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         _flushScheduled.store(false, std::memory_order_release);
         QHash<QString, rttr::variant> batch;
         {
@@ -554,6 +775,7 @@ namespace rpe
 
     void PropertyModel::beginLocalEdit(const QString& path)
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         auto* node = _findNode(path);
         if (!node || node->hasLocalEdit())
         {
@@ -566,8 +788,24 @@ namespace rpe
         emit localEditsChanged();
     }
 
+    void PropertyModel::beginEditorPin(const QString& path)
+    {
+        auto* node = _findNode(path);
+        if (!node || node->hasLocalEdit())
+        {
+            return; // already frozen by the user: that freeze is theirs, not the editor's
+        }
+        _editorPinPath = path;
+        beginLocalEdit(path);
+    }
+
     void PropertyModel::resetNode(const QString& path)
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
+        if (path == _editorPinPath)
+        {
+            _editorPinPath.clear();
+        }
         auto* node = _findNode(path);
         if (!node || !node->hasLocalEdit())
         {
@@ -581,6 +819,8 @@ namespace rpe
 
     void PropertyModel::resetAll()
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
+        _editorPinPath.clear();
         bool any = false;
         for (auto* node : std::as_const(_nodeByPath))
         {
@@ -602,7 +842,7 @@ namespace rpe
     {
         for (auto* node : std::as_const(_nodeByPath))
         {
-            if (node->hasLocalEdit())
+            if (node->hasLocalEdit() && node->path() != _editorPinPath)
             {
                 return true;
             }
@@ -728,40 +968,102 @@ namespace rpe
         return out;
     }
 
+    QString PropertyModel::_readOnlyReason(const PropertyNode* node) const
+    {
+        if (!node || node == _root.get())
+        {
+            return {};
+        }
+        const quint64 regGen = TypeBridge::registryGeneration();
+        const quint64 lockGen = TypeBridge::readOnlyGeneration();
+        if (regGen != _roRegistryGen || lockGen != _roLockGen)
+        {
+            _roCache.clear();
+            _roRegistryGen = regGen;
+            _roLockGen = lockGen;
+        }
+        const QString path = node->path();
+        const auto it = _roCache.constFind(path);
+        if (it != _roCache.constEnd())
+        {
+            return it.value();
+        }
+        QString why;
+        if (const PropertyNode* g = _groupOf(node))
+        {
+            // Grouped: the rule asks about the row's own component, by its own path.
+            why = (g == node) ? QString() : readOnlyReason(g->type(), path.mid(g->path().size()));
+        }
+        else
+        {
+            why = readOnlyReason(_boundType, path);
+        }
+        _roCache.insert(path, why);
+        return why;
+    }
+
     bool PropertyModel::_applyEdit(PropertyNode* node, const rttr::variant& newVal)
     {
+        if (node->path() == _editorPinPath)
+        {
+            _editorPinPath.clear(); // committed: from here on it's an ordinary edit
+        }
         if (_editSink)
         {
             // Mirror mode: hand the edit off, show it optimistically, and resume
             // live updates (the sim thread will echo the applied value back).
+            // Shown as the property's own type (an enum edit arrives as its integer —
+            // see PropertyDelegate::setModelData); the sink gets the portable value.
+            const rttr::variant shown = bridge::coerce(newVal, node->type());
             node->setLocalEdit(false);
-            node->setLiveValue(newVal);
+            node->setLiveValue(shown.is_valid() ? shown : newVal);
             _editSink(node->path(), newVal);
-            emit propertyEdited(node->path(), newVal);
+            emit propertyEdited(node->path(), node->liveValue());
             emit localEditsChanged();
             return true;
         }
 
-        if (_editPolicy == EditPolicy::WriteBack && _instanceProvider)
+        // Grouped: the row's own component, addressed by its key, at its own path.
+        QString groupKey, relPath = node->path();
+        const bool grouped = _grouped && splitGroupPath(node->path(), &groupKey, &relPath);
+        if (_editPolicy == EditPolicy::WriteBack && (grouped ? bool(_groupInstanceProvider) : bool(_instanceProvider)))
         {
             bool wrote = false;
-            rttr::variant actual;
-            // The provider may hand back a pointer into data owned by another
-            // thread; the whole provider+write+read-back sequence runs under the
-            // guard so it can't race the owner.
-            withGuard(_writeGuard, [&] {
-                rttr::instance inst = _instanceProvider();
-                if (inst.is_valid() && bridge::setValueByPath(inst, node->path(), newVal))
-                {
-                    // Read back so the display reflects any coercion the object applied.
-                    actual = bridge::getValueByPath(inst, node->path());
-                    wrote = true;
-                }
-            });
+            bool released = false;
+            {
+                // The provider may hand back a pointer into data owned by another
+                // thread; the whole provider+write+read-back sequence runs under the
+                // guard so it can't race the owner. Leave the read section while
+                // waiting for the guard — its owner may be releasing types (a plugin
+                // unloading) and waiting for us — and take it again inside.
+                TypeUseGap gap;
+                withGuard(_writeGuard, [&] {
+                    TypeUseScope scope;
+                    if (_released.load(std::memory_order_acquire))
+                    {
+                        released = true; // the tree was emptied meanwhile
+                        return;
+                    }
+                    rttr::instance inst = grouped ? _groupInstanceProvider(groupKey) : _instanceProvider();
+                    if (inst.is_valid() && bridge::setValueByPath(inst, relPath, newVal))
+                    {
+                        // Read back so the display reflects any coercion the object
+                        // applied — stored in the node HERE, inside the read section:
+                        // the read-back value is made by the property's (maybe a
+                        // plugin's) code and must not outlive it on this stack.
+                        const rttr::variant actual = bridge::getValueByPath(inst, relPath);
+                        node->setLocalEdit(false);
+                        node->setLiveValue(actual.is_valid() ? actual : bridge::coerce(newVal, node->type()));
+                        wrote = true;
+                    }
+                });
+            }
+            if (released || _released.load(std::memory_order_acquire))
+            {
+                return false;
+            }
             if (wrote)
             {
-                node->setLocalEdit(false);
-                node->setLiveValue(actual.is_valid() ? actual : newVal);
                 emit propertyEdited(node->path(), node->liveValue());
                 emit localEditsChanged();
                 return true;
@@ -769,9 +1071,10 @@ namespace rpe
             // Write failed — fall through to a local draft so the edit is not lost.
         }
 
-        node->setLocalEditValue(newVal);
+        const rttr::variant draft = bridge::coerce(newVal, node->type());
+        node->setLocalEditValue(draft.is_valid() ? draft : newVal);
         node->setLocalEdit(true);
-        emit propertyEdited(node->path(), newVal);
+        emit propertyEdited(node->path(), node->localEditValue());
         emit localEditsChanged();
         return true;
     }
@@ -824,14 +1127,46 @@ namespace rpe
 
     QVariant PropertyModel::data(const QModelIndex& index, int role) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!index.isValid())
         {
             return {};
         }
         auto* node = static_cast<PropertyNode*>(index.internalPointer());
 
+        // Grouped view: a header row is a label (+ its match count), nothing else.
+        if (_isGroupNode(node))
+        {
+            switch (role)
+            {
+            case Qt::DisplayRole:
+            case Qt::ToolTipRole:
+                return index.column() == 0 ? node->displayName() : QString();
+            case IsGroupRole: // (bold: the view's delegate — a FontRole QFont would be the app default font)
+                return true;
+            case GroupKeyRole:
+                return _groupKeys.value(node);
+            case GroupCountRole:
+                return _groupCounts.value(_groupKeys.value(node), 0);
+            case PropertyPathRole:
+                return node->path();
+            case IsLeafRole:
+                return false;
+            default:
+                return {};
+            }
+        }
+
         switch (role)
         {
+        case IsGroupRole:
+            return false;
+        case GroupKeyRole:
+            if (const PropertyNode* g = _groupOf(node))
+            {
+                return _groupKeys.value(g);
+            }
+            return QString();
         case Qt::DisplayRole:
             if (index.column() == 0)
             {
@@ -889,9 +1224,35 @@ namespace rpe
                     return v.get_value<QColor>();
                 }
             }
+            // …and so do STRINGS that hold a colour (the rpe::editor::Color hint):
+            // "#AARRGGBB", "#RRGGBB" or a named colour. Not a colour → no swatch.
+            if (index.column() == 1 && node->isLeaf()
+                && metaString(node->prop(), hint::Editor) == QLatin1String(editor::Color))
+            {
+                const rttr::variant v = TypeRenderer::unwrap(node->effectiveValue());
+                const QColor c(v.is_valid() ? TypeRenderer::toDisplayString(v) : QString());
+                if (c.isValid())
+                {
+                    return c;
+                }
+            }
             break;
 
+        case InlineVectorRole:
+            return _isInlineVector(node);
+
+        case ReadOnlyRole:
+            return _readOnlyReason(node);
+
         case Qt::ToolTipRole:
+            if (index.column() == 1)
+            {
+                const QString why = _readOnlyReason(node);
+                if (!why.isEmpty())
+                {
+                    return node->tooltip().isEmpty() ? why : node->tooltip() + QStringLiteral("\n\n") + why;
+                }
+            }
             if (node->hasLocalEdit())
             {
                 return QStringLiteral("Local edit (draft, not applied) — right-click to reset to live");
@@ -978,6 +1339,7 @@ namespace rpe
 
     bool PropertyModel::setData(const QModelIndex& index, const QVariant& value, int role)
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!index.isValid() || role != Qt::EditRole || index.column() != 1)
         {
             return false;
@@ -990,6 +1352,14 @@ namespace rpe
         auto* node = static_cast<PropertyNode*>(index.internalPointer());
         const rttr::variant newVal = value.value<rttr::variant>();
         if (!newVal.is_valid())
+        {
+            return false;
+        }
+        // The UI never opens an editor on a read-only row; this is for every other
+        // caller. Refusing here — rather than letting the write fail further down —
+        // is what keeps a getter-only value from being shown as a frozen "edit" that
+        // never reached the object.
+        if (!_readOnlyReason(node).isEmpty())
         {
             return false;
         }
@@ -1010,6 +1380,7 @@ namespace rpe
 
     Qt::ItemFlags PropertyModel::flags(const QModelIndex& index) const
     {
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
         if (!index.isValid())
         {
             return Qt::NoItemFlags;
@@ -1017,13 +1388,50 @@ namespace rpe
         auto* node = static_cast<PropertyNode*>(index.internalPointer());
 
         Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-        const bool forcedRO = metaBool(node->prop(), hint::ReadOnly, false);
-        if (!_readOnly && !forcedRO && index.column() == 1 && node->isLeaf()
-            && TypeRenderer::isInlineEditable(node->type()))
+        if (_isGroupNode(node))
+        {
+            return f; // a header: never edited
+        }
+        // Read-only rows stay ENABLED (normal text, selectable, copyable) — they just
+        // never get ItemIsEditable, so no editor opens. The reason is shown on hover.
+        if (!_readOnly && index.column() == 1 && node->isLeaf() && TypeRenderer::isInlineEditable(node->type())
+            && _readOnlyReason(node).isEmpty())
+        {
+            f |= Qt::ItemIsEditable;
+        }
+        // A small numeric struct (Vec3, a colour as floats, a 2D size…) also edits
+        // inline on its OWN row — one box per field — without expanding it.
+        if (!_readOnly && index.column() == 1 && _isInlineVector(node))
         {
             f |= Qt::ItemIsEditable;
         }
         return f;
+    }
+
+    bool PropertyModel::_isInlineVector(const PropertyNode* node) const
+    {
+        if (!node || node == _root.get() || _isGroupNode(node) || node->isLeaf() || node->arraySize() >= 0)
+        {
+            return false;
+        }
+        const auto& ch = node->children();
+        if (ch.size() < 2 || ch.size() > 4 || !_readOnlyReason(node).isEmpty())
+        {
+            return false;
+        }
+        for (const PropertyNode* c : ch)
+        {
+            const rttr::type t = TypeRenderer::rawType(c->type());
+            const bool wide = t == rttr::type::get<long>() || t == rttr::type::get<unsigned long>()
+                || t == rttr::type::get<long long>() || t == rttr::type::get<unsigned long long>()
+                || t == rttr::type::get<unsigned int>();
+            if (!c->isLeaf() || !t.is_arithmetic() || t == rttr::type::get<bool>() || wide
+                || !_readOnlyReason(c).isEmpty())
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     QVariant PropertyModel::headerData(int section, Qt::Orientation orientation, int role) const

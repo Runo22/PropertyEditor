@@ -15,6 +15,7 @@
 #include <functional>
 
 class QListWidget;
+class QListWidgetItem;
 class QLineEdit;
 class QToolButton;
 class QStyledItemDelegate;
@@ -45,6 +46,7 @@ namespace rpe
 
     public:
         explicit ComponentListWidget(QWidget* parent = nullptr);
+        ~ComponentListWidget() override;
 
         void setEntity(flecs::world* world, flecs::entity e);
         void clearEntity();
@@ -68,6 +70,37 @@ namespace rpe
         // its selection but doesn't re-emit when the component set is unchanged).
         QString currentComponentName() const;
 
+        // Components to select when a listing has no previous selection to keep —
+        // the first entity, or one that lacks the component you were on. The first
+        // name (in this order) the entity has wins; none → the default behaviour.
+        // Names as everywhere: full path ("game.Player" / "game::Player") or a
+        // trailing part of it ("Player").
+        void setPreferredComponents(const QStringList& names);
+        QStringList preferredComponents() const
+        {
+            return _preferred;
+        }
+        // Mirror mode: the next listing is ANOTHER entity's, so a selection it lacks
+        // falls to the preferred components (not to its old row's neighbour, which
+        // is right only when the component was removed from the same entity).
+        void beginEntitySwitch();
+
+        // ── Search all components (driven by EntityComponentBrowser) ─────────────
+        // Match counts per component selection key: a count pill on matching rows,
+        // the rest dimmed. `active == false` clears both.
+        void setMatchCounts(const QHash<QString, int>& countsByKey, bool active);
+        int matchCount(const QString& key) const;
+        bool matchCountsActive() const;
+        // The selectable DATA rows: selection key + the label shown.
+        QVector<QPair<QString, QString>> dataComponents() const;
+        // Direct mode: the component behind a key (invalid rttrType if none).
+        ComponentInfo componentInfo(const QString& key) const;
+        // Select the row with this key WITHOUT emitting a selection signal (keeps
+        // the list in step with a row picked elsewhere).
+        void setCurrentKeySilently(const QString& key);
+        // The current row's selection key (both modes), empty if none.
+        QString currentComponentKey() const;
+
         // Show the add/remove controls (a "+" button and a per-row "×"). Off by
         // default — inspection is read-only unless the host opts in.
         void setComponentEditingEnabled(bool on);
@@ -89,6 +122,7 @@ namespace rpe
             QString label;
             QIcon icon;
             std::function<void(const QString& key, qulonglong rawId)> callback;
+            QStringList menu; // optional submenu path (see rpe::subMenu)
         };
         void setContextActions(const QVector<MenuAction>& actions);
         // Dynamic hook: called when the component right-click menu is built, with the
@@ -105,6 +139,9 @@ namespace rpe
         void removeComponentRequested(const QString& name);
         // By flecs id — emitted for rows that carry one (tags, pairs; mirror rows).
         void removeComponentIdRequested(qulonglong rawId);
+        // The Add picker is about to open (the pointer reached the Add button, or
+        // it was clicked): a good moment for the producer to refresh what it offers.
+        void addPickerWanted();
 
     protected:
         // Reverts a pending delete-confirm when the list loses focus.
@@ -127,6 +164,12 @@ namespace rpe
         QToolButton* _addBtn = nullptr;
         QStyledItemDelegate* _rowDelegate = nullptr; // actually a RemoveButtonDelegate
         QVector<ComponentInfo> _components;
+        QStringList _preferred;
+        bool _entitySwitch = false;
+        qulonglong _listedEntity = 0; // direct mode: the entity setEntity last listed
+        // The first preferred component among `items` (in preference order), or nullptr.
+        QListWidgetItem* _preferredItem(const QVector<QListWidgetItem*>& items) const;
+        int _releaseHandle = 0; // rpe/core/TypeRelease.h
         QVector<MirrorChannel::ComponentRow> _mirrorRows; // last externally-fed set (dedup)
         QVector<MirrorChannel::CatalogEntry> _addable;    // "+" picker entries
         QVector<MenuAction> _contextActions;

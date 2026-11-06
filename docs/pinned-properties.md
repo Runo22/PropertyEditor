@@ -28,10 +28,15 @@ That single call wires everything:
 
 ## Using the widget
 
-- **Edit**: double-click the Value cell, type, commit. The text is parsed
-  against the last mirrored value's type and applied sim-side (with
-  `ecs_modified_id`, so observers fire). Editing is disabled until the first
-  value has arrived — there is nothing to anchor the parse to before that.
+- **Edit**: double-click the Value cell — you get the same type-specific editor
+  as in the property grid (check box, spin box, combo, colour, file picker…).
+  The editor is chosen from the property's **declared** type, so a pin is
+  editable the moment it's created, before its first value arrives. The edit is
+  applied sim-side, addressed to that pin's entity + component (with
+  `ecs_modified_id`, so observers fire).
+- **Read-only** leaves (no setter, `ReadOnly` hint, locked type — see
+  [editor-hints](editor-hints.md#read-only-values)) never open an editor here
+  either; they show the same faint lock and the reason in the tooltip.
 - **Unpin**: right-click → *Unpin* / *Unpin all*.
 - While you are editing a cell, the live echo won't overwrite your typing.
 

@@ -41,6 +41,7 @@ namespace rpe
 
     public:
         explicit PinnedPropertiesWidget(QWidget* parent = nullptr);
+        ~PinnedPropertiesWidget() override;
 
         // Share the producer's channel (values in, edits out). setMirror is a
         // convenience for setChannel(mirror->channel()).
@@ -89,6 +90,10 @@ namespace rpe
         // rather than inferred from focus, which leaves the tree while a modal picker
         // (file/color dialog) is up.
         QTreeWidgetItem* _editingItem = nullptr;
+        // Last mirrored value per row. Kept HERE, not in item data, so a type release
+        // (a plugin unloading, on any thread) can drop them — see TypeRelease.h.
+        QHash<const QTreeWidgetItem*, rttr::variant> _lastValues;
+        int _releaseHandle = 0;
     };
 
 } // namespace rpe

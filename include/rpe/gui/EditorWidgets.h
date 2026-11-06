@@ -5,11 +5,14 @@
 #include <QList>
 #include <QPair>
 #include <QString>
+#include <QVector>
 #include <QWidget>
 
 #include <cstdint>
 
+class QAbstractSpinBox;
 class QLineEdit;
+class QSlider;
 class QToolButton;
 class QLabel;
 class QStandardItemModel;
@@ -37,6 +40,10 @@ namespace rpe
 
         explicit FilePathEditor(Mode mode, QWidget* parent = nullptr);
 
+        Mode mode() const
+        {
+            return _mode;
+        }
         QString path() const;
         void setPath(const QString& p);
         void setFilter(const QString& f)
@@ -123,6 +130,90 @@ namespace rpe
         void _refreshText();
         QStandardItemModel* _model = nullptr;
         bool _guard = false; // suppress reentrant updates while we mutate the model
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  SliderEditor — a slider next to the number's own spin box, for the
+    //  rpe::editor::Slider hint on a number with both Min and Max.
+    //
+    //  The SPIN BOX is the editor: it holds the value and the keyboard focus (the
+    //  slider never takes focus), so typing, Enter and Esc behave exactly as in a
+    //  plain spin box, and the value is read/written through it with the same
+    //  type conversion. The slider mirrors it and drags it.
+    // ─────────────────────────────────────────────────────────────────────────────
+    class SliderEditor : public QWidget
+    {
+        Q_OBJECT
+
+    public:
+        // Takes ownership of `spin` (a QSpinBox or QDoubleSpinBox already ranged).
+        SliderEditor(QAbstractSpinBox* spin, double min, double max, double step, QWidget* parent = nullptr);
+
+        QAbstractSpinBox* spinBox() const
+        {
+            return _spin;
+        }
+        QSlider* slider() const
+        {
+            return _slider;
+        }
+
+    private:
+        double _spinValue() const;
+        void _setSpinValue(double v);
+        void _syncSliderFromSpin();
+        void _syncSpinFromSlider(int pos);
+
+        QAbstractSpinBox* _spin = nullptr;
+        QSlider* _slider = nullptr;
+        double _min = 0;
+        double _max = 1;
+        double _step = 0;  // value per slider tick
+        int _ticks = 1;    // slider positions - 1
+        bool _syncing = false;
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  VectorEditor — a small numeric struct (Vec3, a size, a float colour…) edited
+    //  on ONE row: a short coloured axis label and a compact spin box per field.
+    //  Fields named x / y / z / w (or r / g / b / a) get the usual axis colours
+    //  and a one-letter label; any other field is labelled with its name.
+    //
+    //  The editor only holds numbers; the delegate reads each field's value in,
+    //  and writes back only the fields that changed (each through its own path).
+    // ─────────────────────────────────────────────────────────────────────────────
+    class VectorEditor : public QWidget
+    {
+        Q_OBJECT
+
+    public:
+        struct Field
+        {
+            QString name;           // the property's display name
+            bool integral = false;  // spin box kind
+            double min = -1e15;     // the field's own Min/Max/Step/Decimals hints
+            double max = 1e15;
+            double step = 0;        // 0 → 0.1 (floating) / 1 (integral)
+            int decimals = 4; // as the scalar spin box's default
+        };
+
+        explicit VectorEditor(const QVector<Field>& fields, QWidget* parent = nullptr);
+
+        int count() const
+        {
+            return _spins.size();
+        }
+        double value(int i) const;
+        void setValue(int i, double v);
+        QAbstractSpinBox* spinBox(int i) const
+        {
+            return _spins.value(i);
+        }
+        // The axis colour a field name maps to (invalid for an ordinary name).
+        static QColor axisColor(const QString& name);
+
+    private:
+        QVector<QAbstractSpinBox*> _spins;
     };
 
 } // namespace rpe

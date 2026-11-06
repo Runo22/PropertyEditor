@@ -6,6 +6,9 @@
 //   • setEntityMenuHook / setComponentMenuHook run at open time with the clicked
 //     entity/component,
 //   • and direct-mode entity deletion destructs under the guard.
+//   • submenus: an action's `menu` path, rpe::subMenu() merging levels across
+//     static actions and several hooks, labels with '/', '&' mnemonics;
+//   • several add*MenuHook hooks run in order; remove* handles take entries away.
 // Menus are exec()-modal, so a 0-delay timer (fires inside exec's nested loop)
 // finds the active menu, optionally triggers an entry, and dismisses it.
 #include <rpe/core/TypeBridge.h>
@@ -69,6 +72,21 @@ static void trigger(QMenu* m, const QString& label)
             a->trigger();
             return;
         }
+}
+static QMenu* subOf(QMenu* m, const QString& title)
+{
+    for (QAction* a : m->actions())
+        if (a->menu() && a->text() == title)
+            return a->menu();
+    return nullptr;
+}
+static int countSubs(QMenu* m, const QString& title)
+{
+    int n = 0;
+    for (QAction* a : m->actions())
+        if (a->menu() && a->text() == title)
+            ++n;
+    return n;
 }
 static bool hasEntry(QMenu* m, const QString& label)
 {
@@ -204,6 +222,129 @@ int main(int argc, char* argv[])
             check("direct-mode delete destructs the entity", !b.is_alive());
             check("direct-mode delete leaves the other entity", a.is_alive());
         }
+    }
+
+    // ── rpe::subMenu on its own ────────────────────────────────────────────────
+    {
+        QMenu root;
+        QMenu* a = rpe::subMenu(root, { QStringLiteral("Debug"), QStringLiteral("Physics") });
+        QMenu* b = rpe::subMenu(root, { QStringLiteral("Debug"), QStringLiteral("Physics") });
+        check("subMenu reuses an existing path", a == b && countSubs(&root, QStringLiteral("Debug")) == 1);
+        check("subMenu with an empty path is the root", rpe::subMenu(root, {}) == &root);
+        check("blank levels are skipped",
+              rpe::subMenu(root, { QStringLiteral(" "), QStringLiteral("Debug"), QString() }) == subOf(&root, QStringLiteral("Debug")));
+        QMenu* amp = root.addMenu(QStringLiteral("&Tools"));
+        check("a level matches a title with an '&' mnemonic", rpe::subMenu(root, { QStringLiteral("Tools") }) == amp);
+        check("a '/' inside a level is just text (no splitting)",
+              rpe::subMenu(root, { QStringLiteral("I/O") })->title() == QStringLiteral("I/O"));
+    }
+
+    // ── Submenus, several hooks, removal (direct mode) ─────────────────────────
+    {
+        flecs::world world;
+        auto e = world.entity("Solo").set<Health>({ 1 });
+        rpe::EntityComponentBrowser browser;
+        browser.setWorld(&world);
+        browser.setComponentEditingEnabled(true);
+        browser.resize(360, 400);
+        browser.show();
+        QCoreApplication::processEvents();
+        auto* el = browser.entityList()->findChild<QListWidget*>();
+        browser.selectEntity(e);
+        for (int i = 0; i < 20; ++i)
+        {
+            world.progress(0.016f);
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        const qulonglong soloId = static_cast<qulonglong>(e.id());
+
+        qulonglong wokeId = 0;
+        QStringList order;
+        const int wake = browser.addEntityAction({ QStringLiteral("Wake"), QIcon(), [&](qulonglong id) { wokeId = id; },
+                                                   { QStringLiteral("Debug"), QStringLiteral("Physics") } });
+        browser.addEntityAction({ QStringLiteral("Save/Load"), QIcon(), [](qulonglong) {} });
+        browser.setEntityMenuHook([&](qulonglong, QMenu& m) {
+            order << QStringLiteral("set");
+            rpe::subMenu(m, { QStringLiteral("Debug") })->addAction(QStringLiteral("FromSetHook"));
+        });
+        const int h1 = browser.addEntityMenuHook([&](qulonglong, QMenu& m) {
+            order << QStringLiteral("h1");
+            rpe::subMenu(m, { QStringLiteral("Debug"), QStringLiteral("Physics") })->addAction(QStringLiteral("FromPluginA"));
+        });
+        browser.addEntityMenuHook([&](qulonglong, QMenu& m) {
+            order << QStringLiteral("h2");
+            rpe::subMenu(m, { QStringLiteral("Debug") })->addAction(QStringLiteral("FromPluginB"));
+        });
+
+        bool oneDebug = false, physicsMerged = false, debugMerged = false, slashTop = false;
+        openMenu(browser.entityList(), el, 0, [&](QMenu* m) {
+            oneDebug = countSubs(m, QStringLiteral("Debug")) == 1;
+            QMenu* dbg = subOf(m, QStringLiteral("Debug"));
+            QMenu* phys = dbg ? subOf(dbg, QStringLiteral("Physics")) : nullptr;
+            physicsMerged = phys && countSubs(dbg, QStringLiteral("Physics")) == 1 && hasEntry(phys, QStringLiteral("Wake"))
+                && hasEntry(phys, QStringLiteral("FromPluginA"));
+            debugMerged = dbg && hasEntry(dbg, QStringLiteral("FromSetHook")) && hasEntry(dbg, QStringLiteral("FromPluginB"));
+            slashTop = hasEntry(m, QStringLiteral("Save/Load"));
+            if (phys)
+                trigger(phys, QStringLiteral("Wake"));
+        });
+        check("static + hook entries share ONE 'Debug' submenu", oneDebug);
+        check("Debug ▸ Physics holds the static action AND a hook's entry", physicsMerged);
+        check("Debug holds entries from the set-hook and another plugin's hook", debugMerged);
+        check("a label with '/' stays a top-level entry", slashTop);
+        check("an action inside a submenu fires with the clicked id", wokeId == soloId);
+        check("hooks run set-hook first, then added hooks in order",
+              order == QStringList({ QStringLiteral("set"), QStringLiteral("h1"), QStringLiteral("h2") }));
+
+        browser.removeEntityAction(wake);
+        browser.removeMenuHook(h1);
+        browser.setEntityMenuHook(nullptr);
+        order.clear();
+        bool physicsGone = false, bStill = false;
+        openMenu(browser.entityList(), el, 0, [&](QMenu* m) {
+            QMenu* dbg = subOf(m, QStringLiteral("Debug"));
+            physicsGone = dbg && !subOf(dbg, QStringLiteral("Physics"));
+            bStill = dbg && hasEntry(dbg, QStringLiteral("FromPluginB")) && !hasEntry(dbg, QStringLiteral("FromSetHook"));
+        });
+        check("removed action + hook leave no (empty) Physics submenu", physicsGone);
+        check("the other plugin's hook still runs; the cleared set-hook doesn't", bStill && order == QStringList { QStringLiteral("h2") });
+
+        // Component side: a submenu path + an added hook with the entity id.
+        auto* cl = browser.componentList()->findChild<QListWidget*>();
+        for (int i = 0; i < 50 && cl && cl->count() == 0; ++i)
+        {
+            QCoreApplication::processEvents();
+            QThread::msleep(10);
+        }
+        check("direct mode lists the selected entity's component", cl && cl->count() > 0);
+        qulonglong compHookEnt = 0;
+        QString copied;
+        const int cAct = browser.addComponentAction({ QStringLiteral("Copy JSON"), QIcon(),
+                                                      [&](qulonglong, const QString& c, qulonglong) { copied = c; },
+                                                      { QStringLiteral("Export") } });
+        const int cHook = browser.addComponentMenuHook([&](qulonglong ent, const QString&, qulonglong, QMenu& m) {
+            compHookEnt = ent;
+            rpe::subMenu(m, { QStringLiteral("Export") })->addAction(QStringLiteral("Copy YAML"));
+        });
+        bool exportBoth = false;
+        if (cl && cl->count() > 0)
+            openMenu(browser.componentList(), cl, 0, [&](QMenu* m) {
+                QMenu* ex = subOf(m, QStringLiteral("Export"));
+                exportBoth = ex && countSubs(m, QStringLiteral("Export")) == 1 && hasEntry(ex, QStringLiteral("Copy JSON"))
+                    && hasEntry(ex, QStringLiteral("Copy YAML"));
+                if (ex)
+                    trigger(ex, QStringLiteral("Copy JSON"));
+            });
+        check("component action + hook share the 'Export' submenu", exportBoth);
+        check("component submenu action fires with its key", copied == QStringLiteral("Health"));
+        check("added component hook gets the selected entity id", compHookEnt == soloId);
+        browser.removeComponentAction(cAct);
+        browser.removeMenuHook(cHook);
+        bool exportGone = false;
+        if (cl && cl->count() > 0)
+            openMenu(browser.componentList(), cl, 0, [&](QMenu* m) { exportGone = !subOf(m, QStringLiteral("Export")); });
+        check("removing them takes the Export submenu away", exportGone);
     }
 
     printf(g_fails ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", g_fails);

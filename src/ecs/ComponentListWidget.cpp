@@ -1,6 +1,11 @@
 #include "rpe/ecs/ComponentListWidget.h"
 
+#include "PickerKeys.h"
+#include "rpe/ecs/RowActions.h"
+#include "rpe/core/TypeRelease.h"
+#include "rpe/gui/PropertyDelegate.h" // paintItemReservingRight
 #include "rpe/core/TypeBridge.h"
+#include "rpe/ecs/ComponentScan.h"
 
 #include <QAction>
 #include <QEvent>
@@ -8,14 +13,15 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QIcon>
-#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QApplication>
 #include <QPainter>
+#include <QSignalBlocker>
 #include <QPixmap>
 #include <QScreen>
 #include <QStyledItemDelegate>
@@ -50,24 +56,42 @@ namespace rpe
             return pm;
         }
 
-        // Forwards key presses to a callback; used to drive the add-popup's tree
-        // from the filter box (arrows/enter/escape) without moving focus away from
-        // typing. Plain QObject override — no Q_OBJECT/moc needed.
-        class PopupKeyRouter : public QObject
+        // Scope segments of a component path, for either separator:
+        // "plugins.output.hud.Speed" / "plugins::output::hud::Speed" →
+        // [plugins, output, hud, Speed]. flecs escapes a literal dot inside a name
+        // as "\." — that is part of the segment, not a split point.
+        QStringList scopeSegments(const QString& path)
         {
-        public:
-            using QObject::QObject;
-            std::function<bool(QKeyEvent*)> onKey; // return true = consumed
-
-            bool eventFilter(QObject* obj, QEvent* ev) override
+            QStringList out;
+            QString cur;
+            for (int i = 0; i < path.size(); ++i)
             {
-                if (ev->type() == QEvent::KeyPress && onKey && onKey(static_cast<QKeyEvent*>(ev)))
+                const QChar c = path.at(i);
+                if (c == QLatin1Char('\\') && i + 1 < path.size() && path.at(i + 1) == QLatin1Char('.'))
                 {
-                    return true;
+                    cur += QLatin1Char('.');
+                    ++i;
                 }
-                return QObject::eventFilter(obj, ev);
+                else if (c == QLatin1Char('.'))
+                {
+                    out << cur;
+                    cur.clear();
+                }
+                else if (c == QLatin1Char(':') && i + 1 < path.size() && path.at(i + 1) == QLatin1Char(':'))
+                {
+                    out << cur;
+                    cur.clear();
+                    ++i;
+                }
+                else
+                {
+                    cur += c;
+                }
             }
-        };
+            out << cur;
+            out.removeAll(QString()); // a leading "::" (root) yields an empty segment
+            return out;
+        }
 
         // Leaf (unscoped) name for display, from a full path "game.Transform" /
         // "game::Transform" → "Transform".
@@ -89,6 +113,8 @@ namespace rpe
         {
             CompKindRole = Qt::UserRole + 1,  // int (MirrorChannel::RowKind)
             CompRawIdRole = Qt::UserRole + 2, // qulonglong flecs id
+            CompKeyRole = Qt::UserRole + 3,   // QString selection key, same in both modes
+                                              // (path, or "Rel (Target)" for a pair)
         };
 
         // Row display text: data/tag rows show the leaf name; pairs "Rel \u2192 Target".
@@ -147,6 +173,10 @@ namespace rpe
             using QStyledItemDelegate::QStyledItemDelegate;
 
             bool enabled = false;
+            // Search matches per component key (setMatchCounts): a count pill on
+            // matching rows, the others dimmed. Off while no search is active.
+            QHash<QString, int> matchCounts;
+            bool matchActive = false;
             QString confirmName;       // component currently armed for delete
             QListWidget* list = nullptr;
             std::function<void(const QString&, int kind, qulonglong rawId)> onRemove;
@@ -174,25 +204,62 @@ namespace rpe
             {
                 const int kind = index.data(CompKindRole).toInt();
 
-                // Reserve room on the right so the text doesn't run under the icon,
-                // plus a badge chip for tag/pair rows.
+                // Room kept clear on the right: the trash icon, a tag/pair chip, a
+                // match-count pill.
+                const int matches = matchActive ? matchCounts.value(index.data(CompKeyRole).toString(), 0) : 0;
+                const QString pill = matches > 0 ? QString::number(matches) : QString();
+                QFont pillFont = opt.font;
+                pillFont.setBold(true);
+                // A style sheet may size fonts in PIXELS (pointSizeF() is then -1).
+                if (pillFont.pointSizeF() > 0)
+                    pillFont.setPointSizeF(pillFont.pointSizeF() * 0.85);
+                else if (pillFont.pixelSize() > 0)
+                    pillFont.setPixelSize(std::max(1, pillFont.pixelSize() * 85 / 100));
+                const int pillW = pill.isEmpty() ? 0 : QFontMetrics(pillFont).horizontalAdvance(pill) + 12;
+                int textReserve = enabled ? opt.rect.height() : 0;
+                if (kind != 0)
+                    textReserve += opt.rect.height() + 30;
+                if (matchActive)
+                    textReserve += pillW + 8;
+
                 QStyleOptionViewItem o(opt);
-                if (enabled)
-                    o.rect.adjust(0, 0, -o.rect.height(), 0);
+                initStyleOption(&o, index);
+                // Presence rows (tag / dataless pair): nothing to inspect — italic and
+                // faded, so they read as state, not data. Rows without a search match
+                // fade further, so the eye goes to the ones that have. Faded with the
+                // painter's OPACITY, not the palette: a style sheet's ::item colour
+                // would override a palette tweak.
+                qreal opacity = 1.0;
                 if (kind == 1 || kind == 2)
                 {
-                    // Presence rows (tag / dataless pair): nothing to inspect —
-                    // render dimmed + italic so they read as state, not data.
                     o.font.setItalic(true);
-                    QColor dim = opt.palette.color(QPalette::Text);
-                    dim.setAlpha(150);
-                    o.palette.setColor(QPalette::Text, dim);
+                    opacity = 0.6;
                 }
-                if (kind != 0)
+                if (matchActive && matches == 0 && !(opt.state & QStyle::State_Selected))
+                    opacity = std::min(opacity, 0.4);
+                p->save();
+                p->setOpacity(opacity);
+                paintItemReservingRight(p, o, textReserve);
+                p->restore();
+                if (!pill.isEmpty())
                 {
-                    o.rect.adjust(0, 0, -o.rect.height() - 30, 0);
+                    const int reserve = enabled ? opt.rect.height() : 0;
+                    const QRect r(opt.rect.right() - reserve - pillW - 6, opt.rect.center().y() - 8, pillW, 16);
+                    const bool sel = opt.state & QStyle::State_Selected;
+                    p->save();
+                    p->setRenderHint(QPainter::Antialiasing, true);
+                    p->setPen(Qt::NoPen);
+                    // The ACTIVE accent: the list is usually unfocused while you type
+                    // in the property filter, and an inactive highlight is grey.
+                    const QColor accent = opt.palette.color(QPalette::Active, QPalette::Highlight);
+                    const QColor onAccent = opt.palette.color(QPalette::Active, QPalette::HighlightedText);
+                    p->setBrush(sel ? onAccent : accent);
+                    p->drawRoundedRect(r, 8, 8);
+                    p->setPen(sel ? accent : onAccent);
+                    p->setFont(pillFont);
+                    p->drawText(r, Qt::AlignCenter, pill);
+                    p->restore();
                 }
-                QStyledItemDelegate::paint(p, o, index);
 
                 if (kind != 0)
                 {
@@ -212,7 +279,10 @@ namespace rpe
                     fg.setAlpha(170);
                     p->setPen(fg);
                     QFont bf = opt.font;
-                    bf.setPointSizeF(bf.pointSizeF() * 0.8);
+                    if (bf.pointSizeF() > 0) // pixel-sized under a style sheet: pointSizeF() is -1
+                        bf.setPointSizeF(bf.pointSizeF() * 0.8);
+                    else if (bf.pixelSize() > 0)
+                        bf.setPixelSize(std::max(1, bf.pixelSize() * 8 / 10));
                     p->setFont(bf);
                     p->drawText(badge, Qt::AlignCenter, label);
                     p->restore();
@@ -287,6 +357,17 @@ namespace rpe
     ComponentListWidget::ComponentListWidget(QWidget* parent)
         : QWidget(parent)
     {
+        // A plugin unloading: forget its types (any thread; plain data only). Its
+        // rows stay until the next listing; selecting one then binds nothing.
+        _releaseHandle = addTypeReleaseHandler([this](const std::vector<rttr::type>& released) {
+            for (ComponentInfo& c : _components)
+            {
+                if (isReleased(c.rttrType, released))
+                {
+                    c.rttrType = rttr::type::get_by_name(std::string());
+                }
+            }
+        });
         _setupUi();
     }
 
@@ -351,6 +432,22 @@ namespace rpe
         connect(_list, &QListWidget::currentItemChanged, this, &ComponentListWidget::_onSelectionChanged);
         connect(_list, &QListWidget::customContextMenuRequested, this, &ComponentListWidget::_onContextMenu);
         connect(_addBtn, &QToolButton::clicked, this, &ComponentListWidget::_onAddClicked);
+        _addBtn->installEventFilter(this); // hover → addPickerWanted (see eventFilter)
+
+        // Filter, then walk the results without leaving the box (arrows select,
+        // Enter hands focus to the list, Esc clears the filter). Installed after
+        // the textChanged filter above so it walks the freshly filtered rows.
+        picker::driveList(_filterEdit, _list);
+        picker::returnToSearchOnTab(_list, _filterEdit); // Tab out of the rows = refine
+
+        // Tab walks the panel the way it reads — Add → filter — and then leaves for
+        // the next panel; the rows are entered with Enter or the arrows instead.
+        setTabOrder(_addBtn, _filterEdit);
+    }
+
+    ComponentListWidget::~ComponentListWidget()
+    {
+        removeTypeReleaseHandler(_releaseHandle);
     }
 
     void ComponentListWidget::setContextActions(const QVector<MenuAction>& actions)
@@ -370,7 +467,8 @@ namespace rpe
         {
             return;
         }
-        const QString key = item->data(Qt::UserRole).toString();
+        // CompKeyRole, not UserRole: in direct mode UserRole is a row index.
+        const QString key = item->data(CompKeyRole).toString();
         const qulonglong rawId = item->data(CompRawIdRole).toULongLong();
         static_cast<RemoveButtonDelegate*>(_rowDelegate)->clearConfirm();
 
@@ -396,7 +494,8 @@ namespace rpe
             {
                 if (a.label.isEmpty() || !a.callback)
                     continue;
-                QAction* act = a.icon.isNull() ? menu.addAction(a.label) : menu.addAction(a.icon, a.label);
+                QMenu* into = subMenu(menu, a.menu);
+                QAction* act = a.icon.isNull() ? into->addAction(a.label) : into->addAction(a.icon, a.label);
                 const auto cb = a.callback;
                 connect(act, &QAction::triggered, this, [cb, key, rawId] { cb(key, rawId); });
             }
@@ -413,6 +512,12 @@ namespace rpe
 
     bool ComponentListWidget::eventFilter(QObject* obj, QEvent* ev)
     {
+        // Pointer on the Add button: ask for a fresh catalog now, so it has usually
+        // landed by the time the click opens the picker.
+        if (obj == _addBtn && ev->type() == QEvent::Enter)
+        {
+            emit addPickerWanted();
+        }
         if ((obj == _list || obj == _list->viewport()) && ev->type() == QEvent::FocusOut)
         {
             static_cast<RemoveButtonDelegate*>(_rowDelegate)->clearConfirm();
@@ -448,6 +553,7 @@ namespace rpe
 
     void ComponentListWidget::_onAddClicked()
     {
+        emit addPickerWanted();
         // A small popup: a filter box over a tree of addable components grouped by
         // namespace. Qt::Popup closes on click-outside; WA_DeleteOnClose frees it.
         auto* popup = new QFrame(this, Qt::Popup);
@@ -475,29 +581,51 @@ namespace rpe
         }
         else
         {
-            // Group by namespace (everything before the last "::" or "."); the leaf
-            // is shown, and the full catalogued name is carried for the add request.
-            QHash<QString, QTreeWidgetItem*> groups;
+            // A namespace TREE: every scope segment is its own level, so
+            // "plugins.output.hud.Speed" files under plugins ▸ output ▸ hud. The
+            // leaf is shown; the full catalogued path is carried for the add request.
+            // Tags get their own "Tags" root (presence markers, not data), nested
+            // the same way beneath it; unscoped data components go under "(global)".
+            QHash<QString, QTreeWidgetItem*> groups; // key: root label + "\n" + scope prefix
+            auto groupFor = [&](const QString& rootLabel, const QStringList& scope) {
+                QTreeWidgetItem* parent = nullptr;
+                QString key = rootLabel;
+                auto node = [&](const QString& label) {
+                    QTreeWidgetItem*& g = groups[key];
+                    if (!g)
+                    {
+                        g = parent ? new QTreeWidgetItem(parent, { label }) : new QTreeWidgetItem(tree, { label });
+                        g->setFlags(Qt::ItemIsEnabled);
+                        g->setExpanded(true);
+                    }
+                    parent = g;
+                };
+                if (!rootLabel.isEmpty())
+                {
+                    node(rootLabel);
+                }
+                for (const QString& seg : scope)
+                {
+                    key += QLatin1Char('\n') + seg;
+                    node(seg);
+                }
+                return parent;
+            };
+            QTreeWidgetItem* tagsRoot = nullptr;
             for (const MirrorChannel::CatalogEntry& entry : _addable)
             {
                 const QString& full = entry.path;
-                int cut = full.lastIndexOf(QStringLiteral("::"));
-                int sep = 2;
-                if (cut < 0)
+                QStringList scope = scopeSegments(full);
+                const QString leaf = scope.isEmpty() ? full : scope.takeLast();
+                QTreeWidgetItem* g = nullptr;
+                if (entry.tag)
                 {
-                    cut = full.lastIndexOf(QLatin1Char('.'));
-                    sep = 1;
+                    g = groupFor(tr("Tags"), scope);
+                    tagsRoot = groups.value(tr("Tags"));
                 }
-                // Tags group under one "(tags)" node — they are presence markers,
-                // not namespaced data components.
-                const QString ns = entry.tag ? tr("(tags)") : (cut >= 0 ? full.left(cut) : tr("(global)"));
-                const QString leaf = cut >= 0 ? full.mid(cut + sep) : full;
-                QTreeWidgetItem*& g = groups[ns];
-                if (!g)
+                else
                 {
-                    g = new QTreeWidgetItem(tree, { ns });
-                    g->setFlags(Qt::ItemIsEnabled);
-                    g->setExpanded(true);
+                    g = groupFor(scope.isEmpty() ? tr("(global)") : QString(), scope);
                 }
                 auto* item = new QTreeWidgetItem(g, { leaf });
                 item->setData(0, Qt::UserRole, full);
@@ -507,6 +635,13 @@ namespace rpe
                     f.setItalic(true);
                     item->setFont(0, f);
                 }
+            }
+            // Tags last: they are the odd ones out next to the data namespaces.
+            if (tagsRoot)
+            {
+                tree->takeTopLevelItem(tree->indexOfTopLevelItem(tagsRoot));
+                tree->addTopLevelItem(tagsRoot);
+                tagsRoot->setExpanded(true);
             }
         }
 
@@ -523,94 +658,44 @@ namespace rpe
         connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
         connect(tree, &QTreeWidget::itemActivated, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
 
-        // The selectable (visible, non-group) options, in top-to-bottom order —
-        // the sequence the arrow keys walk and Enter picks from.
-        auto visibleLeaves = [tree]() {
-            QList<QTreeWidgetItem*> out;
-            for (int i = 0; i < tree->topLevelItemCount(); ++i)
-            {
-                QTreeWidgetItem* g = tree->topLevelItem(i);
-                if (g->isHidden())
-                    continue;
-                for (int j = 0; j < g->childCount(); ++j)
-                {
-                    QTreeWidgetItem* c = g->child(j);
-                    if (!c->isHidden() && !c->data(0, Qt::UserRole).toString().isEmpty())
-                        out.append(c);
-                }
-            }
-            return out;
-        };
-
-        connect(search, &QLineEdit::textChanged, tree, [tree, visibleLeaves](const QString& q) {
+        connect(search, &QLineEdit::textChanged, tree, [tree](const QString& q) {
             const QString s = q.trimmed();
+            // An option matches on its FULL path, so typing a namespace ("hud")
+            // narrows to that branch; a group stays visible while any descendant
+            // does. Returns whether `item` ended up visible.
+            std::function<bool(QTreeWidgetItem*)> apply = [&](QTreeWidgetItem* item) -> bool {
+                const QVariant full = item->data(0, Qt::UserRole);
+                if (!full.isNull())
+                {
+                    const bool match = s.isEmpty() || full.toString().contains(s, Qt::CaseInsensitive);
+                    item->setHidden(!match);
+                    return match;
+                }
+                if (item->childCount() == 0)
+                {
+                    return !item->isHidden(); // placeholder row
+                }
+                bool any = false;
+                for (int j = 0; j < item->childCount(); ++j)
+                {
+                    any = apply(item->child(j)) || any;
+                }
+                item->setHidden(!any);
+                if (any)
+                    item->setExpanded(true);
+                return any;
+            };
             for (int i = 0; i < tree->topLevelItemCount(); ++i)
             {
-                QTreeWidgetItem* g = tree->topLevelItem(i);
-                int shown = 0;
-                for (int j = 0; j < g->childCount(); ++j)
-                {
-                    QTreeWidgetItem* c = g->child(j);
-                    const bool match = s.isEmpty() || c->text(0).contains(s, Qt::CaseInsensitive);
-                    c->setHidden(!match);
-                    shown += match ? 1 : 0;
-                }
-                // Hide a group header only if it has children and none are showing.
-                g->setHidden(g->childCount() > 0 && shown == 0);
-                if (shown)
-                    g->setExpanded(true);
+                apply(tree->topLevelItem(i));
             }
-            // Highlight the best (first visible) match so Enter picks it directly.
-            const QList<QTreeWidgetItem*> leaves = visibleLeaves();
-            tree->setCurrentItem(leaves.isEmpty() ? nullptr : leaves.first());
         });
 
-        // Keyboard driving from the filter box: Up/Down walk the visible options
-        // (focus stays in the box so typing continues), Enter adds the highlighted
-        // option — or the best match when none is highlighted — and Esc closes.
-        auto* keys = new PopupKeyRouter(popup);
-        keys->onKey = [tree, popup, visibleLeaves, activate](QKeyEvent* ke) -> bool {
-            switch (ke->key())
-            {
-            case Qt::Key_Down:
-            case Qt::Key_Up:
-            {
-                const QList<QTreeWidgetItem*> leaves = visibleLeaves();
-                if (leaves.isEmpty())
-                    return true;
-                int idx = leaves.indexOf(tree->currentItem());
-                idx = (ke->key() == Qt::Key_Down) ? qMin(idx + 1, leaves.size() - 1) : qMax(idx - 1, 0);
-                tree->setCurrentItem(leaves[idx]);
-                tree->scrollToItem(leaves[idx]);
-                return true;
-            }
-            case Qt::Key_Return:
-            case Qt::Key_Enter:
-            {
-                QTreeWidgetItem* cur = tree->currentItem();
-                if (!cur || cur->isHidden() || cur->data(0, Qt::UserRole).toString().isEmpty())
-                {
-                    const QList<QTreeWidgetItem*> leaves = visibleLeaves();
-                    cur = leaves.isEmpty() ? nullptr : leaves.first();
-                }
-                activate(cur);
-                return true;
-            }
-            case Qt::Key_Escape:
-                popup->close();
-                return true;
-            default:
-                return false; // let the line edit handle typing
-            }
-        };
-        search->installEventFilter(keys);
-
-        // Pre-highlight the first option so a bare Enter adds it immediately.
-        {
-            const QList<QTreeWidgetItem*> leaves = visibleLeaves();
-            if (!leaves.isEmpty())
-                tree->setCurrentItem(leaves.first());
-        }
+        // Type, then drive the tree from the filter box: arrows walk the matches,
+        // Enter adds the highlighted one (the topmost match by default), Esc
+        // closes. Connected AFTER the filter above so the re-highlight it installs
+        // sees the freshly filtered tree.
+        picker::driveTree(search, tree, popup, activate);
 
         popup->setMinimumWidth(qMax(200, _list->width()));
 
@@ -642,15 +727,23 @@ namespace rpe
 
     void ComponentListWidget::setEntity(flecs::world* world, flecs::entity e)
     {
-        _components.clear();
+        {
+            // _components holds rttr::type handles a type release (a plugin
+            // unloading, on another thread) rewrites: touch it only in a read
+            // section — never held across the world guard or a signal.
+            TypeUseScope scope;
+            _components.clear();
+        }
         _mirrorRows.clear();
 
         // Collect under the guard (entity/component reads touch the world);
         // populate the widget afterwards without holding it.
         QStringList names;
+        QStringList keys;       // parallel to names: the selection key menus report
         QVector<int> dataKinds; // 0 = component, 3 = data-carrying pair (badge)
         QVector<MirrorChannel::ComponentRow> extraRows; // tags + dataless pairs
         withGuard(_guard, [&] {
+            TypeUseScope scope; // inside the guard: never wait for a release holding it
             if (!world || !e.is_alive())
             {
                 return;
@@ -670,7 +763,7 @@ namespace rpe
                     }
                     const flecs::string rp = rel.path(".", "");
                     const QString relPath = rp.c_str() ? QString::fromUtf8(rp.c_str()) : QString();
-                    if (relPath.startsWith(QStringLiteral("flecs")))
+                    if (isFlecsBuiltinPath(relPath))
                     {
                         return;
                     }
@@ -690,6 +783,7 @@ namespace rpe
                         {
                             _components.append(ComponentInfo { id, rt });
                             names.append(componentLeaf(relPath) + QStringLiteral(" \u2192 ") + target);
+                            keys.append(relPath + QStringLiteral(" (") + target + QLatin1Char(')'));
                             dataKinds.append(3);
                             return;
                         }
@@ -710,7 +804,7 @@ namespace rpe
                 }
                 const flecs::string fp = comp.path(".", "");
                 const QString fullPath = fp.c_str() ? QString::fromUtf8(fp.c_str()) : QString();
-                if (fullPath.startsWith(QStringLiteral("flecs")))
+                if (isFlecsBuiltinPath(fullPath))
                 {
                     return;
                 }
@@ -738,6 +832,7 @@ namespace rpe
 
                 _components.append(ComponentInfo { id, t });
                 names.append(QString::fromUtf8(raw));
+                keys.append(fullPath);
                 dataKinds.append(0);
             });
         });
@@ -745,6 +840,7 @@ namespace rpe
         // Sort names and their parallel ComponentInfos together, alphabetically by
         // the displayed leaf name (item UserRole stays the index into _components).
         {
+            TypeUseScope scope;
             QVector<int> order(names.size());
             for (int i = 0; i < names.size(); ++i)
             {
@@ -757,6 +853,7 @@ namespace rpe
                 return c != 0 ? c < 0 : names[a].compare(names[b], Qt::CaseInsensitive) < 0;
             });
             QStringList sortedNames;
+            QStringList sortedKeys;
             QVector<ComponentInfo> sortedInfos;
             QVector<int> sortedKinds;
             sortedNames.reserve(names.size());
@@ -765,10 +862,12 @@ namespace rpe
             for (int i : order)
             {
                 sortedNames.append(names[i]);
+                sortedKeys.append(keys[i]);
                 sortedInfos.append(_components[i]);
                 sortedKinds.append(dataKinds[i]);
             }
             names = sortedNames;
+            keys = sortedKeys;
             _components = sortedInfos;
             dataKinds = sortedKinds;
         }
@@ -779,19 +878,34 @@ namespace rpe
         // rebuild — e.g. after a sibling component is removed, or when switching to an
         // entity that also has it — instead of snapping back to the first row.
         const QString prevSelName = _list->currentItem() ? _list->currentItem()->text() : QString();
+        const int prevSelRow = _list->currentRow();
+        // Same entity re-listed (a component was added/removed) vs another entity.
+        const qulonglong entityId = e.is_valid() ? static_cast<qulonglong>(e.id()) : 0;
+        const bool sameEntity = entityId != 0 && entityId == _listedEntity;
+        _listedEntity = entityId;
 
+        QVector<qulonglong> rawIds;
+        {
+            TypeUseScope scope;
+            for (const ComponentInfo& c : std::as_const(_components))
+            {
+                rawIds.append(static_cast<qulonglong>(c.id.raw_id()));
+            }
+        }
         _list->blockSignals(true);
         _list->clear();
         for (int i = 0; i < names.size(); ++i)
         {
             auto* item = new QListWidgetItem(names[i], _list);
             item->setData(Qt::UserRole, i);
+            item->setData(CompKeyRole, keys[i]);
             item->setData(CompKindRole, dataKinds[i]);
-            item->setData(CompRawIdRole, static_cast<qulonglong>(_components[i].id.raw_id()));
+            item->setData(CompRawIdRole, i < rawIds.size() ? rawIds[i] : 0ull);
         }
         for (const auto& r : extraRows)
         {
             auto* item = new QListWidgetItem(rowDisplay(r), _list);
+            item->setData(CompKeyRole, r.key());
             item->setData(CompKindRole, static_cast<int>(r.kind));
             item->setData(CompRawIdRole, r.rawId);
             item->setFlags(Qt::ItemIsEnabled); // presence row: removable, not selectable
@@ -818,7 +932,28 @@ namespace rpe
         }
         else if (!names.isEmpty())
         {
-            _list->setCurrentRow(0); // auto-select first DATA row → drives the editor
+            // The host's preferred component if present, else the first DATA row
+            // (the data rows are the first names.size() items).
+            QVector<QListWidgetItem*> dataRows;
+            for (int i = 0; i < names.size(); ++i)
+            {
+                dataRows.append(_list->item(i));
+            }
+            QListWidgetItem* preferred = _preferredItem(dataRows);
+            if (sameEntity && !prevSelName.isEmpty())
+            {
+                // The selected component was removed from this entity → the row that
+                // took its place (else the last), as in mirror mode — not a jump away.
+                _list->setCurrentRow(std::min(std::max(prevSelRow, 0), static_cast<int>(names.size()) - 1));
+            }
+            else if (preferred)
+            {
+                _list->setCurrentItem(preferred);
+            }
+            else
+            {
+                _list->setCurrentRow(0); // auto-select first DATA row → drives the editor
+            }
         }
         else
         {
@@ -852,7 +987,8 @@ namespace rpe
 
         if (rows == _mirrorRows)
         {
-            return; // unchanged → keep selection, no flicker
+            _entitySwitch = false; // same composition: the selection simply stays
+            return;                // unchanged → keep selection, no flicker
         }
         // Drop a pending delete-confirm (keyed on the display text) if its row is
         // no longer shown.
@@ -865,7 +1001,10 @@ namespace rpe
                 del->clearConfirm();
         }
         _mirrorRows = rows;
-        _components.clear(); // mirror mode has no world-backed infos
+        {
+            TypeUseScope scope;
+            _components.clear(); // mirror mode has no world-backed infos
+        }
 
         // Preserve selection across the rebuild by PATH (Qt::UserRole). Also remember
         // its row, so if that component was DELETED we can select the neighbour that
@@ -883,6 +1022,7 @@ namespace rpe
         {
             auto* item = new QListWidgetItem(rowDisplay(r), _list);
             item->setData(Qt::UserRole, r.key()); // unique identity (string) → mirror mode
+            item->setData(CompKeyRole, r.key());
             item->setData(CompKindRole, static_cast<int>(r.kind));
             item->setData(CompRawIdRole, r.rawId);
             const bool selectable = r.kind == MirrorChannel::RowKind::Data
@@ -931,6 +1071,12 @@ namespace rpe
             // (correctly-typed) component instead of carrying over the old namespace.
             _list->setCurrentItem(leafMatch);
         }
+        else if (QListWidgetItem* preferred = (prevSelPath.isEmpty() || _entitySwitch) ? _preferredItem(selectables) : nullptr)
+        {
+            // Nothing to carry over (first entity, or the new one lacks the component
+            // you were on): the host's preferred component, if this entity has one.
+            _list->setCurrentItem(preferred);
+        }
         else if (!prevSelPath.isEmpty() && !selectables.isEmpty())
         {
             // A component WAS selected but is gone (deleted) → select its neighbour:
@@ -952,6 +1098,7 @@ namespace rpe
         {
             emit componentDeselected();
         }
+        _entitySwitch = false;
         _applyFilter(); // re-apply over the rebuilt rows
         _ensureSelectionVisible();
     }
@@ -999,6 +1146,121 @@ namespace rpe
         }
     }
 
+    void ComponentListWidget::setMatchCounts(const QHash<QString, int>& countsByKey, bool active)
+    {
+        auto* d = static_cast<RemoveButtonDelegate*>(_rowDelegate);
+        if (d->matchActive == active && d->matchCounts == countsByKey)
+        {
+            return;
+        }
+        d->matchCounts = active ? countsByKey : QHash<QString, int>();
+        d->matchActive = active;
+        _list->viewport()->update();
+    }
+
+    void ComponentListWidget::setPreferredComponents(const QStringList& names)
+    {
+        _preferred.clear();
+        for (const QString& n : names)
+        {
+            const QString t = n.trimmed();
+            if (!t.isEmpty())
+            {
+                _preferred.append(t);
+            }
+        }
+    }
+
+    void ComponentListWidget::beginEntitySwitch()
+    {
+        _entitySwitch = true;
+    }
+
+    QListWidgetItem* ComponentListWidget::_preferredItem(const QVector<QListWidgetItem*>& items) const
+    {
+        // "game::Player" and "game.Player" are the same name; a trailing part
+        // ("Player", "npc.Guard") matches at a scope boundary only.
+        auto norm = [](QString s) { return s.replace(QStringLiteral("::"), QStringLiteral(".")); };
+        for (const QString& want : _preferred)
+        {
+            const QString w = norm(want);
+            for (QListWidgetItem* it : items)
+            {
+                const QString key = norm(it->data(CompKeyRole).toString());
+                if (key.compare(w, Qt::CaseSensitive) == 0 || key.endsWith(QLatin1Char('.') + w))
+                {
+                    return it;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    int ComponentListWidget::matchCount(const QString& key) const
+    {
+        return static_cast<RemoveButtonDelegate*>(_rowDelegate)->matchCounts.value(key, 0);
+    }
+
+    bool ComponentListWidget::matchCountsActive() const
+    {
+        return static_cast<RemoveButtonDelegate*>(_rowDelegate)->matchActive;
+    }
+
+    QVector<QPair<QString, QString>> ComponentListWidget::dataComponents() const
+    {
+        QVector<QPair<QString, QString>> out;
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            const QListWidgetItem* it = _list->item(i);
+            if (it->flags() & Qt::ItemIsSelectable)
+            {
+                out.append({ it->data(CompKeyRole).toString(), it->text() });
+            }
+        }
+        return out;
+    }
+
+    ComponentInfo ComponentListWidget::componentInfo(const QString& key) const
+    {
+        TypeUseScope scope;
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            const QListWidgetItem* it = _list->item(i);
+            const QVariant ud = it->data(Qt::UserRole);
+            if (it->data(CompKeyRole).toString() == key && ud.type() == QVariant::Int)
+            {
+                const int idx = ud.toInt();
+                if (idx >= 0 && idx < _components.size())
+                {
+                    return _components[idx];
+                }
+            }
+        }
+        ComponentInfo none;
+        none.rttrType = rttr::type::get_by_name(std::string());
+        return none;
+    }
+
+    QString ComponentListWidget::currentComponentKey() const
+    {
+        const QListWidgetItem* it = _list->currentItem();
+        return it ? it->data(CompKeyRole).toString() : QString();
+    }
+
+    void ComponentListWidget::setCurrentKeySilently(const QString& key)
+    {
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            if (_list->item(i)->data(CompKeyRole).toString() == key)
+            {
+                const QSignalBlocker block(_list);
+                _list->setCurrentRow(i);
+                _list->viewport()->update();
+                return;
+            }
+        }
+    }
+
     QString ComponentListWidget::currentComponentName() const
     {
         auto* item = _list->currentItem();
@@ -1014,7 +1276,11 @@ namespace rpe
 
     void ComponentListWidget::clearEntity()
     {
-        _components.clear();
+        _listedEntity = 0;
+        {
+            TypeUseScope scope;
+            _components.clear();
+        }
         _mirrorRows.clear();
         _list->clear();
         emit componentDeselected();
@@ -1042,9 +1308,19 @@ namespace rpe
         {
             emit componentNameSelected(item->text());
             const int idx = ud.toInt();
-            if (idx >= 0 && idx < _components.size())
+            ComponentInfo info;
+            bool have = false;
             {
-                emit componentSelected(_components[idx]);
+                TypeUseScope scope; // copy under the read section, emit outside it
+                if (idx >= 0 && idx < _components.size())
+                {
+                    info = _components[idx];
+                    have = true;
+                }
+            }
+            if (have)
+            {
+                emit componentSelected(info);
             }
         }
     }

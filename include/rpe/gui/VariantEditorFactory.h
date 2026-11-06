@@ -3,6 +3,8 @@
 #include <QString>
 #include <QWidget>
 
+class QAbstractItemDelegate;
+
 #include <optional>
 
 #include <rttr/type.h>
@@ -46,5 +48,28 @@ namespace rpe::varedit
     // Read `editor` back into a variant of the declared type `t`. Returns an invalid
     // variant when the input can't be parsed (caller should not commit).
     rttr::variant readEditorData(QWidget* editor, rttr::type t);
+
+    // "Did the user change anything?" — for delegates. Call rememberOpeningValue
+    // right after setEditorData: it records what the editor SHOWS, read back the
+    // same way a commit would be (so after any range clamping). At commit time,
+    // unchangedSinceOpen(editor, newVal) is true when the user left it as it was
+    // — then don't write. Otherwise opening an editor on a value outside the
+    // editor's range (Min/Max) and pressing Enter would silently write the
+    // clamped value back.
+    void rememberOpeningValue(QWidget* editor, rttr::type t);
+
+    // Composite editors (a slider + spin box, the x/y/z boxes, path + Browse…) keep
+    // focus on an INNER widget, so the delegate never sees the editor itself lose
+    // focus: clicking elsewhere left it open and the edit unwritten. This commits
+    // and closes `editor` when focus moves to another widget of the same window —
+    // not when a menu or dialog the editor opened takes it. No-op for editors
+    // without a focus proxy (Qt's delegate already handles those).
+    void commitOnFocusLeave(QAbstractItemDelegate* delegate, QWidget* editor);
+
+    // `value` as a variant of the numeric type `t` (float, double, or an integer
+    // type — rounded, and range-checked by RTTR's conversion). Invalid when it
+    // can't be represented.
+    rttr::variant numberAs(double value, rttr::type t);
+    bool unchangedSinceOpen(QWidget* editor, const rttr::variant& newVal);
 
 } // namespace rpe::varedit
