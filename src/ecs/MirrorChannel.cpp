@@ -125,25 +125,41 @@ namespace rpe
     void MirrorChannel::queueStructural(StructuralKind kind, qulonglong entity, const QString& component)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _structurals.push_back(StructuralEdit { kind, entity, component, 0 });
+        _structurals.push_back(StructuralEdit { kind, entity, component, 0, 0 });
     }
 
     void MirrorChannel::queueStructuralById(StructuralKind kind, qulonglong entity, qulonglong rawId)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _structurals.push_back(StructuralEdit { kind, entity, QString(), rawId });
+        _structurals.push_back(StructuralEdit { kind, entity, QString(), rawId, 0 });
     }
 
     void MirrorChannel::queueSpawnPrefab(qulonglong prefabId)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _structurals.push_back(StructuralEdit { StructuralKind::SpawnPrefab, 0, QString(), prefabId });
+        _structurals.push_back(StructuralEdit { StructuralKind::SpawnPrefab, 0, QString(), prefabId, 0 });
     }
 
     void MirrorChannel::queueDestroyEntity(qulonglong entity)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _structurals.push_back(StructuralEdit { StructuralKind::DestroyEntity, entity, QString(), 0 });
+        _structurals.push_back(StructuralEdit { StructuralKind::DestroyEntity, entity, QString(), 0, 0 });
+    }
+
+    void MirrorChannel::queueAddPair(qulonglong entity, qulonglong relation, qulonglong target, const QString& targetPath)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _structurals.push_back(StructuralEdit { StructuralKind::AddPair, entity, targetPath, relation, target });
+    }
+
+    void MirrorChannel::setPairRelations(const QStringList& names)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (_pairRelations != names)
+        {
+            _pairRelations = names;
+            _catalogRefresh = true;
+        }
     }
 
     void MirrorChannel::setPrefabGroupTags(const QStringList& tags)
@@ -277,6 +293,18 @@ namespace rpe
         return true;
     }
 
+    bool MirrorChannel::pollTargetCandidates(QVector<EntityEntry>& out)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        if (!_outTargetsDirty)
+        {
+            return false;
+        }
+        out = _outTargets;
+        _outTargetsDirty = false;
+        return true;
+    }
+
     std::vector<MirrorChannel::ValueUpdate> MirrorChannel::pollValues()
     {
         std::lock_guard<std::mutex> lk(_m);
@@ -301,6 +329,7 @@ namespace rpe
         in.required = _required;
         in.paths = _inPaths;
         in.prefabGroups = _prefabGroups;
+        in.pairRelations = _pairRelations;
         in.edits.swap(_edits);
         in.structurals.swap(_structurals);
         in.pins = _pins;
@@ -347,7 +376,9 @@ namespace rpe
         entries.reserve(catalog.size());
         for (const QString& c : catalog)
         {
-            entries.append(CatalogEntry { c, false });
+            CatalogEntry entry;
+            entry.path = c;
+            entries.append(entry);
         }
         publishCatalogEntries(entries);
     }
@@ -364,6 +395,13 @@ namespace rpe
         std::lock_guard<std::mutex> lk(_m);
         _outPrefabs = prefabs;
         _outPrefabsDirty = true;
+    }
+
+    void MirrorChannel::publishTargetCandidates(const QVector<EntityEntry>& entities)
+    {
+        std::lock_guard<std::mutex> lk(_m);
+        _outTargets = entities;
+        _outTargetsDirty = true;
     }
 
     void MirrorChannel::publishValues(std::vector<ValueUpdate>&& values)

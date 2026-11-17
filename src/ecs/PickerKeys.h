@@ -59,7 +59,8 @@ namespace rpe
         }
 
         // Every visible option, top to bottom: the sequence the arrows walk and
-        // Enter picks from. A hidden (filtered-out) group takes its children with it.
+        // Enter picks from. A hidden (filtered-out) group takes its children with it,
+        // and so does a collapsed one — Enter must never pick a row you can't see.
         inline void collectOptions(QTreeWidgetItem* parent, QList<QTreeWidgetItem*>& out)
         {
             for (int i = 0; i < parent->childCount(); ++i)
@@ -73,7 +74,10 @@ namespace rpe
                 {
                     out.append(c);
                 }
-                collectOptions(c, out);
+                if (c->isExpanded())
+                {
+                    collectOptions(c, out);
+                }
             }
         }
 

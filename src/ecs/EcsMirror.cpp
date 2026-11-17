@@ -157,6 +157,8 @@ namespace rpe
         // types. Start over.
         _search = {};
         _lastPrefabs.clear(); // prefab ids belong to the old world
+        _lastTargets.clear(); // so are these
+        _lastCatalog.clear();
         // Re-diagnose against the new world: its tags/prefabs are different entities.
         _lastPrefabGroups.clear();
         _unresolvedGroups.clear();
@@ -673,6 +675,12 @@ namespace rpe
                 continue;
             }
 
+            // The entity id came from the GUI: check it's still a valid id before
+            // asking whether it's alive (ecs_is_alive asserts on a stale one).
+            if (s.entity == 0 || !ecs_is_valid(world.c_ptr(), static_cast<ecs_entity_t>(s.entity)))
+            {
+                continue;
+            }
             flecs::entity e = world.entity(s.entity);
             if (!e.is_alive())
             {
@@ -684,17 +692,43 @@ namespace rpe
                 structuralApplied = true;
                 continue;
             }
+            if (s.kind == MirrorChannel::StructuralKind::AddPair)
+            {
+                // Checked against flecs' trait rules first: a debug flecs aborts on a
+                // pair that breaks them, and the target may be gone by now.
+                QString why;
+                if (addPairChecked(world, e, static_cast<flecs::entity_t>(s.rawId),
+                                   static_cast<flecs::entity_t>(s.target), s.component, &why)
+                    != 0)
+                {
+                    structuralApplied = true;
+                }
+                else
+                {
+                    qWarning("rpe: pair not added: %s", qPrintable(why));
+                }
+                continue;
+            }
             // By-id form: exact, and the ONLY way to address a pair. Also used for
             // tag rows so a leaf-name collision can never remove the wrong thing.
             if (s.rawId != 0)
             {
+                const flecs::id_t rid = static_cast<flecs::id_t>(s.rawId);
                 if (s.kind == MirrorChannel::StructuralKind::AddComponent)
                 {
-                    e.add(static_cast<flecs::id_t>(s.rawId));
+                    // An id from the catalog: still a live component, and one that may
+                    // be added by itself (not a Relationship / Target)?
+                    if (ECS_IS_PAIR(rid) ? !ecs_id_is_valid(world.c_ptr(), rid)
+                                         : (!ecs_is_valid(world.c_ptr(), rid)
+                                            || !plainAddRejection(world, world.entity(rid)).isEmpty()))
+                    {
+                        continue;
+                    }
+                    e.add(rid);
                 }
                 else
                 {
-                    e.remove(static_cast<flecs::id_t>(s.rawId));
+                    e.remove(rid);
                 }
                 structuralApplied = true;
             }
@@ -703,7 +737,7 @@ namespace rpe
                 // bridgedOnly=false: the add catalog legitimately offers zero-size
                 // TAGS, which have no RTTR bridge (nothing to inspect, only add).
                 flecs::entity comp = findComponentEntity(world, s.component, /*bridgedOnly=*/false);
-                if (comp.is_valid())
+                if (comp.is_valid() && plainAddRejection(world, comp).isEmpty())
                 {
                     e.add(comp);
                     structuralApplied = true;
@@ -802,6 +836,7 @@ namespace rpe
             _ch->publishComponentRows(_lastCompRows);
             _ch->publishCatalogEntries(_lastCatalog);
             _ch->publishPrefabs(_lastPrefabs);
+            _ch->publishTargetCandidates(_lastTargets);
         }
 
         // Interest changed → reset per-leaf dedup so the new selection refreshes fully.
@@ -1100,25 +1135,34 @@ namespace rpe
             _catalogBridgeGen = catalogGen;
             const auto catT0 = std::chrono::steady_clock::now();
             // Addable = bridged data components + zero-size TAGS (presence markers
-            // need no bridge — there is nothing to inspect, only add/remove).
-            QVector<MirrorChannel::CatalogEntry> catalog;
-            for (const ComponentResolution& c : scanComponents(world))
-            {
-                if (c.bridged || c.tag)
-                {
-                    // Full scoped path so the GUI's add picker can group by namespace;
-                    // findComponentEntity accepts either the path or the leaf name.
-                    catalog.append({ c.path.isEmpty() ? c.name : c.path, c.tag });
-                }
-            }
-            std::sort(catalog.begin(), catalog.end(),
-                      [](const MirrorChannel::CatalogEntry& a, const MirrorChannel::CatalogEntry& b) {
-                          return a.path < b.path;
-                      });
+            // need no bridge — there is nothing to inspect, only add/remove) + the
+            // relationships, with their suggested targets. Full scoped paths, so the
+            // GUI's add picker can group by namespace.
+            AddCatalogOptions catOpts;
+            catOpts.pairRelations = in.pairRelations;
+            const QVector<MirrorChannel::CatalogEntry> catalog = buildAddCatalog(world, catOpts);
             if (catalog != _lastCatalog)
             {
                 _lastCatalog = catalog;
                 _ch->publishCatalogEntries(catalog);
+            }
+            // The targets "Other target…" offers — only while some relationship can
+            // take any entity (a OneOf one lists its own).
+            const bool anyOpenRelation = std::any_of(catalog.begin(), catalog.end(), [](const MirrorChannel::CatalogEntry& c) {
+                return c.pair != MirrorChannel::PairUse::None && !c.targetsFixed;
+            });
+            QVector<MirrorChannel::EntityEntry> targets;
+            if (anyOpenRelation)
+            {
+                for (const auto& t : namedEntities(world))
+                {
+                    targets.append({ t.first, t.second });
+                }
+            }
+            if (targets != _lastTargets)
+            {
+                _lastTargets = targets;
+                _ch->publishTargetCandidates(targets);
             }
             _stats.lastCatalogMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - catT0).count();
             ++_stats.catalogScans;
@@ -1553,11 +1597,7 @@ namespace rpe
                     {
                         return;
                     }
-                    const flecs::entity tgt = id.second();
-                    const char* tn = tgt.name();
-                    const QString target = (tn && tn[0] != '\0')
-                        ? QString::fromUtf8(tn)
-                        : QStringLiteral("#%1").arg(static_cast<qulonglong>(tgt.id()));
+                    const QString target = pairTargetName(id.second());
 
                     const ecs_entity_t tid = ecs_get_typeid(world.c_ptr(), id.raw_id());
                     if (tid != 0)

@@ -63,6 +63,11 @@ namespace rpe
 
         // Display label of the currently selected entity (empty if none).
         QString currentLabel() const;
+        // Every listed (id, label), before the text filter.
+        const QVector<QPair<qulonglong, QString>>& entries() const
+        {
+            return _sourceEntries;
+        }
 
         // ── Add-entity (prefab spawning) ─────────────────────────────────────────
         // Show the "Add" button (a spawn picker of prefabs). Off by default.

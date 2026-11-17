@@ -293,6 +293,7 @@ namespace rpe
         QString _lastInterestComponent;
         QString _lastRequired;    // entity-list filter, to detect changes
         QVector<MirrorChannel::CatalogEntry> _lastCatalog; // published catalog (dedup)
+        QVector<MirrorChannel::EntityEntry> _lastTargets;  // published pair-target candidates
 
         // Wall-clock throttles for the full-world scans (see setScanIntervalsMs).
         // Epoch-initialised so the FIRST pump after attach() always scans.

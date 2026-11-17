@@ -1,10 +1,12 @@
 #pragma once
 
+#include <QPair>
 #include <QString>
 #include <QStringList>
 
 #include <vector>
 
+#include "rpe/ecs/MirrorChannel.h"
 #include "rpe/ecs/flecs_prelude.h"
 
 namespace rpe
@@ -16,6 +18,7 @@ namespace rpe
     {
         QString name;     // flecs component name (the unscoped/leaf name)
         QString path;     // flecs full scoped path (e.g. "game.Transform")
+        qulonglong id = 0; // the component entity
         bool bridged = false; // resolves to a bridged RTTR type the inspector can show
         bool tag = false;     // zero-size component: addable presence marker, no data
         QString rttrType;     // the RTTR type name it resolved to ("" if unresolved)
@@ -84,5 +87,61 @@ namespace rpe
     // Returns an invalid entity if none matches. Touches the world — sim thread.
     flecs::entity findComponentEntity(const flecs::world& world, const QString& name,
                                       bool bridgedOnly = true);
+
+    // ── Pairs ────────────────────────────────────────────────────────────────────
+
+    // The name a pair's TARGET is shown and keyed by: its full path
+    // ("elements.Fire"), or "#<id>" when it has no name. The full path — not the
+    // leaf — keeps (Damage, a.Fire) and (Damage, b.Fire) apart.
+    QString pairTargetName(flecs::entity target);
+
+    // An entity by a path the user typed: "elements.Fire", "elements::Fire",
+    // "::elements::Fire" or "#<id>". Invalid if there is none (or it's dead).
+    flecs::entity lookupEntityPath(const flecs::world& world, const QString& path);
+
+    // Why (relation, target) can't be added as a pair — or empty when it can. These
+    // are flecs' own rules: a relation with the Target trait, a target with the
+    // Relationship trait, a OneOf relation's target outside its scope, a dead or
+    // wildcard id, flecs' own relationships (ChildOf, IsA, …). A debug flecs build
+    // ABORTS on most of them, so check before adding.
+    QString pairRejection(const flecs::world& world, flecs::entity relation, flecs::entity target);
+
+    // Why `component` can't be added by itself — it has flecs' Relationship or
+    // Target trait — or empty when it can.
+    QString plainAddRejection(const flecs::world& world, flecs::entity component);
+
+    // Add (relation, target) to `e`, after pairRejection. With target 0 the target
+    // is looked up by `targetPath` (lookupEntityPath). Returns the pair id, or 0 if
+    // refused (`why`, when given, says why). Touches the world — sim thread.
+    flecs::id_t addPairChecked(const flecs::world& world, flecs::entity e, flecs::entity_t relation,
+                               flecs::entity_t target, const QString& targetPath = QString(),
+                               QString* why = nullptr);
+
+    // What the "Add component" picker offers: every bridged data component and
+    // every tag, plus the RELATIONSHIPS — each with the targets to suggest.
+    //
+    // A relationship is offered as a pair when it
+    //   • has flecs' Relationship trait (pair only),
+    //   • is named in `pairRelations` (full path or a trailing part, as in
+    //     matchComponentName; plain entities too — "Likes"), or
+    //   • is already used as one in the world: (R, *) is in use.
+    // It is offered BY ITSELF as well only when it is also in use on its own (and
+    // never with the Relationship trait). An entity with the Target trait is only
+    // ever a target, so it isn't offered at all.
+    // Suggested targets: the children of its OneOf scope (and then only those are
+    // valid), else the targets it is used with now, at most `maxTargets`.
+    // Named entities that can be a pair's target, as (id, path) sorted by path, at
+    // most `limit` — what a relationship's "Other target…" step offers. Leaves out
+    // flecs' and rpe's own entities, systems, observers, modules and entities with
+    // the Relationship trait (never a target).
+    QVector<QPair<qulonglong, QString>> namedEntities(const flecs::world& world, int limit = 5000);
+
+    struct AddCatalogOptions
+    {
+        QStringList pairRelations;
+        int maxTargets = 64;
+    };
+    QVector<MirrorChannel::CatalogEntry> buildAddCatalog(const flecs::world& world,
+                                                         const AddCatalogOptions& options = {});
 
 } // namespace rpe

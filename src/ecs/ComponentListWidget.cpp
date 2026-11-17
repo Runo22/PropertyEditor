@@ -27,6 +27,7 @@
 #include <QStyledItemDelegate>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -122,7 +123,7 @@ namespace rpe
         {
             if (r.kind == MirrorChannel::RowKind::Pair || r.kind == MirrorChannel::RowKind::PairData)
             {
-                return componentLeaf(r.name) + QStringLiteral(" \u2192 ") + r.pairTarget;
+                return componentLeaf(r.name) + QStringLiteral(" \u2192 ") + componentLeaf(r.pairTarget);
             }
             return componentLeaf(r.name);
         }
@@ -535,6 +536,51 @@ namespace rpe
         _list->viewport()->update();
     }
 
+    namespace
+    {
+        // Add-picker item data. Qt::UserRole holds the text an option matches the
+        // filter on (picker::isOption needs it set); these say what it does.
+        enum AddItemRole
+        {
+            AddKindRole = Qt::UserRole + 20,
+            AddRelRole,    // qulonglong relationship
+            AddTargetRole, // qulonglong target
+            AddPathRole,   // QString component path / target path
+        };
+        enum class AddKind
+        {
+            Component,   // add AddPathRole by itself
+            PairTarget,  // add (AddRelRole, AddTargetRole)
+            OtherTarget, // open the target step for AddRelRole
+            TypedPath,   // add (relationship, the typed path)
+            Back,        // (not an option) back to the component step
+        };
+
+        void setItalic(QTreeWidgetItem* item)
+        {
+            QFont f = item->font(0);
+            f.setItalic(true);
+            item->setFont(0, f);
+        }
+
+        // Option labels: the leaf, unless siblings share it — then the full path.
+        QStringList targetLabels(const QVector<MirrorChannel::PairTarget>& targets)
+        {
+            QHash<QString, int> leafCount;
+            for (const auto& t : targets)
+            {
+                ++leafCount[componentLeaf(t.path)];
+            }
+            QStringList out;
+            for (const auto& t : targets)
+            {
+                const QString leaf = componentLeaf(t.path);
+                out << (leafCount.value(leaf) > 1 ? t.path : leaf);
+            }
+            return out;
+        }
+    } // namespace
+
     void ComponentListWidget::setAddableComponents(const QStringList& names)
     {
         QVector<MirrorChannel::CatalogEntry> entries;
@@ -548,7 +594,461 @@ namespace rpe
 
     void ComponentListWidget::setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries)
     {
+        if (entries == _addable)
+        {
+            return;
+        }
         _addable = entries;
+        if (!_addPopup || !_addTree)
+        {
+            return;
+        }
+        // The picker is open (the catalog the producer rescanned for it just came
+        // in): rebuild it in place, keeping the open relationships and the
+        // highlighted option.
+        const auto identity = [](const QTreeWidgetItem* it) {
+            return it ? it->data(0, AddKindRole).toString() + QLatin1Char('|') + it->data(0, AddRelRole).toString()
+                    + QLatin1Char('|') + it->data(0, AddTargetRole).toString() + QLatin1Char('|')
+                    + it->data(0, AddPathRole).toString()
+                      : QString();
+        };
+        const QString current = identity(_addTree->currentItem());
+        QSet<qulonglong> open;
+        for (QTreeWidgetItemIterator it(_addTree); *it; ++it)
+        {
+            if ((*it)->isExpanded() && (*it)->childCount() > 0 && (*it)->child(0)->data(0, AddRelRole).isValid())
+            {
+                open.insert((*it)->child(0)->data(0, AddRelRole).toULongLong());
+            }
+        }
+        _fillAddTree();
+        _filterAddTree();
+        QTreeWidgetItem* again = nullptr;
+        for (QTreeWidgetItemIterator it(_addTree); *it; ++it)
+        {
+            QTreeWidgetItem* item = *it;
+            if (item->childCount() > 0 && item->child(0)->data(0, AddRelRole).isValid()
+                && open.contains(item->child(0)->data(0, AddRelRole).toULongLong()))
+            {
+                item->setExpanded(true);
+            }
+            if (!again && !current.isEmpty() && !item->isHidden() && identity(item) == current)
+            {
+                again = item;
+            }
+        }
+        if (again)
+        {
+            _addTree->setCurrentItem(again);
+        }
+        else
+        {
+            picker::highlightFirst(_addTree);
+        }
+    }
+
+
+    void ComponentListWidget::setTargetCandidatesProvider(std::function<TargetCandidates()> provider)
+    {
+        _targetProvider = std::move(provider);
+    }
+
+    QSet<qulonglong> ComponentListWidget::_presentIds() const
+    {
+        QSet<qulonglong> ids;
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            const qulonglong id = _list->item(i)->data(CompRawIdRole).toULongLong();
+            if (id != 0)
+            {
+                ids.insert(id);
+            }
+        }
+        return ids;
+    }
+
+    QHash<quint32, QString> ComponentListWidget::_presentTargets() const
+    {
+        QHash<quint32, QString> out;
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            const QListWidgetItem* item = _list->item(i);
+            const qulonglong id = item->data(CompRawIdRole).toULongLong();
+            if (ECS_IS_PAIR(static_cast<ecs_id_t>(id)))
+            {
+                const QString text = item->text();
+                const int arrow = text.indexOf(QStringLiteral(" → "));
+                out.insert(static_cast<quint32>(ECS_PAIR_FIRST(static_cast<ecs_id_t>(id))),
+                           arrow >= 0 ? text.mid(arrow + 3) : text);
+            }
+        }
+        return out;
+    }
+
+    void ComponentListWidget::_fillAddTree()
+    {
+        QTreeWidget* tree = _addTree;
+        if (!tree)
+        {
+            return;
+        }
+        tree->clear();
+        if (_addTargetRel != 0)
+        {
+            _fillTargetStep();
+            return;
+        }
+        const QSet<qulonglong> present = _presentIds();
+        const QHash<quint32, QString> hasTarget = _presentTargets();
+
+        // A namespace TREE: every scope segment is its own level, so
+        // "plugins.output.hud.Speed" files under plugins ▸ output ▸ hud. The leaf
+        // is shown; the full catalogued path is carried for the add request. Tags
+        // and relationships get their own roots ("Tags" last), nested the same way;
+        // unscoped data components go under "(global)".
+        QHash<QString, QTreeWidgetItem*> groups; // key: root label + "\n" + scope prefix
+        auto groupFor = [&](const QString& rootLabel, const QStringList& scope) {
+            QTreeWidgetItem* parent = nullptr;
+            QString key = rootLabel;
+            auto node = [&](const QString& label) {
+                QTreeWidgetItem*& g = groups[key];
+                if (!g)
+                {
+                    g = parent ? new QTreeWidgetItem(parent, { label }) : new QTreeWidgetItem(tree, { label });
+                    g->setFlags(Qt::ItemIsEnabled);
+                    g->setExpanded(true);
+                }
+                parent = g;
+            };
+            if (!rootLabel.isEmpty())
+            {
+                node(rootLabel);
+            }
+            for (const QString& seg : scope)
+            {
+                key += QLatin1Char('\n') + seg;
+                node(seg);
+            }
+            return parent;
+        };
+        const QString relRootLabel = tr("Relationships");
+        const QString tagRootLabel = tr("Tags");
+        int offered = 0;
+        for (const MirrorChannel::CatalogEntry& entry : std::as_const(_addable))
+        {
+            const QString& full = entry.path;
+            QStringList scope = scopeSegments(full);
+            const QString leaf = scope.isEmpty() ? full : scope.takeLast();
+
+            // By itself — unless it's a relationship only, or already there.
+            if (entry.pair != MirrorChannel::PairUse::Only && !(entry.id != 0 && present.contains(entry.id)))
+            {
+                QTreeWidgetItem* g = entry.tag ? groupFor(tagRootLabel, scope)
+                                               : groupFor(scope.isEmpty() ? tr("(global)") : QString(), scope);
+                auto* item = new QTreeWidgetItem(g, { leaf });
+                item->setData(0, Qt::UserRole, full);
+                item->setData(0, AddKindRole, static_cast<int>(AddKind::Component));
+                item->setData(0, AddPathRole, full);
+                if (entry.tag)
+                {
+                    setItalic(item);
+                }
+                ++offered;
+            }
+            if (entry.pair == MirrorChannel::PairUse::None || entry.id == 0)
+            {
+                continue;
+            }
+
+            // As a relationship: its targets, then "Other target…".
+            const quint32 relLo = static_cast<quint32>(entry.id);
+            QVector<MirrorChannel::PairTarget> targets;
+            for (const auto& t : entry.targets)
+            {
+                const ecs_id_t pairId = ecs_pair(static_cast<ecs_entity_t>(entry.id), static_cast<ecs_entity_t>(t.id));
+                if (!present.contains(static_cast<qulonglong>(pairId)))
+                {
+                    targets.append(t);
+                }
+            }
+            const bool other = !entry.targetsFixed || entry.moreTargets;
+            if (targets.isEmpty() && !other)
+            {
+                continue; // every valid target is already there
+            }
+            auto* rel = new QTreeWidgetItem(groupFor(relRootLabel, scope), { leaf });
+            rel->setFlags(Qt::ItemIsEnabled);
+            rel->setToolTip(0, entry.exclusive
+                                   ? tr("%1 — exclusive: a new target replaces the current one").arg(full)
+                                   : full);
+            const QString replaces = (entry.exclusive && hasTarget.contains(relLo))
+                ? tr("  (replaces %1)").arg(hasTarget.value(relLo))
+                : QString();
+            const QStringList labels = targetLabels(targets);
+            for (int i = 0; i < targets.size(); ++i)
+            {
+                auto* item = new QTreeWidgetItem(rel, { QStringLiteral("→ ") + labels[i] + replaces });
+                item->setToolTip(0, QStringLiteral("(%1, %2)").arg(full, targets[i].path));
+                item->setData(0, Qt::UserRole, full + QLatin1Char(' ') + targets[i].path);
+                item->setData(0, AddKindRole, static_cast<int>(AddKind::PairTarget));
+                item->setData(0, AddRelRole, entry.id);
+                item->setData(0, AddTargetRole, targets[i].id);
+                ++offered;
+            }
+            if (other)
+            {
+                auto* item = new QTreeWidgetItem(rel, { tr("Other target…") });
+                setItalic(item);
+                item->setData(0, Qt::UserRole, full + QLatin1Char(' ') + tr("Other target…"));
+                item->setData(0, AddKindRole, static_cast<int>(AddKind::OtherTarget));
+                item->setData(0, AddRelRole, entry.id);
+                ++offered;
+            }
+            rel->setExpanded(false); // opened by a click, or by a filter that matches inside
+        }
+        if (offered == 0)
+        {
+            tree->clear();
+            auto* none = new QTreeWidgetItem(tree, { tr("(no components available)") });
+            none->setFlags(Qt::NoItemFlags);
+            return;
+        }
+        // Relationships, then Tags, last: they are the odd ones out next to the
+        // data namespaces.
+        for (const QString& root : { relRootLabel, tagRootLabel })
+        {
+            if (QTreeWidgetItem* r = groups.value(root))
+            {
+                tree->takeTopLevelItem(tree->indexOfTopLevelItem(r));
+                tree->addTopLevelItem(r);
+                r->setExpanded(true);
+            }
+        }
+    }
+
+    void ComponentListWidget::_fillTargetStep()
+    {
+        QTreeWidget* tree = _addTree;
+        const MirrorChannel::CatalogEntry* entry = nullptr;
+        for (const auto& e : std::as_const(_addable))
+        {
+            if (e.id == _addTargetRel)
+            {
+                entry = &e;
+                break;
+            }
+        }
+        if (!entry)
+        {
+            _setAddStep(0); // the relationship left the catalog
+            return;
+        }
+        const QSet<qulonglong> present = _presentIds();
+        const auto has = [&](qulonglong target) {
+            const ecs_id_t pairId = ecs_pair(static_cast<ecs_entity_t>(entry->id), static_cast<ecs_entity_t>(target));
+            return present.contains(static_cast<qulonglong>(pairId));
+        };
+
+        auto* back = new QTreeWidgetItem(tree, { QStringLiteral("← ") + componentLeaf(entry->path) + tr(" — choose a target") });
+        back->setFlags(Qt::ItemIsEnabled);
+        back->setData(0, AddKindRole, static_cast<int>(AddKind::Back));
+        back->setToolTip(0, tr("Back to the components (Backspace in an empty filter)"));
+        QFont bf = back->font(0);
+        bf.setBold(true);
+        back->setFont(0, bf);
+
+        const auto option = [&](QTreeWidgetItem* parent, qulonglong id, const QString& label, const QString& path) {
+            auto* item = new QTreeWidgetItem(parent, { label });
+            item->setToolTip(0, path);
+            item->setData(0, Qt::UserRole, path + QLatin1Char(' ') + label);
+            item->setData(0, AddKindRole, static_cast<int>(AddKind::PairTarget));
+            item->setData(0, AddRelRole, entry->id);
+            item->setData(0, AddTargetRole, id);
+            item->setData(0, AddPathRole, path);
+        };
+
+        QSet<qulonglong> listed;
+        QVector<MirrorChannel::PairTarget> suggested;
+        for (const auto& t : entry->targets)
+        {
+            if (!has(t.id))
+            {
+                suggested.append(t);
+            }
+            listed.insert(t.id);
+        }
+        if (!suggested.isEmpty())
+        {
+            auto* g = new QTreeWidgetItem(tree, { entry->targetsFixed ? tr("Valid targets") : tr("In use") });
+            g->setFlags(Qt::ItemIsEnabled);
+            const QStringList labels = targetLabels(suggested);
+            for (int i = 0; i < suggested.size(); ++i)
+            {
+                option(g, suggested[i].id, labels[i], suggested[i].path);
+            }
+            g->setExpanded(true);
+        }
+        // Any entity (a OneOf relationship takes only its scope's children, all of
+        // which are suggested already — a typed path still works past the cap).
+        if (!entry->targetsFixed && _targetProvider)
+        {
+            TargetCandidates candidates = _targetProvider();
+            std::sort(candidates.begin(), candidates.end(), [](const auto& x, const auto& y) {
+                return x.second.compare(y.second, Qt::CaseInsensitive) < 0;
+            });
+            QTreeWidgetItem* g = nullptr;
+            constexpr int kMaxCandidates = 2000;
+            int n = 0;
+            for (const auto& c : std::as_const(candidates))
+            {
+                if (c.first == 0 || listed.contains(c.first) || has(c.first))
+                {
+                    continue;
+                }
+                if (++n > kMaxCandidates)
+                {
+                    break; // the typed-path option below reaches the rest
+                }
+                if (!g)
+                {
+                    g = new QTreeWidgetItem(tree, { tr("Entities") });
+                    g->setFlags(Qt::ItemIsEnabled);
+                    g->setExpanded(true);
+                }
+                option(g, c.first, c.second, c.second);
+            }
+        }
+        // Whatever was typed, as a path ("elements.Fire", "#123") — last, so Enter
+        // takes a listed match first; shown while there is text (see the filter).
+        auto* typed = new QTreeWidgetItem(tree, { QString() });
+        setItalic(typed);
+        typed->setData(0, Qt::UserRole, QString());
+        typed->setData(0, AddKindRole, static_cast<int>(AddKind::TypedPath));
+        typed->setData(0, AddRelRole, entry->id);
+        typed->setHidden(true);
+    }
+
+    void ComponentListWidget::_filterAddTree()
+    {
+        QTreeWidget* tree = _addTree;
+        if (!tree || !_addSearch)
+        {
+            return;
+        }
+        const QString s = _addSearch->text().trimmed();
+        // An option matches on its match text (full path; a target also on its
+        // relationship's), so typing a namespace ("hud") narrows to that branch; a
+        // group stays visible while any descendant does, and opens while filtering.
+        std::function<bool(QTreeWidgetItem*)> apply = [&](QTreeWidgetItem* item) -> bool {
+            const AddKind kind = static_cast<AddKind>(item->data(0, AddKindRole).toInt());
+            if (item->data(0, AddKindRole).isValid() && kind == AddKind::Back)
+            {
+                return true;
+            }
+            if (item->data(0, AddKindRole).isValid() && kind == AddKind::TypedPath)
+            {
+                item->setText(0, tr("Use “%1” as the target").arg(s));
+                item->setData(0, AddPathRole, s);
+                item->setData(0, Qt::UserRole, s);
+                item->setHidden(s.isEmpty());
+                return !s.isEmpty();
+            }
+            const QVariant full = item->data(0, Qt::UserRole);
+            if (!full.isNull())
+            {
+                const bool match = s.isEmpty() || full.toString().contains(s, Qt::CaseInsensitive)
+                    || item->text(0).contains(s, Qt::CaseInsensitive);
+                item->setHidden(!match);
+                return match;
+            }
+            if (item->childCount() == 0)
+            {
+                return !item->isHidden(); // placeholder row
+            }
+            bool any = false;
+            for (int j = 0; j < item->childCount(); ++j)
+            {
+                any = apply(item->child(j)) || any;
+            }
+            item->setHidden(!any);
+            // Namespaces stay open; a relationship opens only while filtering.
+            const bool isRelation = item->childCount() > 0 && item->child(0)->data(0, AddRelRole).isValid();
+            item->setExpanded(any && (!isRelation || !s.isEmpty()));
+            return any;
+        };
+        for (int i = 0; i < tree->topLevelItemCount(); ++i)
+        {
+            apply(tree->topLevelItem(i));
+        }
+    }
+
+    void ComponentListWidget::_setAddStep(qulonglong relation)
+    {
+        _addTargetRel = relation;
+        if (_addSearch)
+        {
+            _addSearch->blockSignals(true);
+            _addSearch->clear();
+            _addSearch->blockSignals(false);
+            _addSearch->setPlaceholderText(relation != 0 ? tr("Filter targets, or type a path…")
+                                                         : tr("Filter components…"));
+        }
+        _fillAddTree();
+        _filterAddTree();
+        if (_addTree)
+        {
+            picker::highlightFirst(_addTree);
+        }
+    }
+
+    void ComponentListWidget::_activateAddItem(QTreeWidgetItem* item)
+    {
+        if (!item || !item->data(0, AddKindRole).isValid())
+        {
+            return;
+        }
+        QPointer<QWidget> popup = _addPopup;
+        const auto close = [&popup] {
+            if (popup)
+            {
+                popup->close();
+            }
+        };
+        const qulonglong rel = item->data(0, AddRelRole).toULongLong();
+        switch (static_cast<AddKind>(item->data(0, AddKindRole).toInt()))
+        {
+        case AddKind::Component:
+        {
+            const QString full = item->data(0, AddPathRole).toString();
+            close(); // first: a handler may rebuild this list
+            emit addComponentRequested(full);
+            break;
+        }
+        case AddKind::PairTarget:
+        {
+            const qulonglong target = item->data(0, AddTargetRole).toULongLong();
+            const QString path = item->data(0, AddPathRole).toString();
+            close();
+            emit addPairRequested(rel, target, path);
+            break;
+        }
+        case AddKind::TypedPath:
+        {
+            const QString path = item->data(0, AddPathRole).toString().trimmed();
+            if (!path.isEmpty())
+            {
+                close();
+                emit addPairRequested(rel, 0, path);
+            }
+            break;
+        }
+        case AddKind::OtherTarget:
+            _setAddStep(rel);
+            break;
+        case AddKind::Back:
+            _setAddStep(0);
+            break;
+        }
     }
 
     void ComponentListWidget::_onAddClicked()
@@ -574,128 +1074,42 @@ namespace rpe
         tree->setRootIsDecorated(true);
         lay->addWidget(tree);
 
-        if (_addable.isEmpty())
-        {
-            auto* none = new QTreeWidgetItem(tree, { tr("(no components available)") });
-            none->setFlags(Qt::NoItemFlags);
-        }
-        else
-        {
-            // A namespace TREE: every scope segment is its own level, so
-            // "plugins.output.hud.Speed" files under plugins ▸ output ▸ hud. The
-            // leaf is shown; the full catalogued path is carried for the add request.
-            // Tags get their own "Tags" root (presence markers, not data), nested
-            // the same way beneath it; unscoped data components go under "(global)".
-            QHash<QString, QTreeWidgetItem*> groups; // key: root label + "\n" + scope prefix
-            auto groupFor = [&](const QString& rootLabel, const QStringList& scope) {
-                QTreeWidgetItem* parent = nullptr;
-                QString key = rootLabel;
-                auto node = [&](const QString& label) {
-                    QTreeWidgetItem*& g = groups[key];
-                    if (!g)
-                    {
-                        g = parent ? new QTreeWidgetItem(parent, { label }) : new QTreeWidgetItem(tree, { label });
-                        g->setFlags(Qt::ItemIsEnabled);
-                        g->setExpanded(true);
-                    }
-                    parent = g;
-                };
-                if (!rootLabel.isEmpty())
-                {
-                    node(rootLabel);
-                }
-                for (const QString& seg : scope)
-                {
-                    key += QLatin1Char('\n') + seg;
-                    node(seg);
-                }
-                return parent;
-            };
-            QTreeWidgetItem* tagsRoot = nullptr;
-            for (const MirrorChannel::CatalogEntry& entry : _addable)
-            {
-                const QString& full = entry.path;
-                QStringList scope = scopeSegments(full);
-                const QString leaf = scope.isEmpty() ? full : scope.takeLast();
-                QTreeWidgetItem* g = nullptr;
-                if (entry.tag)
-                {
-                    g = groupFor(tr("Tags"), scope);
-                    tagsRoot = groups.value(tr("Tags"));
-                }
-                else
-                {
-                    g = groupFor(scope.isEmpty() ? tr("(global)") : QString(), scope);
-                }
-                auto* item = new QTreeWidgetItem(g, { leaf });
-                item->setData(0, Qt::UserRole, full);
-                if (entry.tag)
-                {
-                    QFont f = item->font(0);
-                    f.setItalic(true);
-                    item->setFont(0, f);
-                }
-            }
-            // Tags last: they are the odd ones out next to the data namespaces.
-            if (tagsRoot)
-            {
-                tree->takeTopLevelItem(tree->indexOfTopLevelItem(tagsRoot));
-                tree->addTopLevelItem(tagsRoot);
-                tagsRoot->setExpanded(true);
-            }
-        }
+        _addPopup = popup;
+        _addTree = tree;
+        _addSearch = search;
+        _addTargetRel = 0;
+        _fillAddTree();
 
-        auto activate = [this, popup](QTreeWidgetItem* item) {
-            if (!item)
-                return;
-            const QString full = item->data(0, Qt::UserRole).toString();
-            if (!full.isEmpty())
+        const auto activate = [this](QTreeWidgetItem* item) { _activateAddItem(item); };
+        connect(tree, &QTreeWidget::itemClicked, this, [this, activate](QTreeWidgetItem* item, int) {
+            if (item && item->data(0, AddKindRole).isValid())
             {
-                emit addComponentRequested(full);
-                popup->close();
+                activate(item);
             }
-        };
-        connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
-        connect(tree, &QTreeWidget::itemActivated, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
-
-        connect(search, &QLineEdit::textChanged, tree, [tree](const QString& q) {
-            const QString s = q.trimmed();
-            // An option matches on its FULL path, so typing a namespace ("hud")
-            // narrows to that branch; a group stays visible while any descendant
-            // does. Returns whether `item` ended up visible.
-            std::function<bool(QTreeWidgetItem*)> apply = [&](QTreeWidgetItem* item) -> bool {
-                const QVariant full = item->data(0, Qt::UserRole);
-                if (!full.isNull())
-                {
-                    const bool match = s.isEmpty() || full.toString().contains(s, Qt::CaseInsensitive);
-                    item->setHidden(!match);
-                    return match;
-                }
-                if (item->childCount() == 0)
-                {
-                    return !item->isHidden(); // placeholder row
-                }
-                bool any = false;
-                for (int j = 0; j < item->childCount(); ++j)
-                {
-                    any = apply(item->child(j)) || any;
-                }
-                item->setHidden(!any);
-                if (any)
-                    item->setExpanded(true);
-                return any;
-            };
-            for (int i = 0; i < tree->topLevelItemCount(); ++i)
+            else if (item && item->childCount() > 0)
             {
-                apply(tree->topLevelItem(i));
+                item->setExpanded(!item->isExpanded()); // a relationship opens on a click
             }
         });
+        connect(tree, &QTreeWidget::itemActivated, this, [activate](QTreeWidgetItem* item, int) { activate(item); });
+        connect(search, &QLineEdit::textChanged, this, [this] { _filterAddTree(); });
 
         // Type, then drive the tree from the filter box: arrows walk the matches,
         // Enter adds the highlighted one (the topmost match by default), Esc
         // closes. Connected AFTER the filter above so the re-highlight it installs
         // sees the freshly filtered tree.
         picker::driveTree(search, tree, popup, activate);
+        // Backspace in an empty filter leaves the target step.
+        auto* back = new picker::KeyRouter(search);
+        back->onKey = [this, search](QKeyEvent* ke) {
+            if (ke->key() == Qt::Key_Backspace && search->text().isEmpty() && _addTargetRel != 0)
+            {
+                _setAddStep(0);
+                return true;
+            }
+            return false;
+        };
+        search->installEventFilter(back);
 
         popup->setMinimumWidth(qMax(200, _list->width()));
 
@@ -767,11 +1181,7 @@ namespace rpe
                     {
                         return;
                     }
-                    const flecs::entity tgt = id.second();
-                    const char* tn = tgt.name();
-                    const QString target = (tn && tn[0] != '\0')
-                        ? QString::fromUtf8(tn)
-                        : QStringLiteral("#%1").arg(static_cast<qulonglong>(tgt.id()));
+                    const QString target = pairTargetName(id.second());
 
                     const ecs_entity_t tid = ecs_get_typeid(world->c_ptr(), id.raw_id());
                     if (tid != 0)
@@ -782,7 +1192,7 @@ namespace rpe
                         if (rt.is_valid())
                         {
                             _components.append(ComponentInfo { id, rt });
-                            names.append(componentLeaf(relPath) + QStringLiteral(" \u2192 ") + target);
+                            names.append(componentLeaf(relPath) + QStringLiteral(" \u2192 ") + componentLeaf(target));
                             keys.append(relPath + QStringLiteral(" (") + target + QLatin1Char(')'));
                             dataKinds.append(3);
                             return;

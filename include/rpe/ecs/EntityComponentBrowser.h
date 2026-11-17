@@ -78,6 +78,15 @@ namespace rpe
             // for world-wide configuration components that are never added per
             // entity. Clear the list to offer everything.
             QStringList hiddenAddNamespaces { QStringLiteral("settings") };
+            // Relationships the "Add component" picker offers as PAIRS (pick the
+            // relationship, then its target), besides the ones it finds itself: those
+            // with flecs' Relationship trait, and those already used in a pair
+            // somewhere in the world. Full path or a trailing part, like
+            // preferredComponents; plain entities ("Likes") too. A listed one is
+            // added only as a pair unless it is also in use by itself. Everything
+            // else is added by itself, as before. Give a relationship flecs' OneOf
+            // trait to limit its targets to one scope's children.
+            QStringList pairRelations;
             // Components to select when an entity is selected and there's no
             // previous component selection to keep (the first entity, or one that
             // lacks the component you were on): the first of these the entity has.
@@ -216,6 +225,8 @@ namespace rpe
         // Top-level namespaces hidden from the "Add component" picker — see
         // Settings::hiddenAddNamespaces (default: "settings").
         void setHiddenAddNamespaces(const QStringList& namespaces);
+        // Settings::pairRelations on its own.
+        void setPairRelations(const QStringList& names);
         // Settings::preferredComponents / Settings::dragToScrub on their own.
         void setPreferredComponents(const QStringList& names);
         void setDragToScrubEnabled(bool on);
@@ -295,6 +306,7 @@ namespace rpe
 
         // component add/remove
         void _onAddComponent(const QString& name);
+        void _onAddPair(qulonglong relation, qulonglong target, const QString& targetPath);
         void _onRemoveComponent(const QString& name);
 
     private:
@@ -342,6 +354,11 @@ namespace rpe
         void _pushInterest();
         // Recompute the "+" picker list: catalog minus components already present.
         void _updateAddable();
+        // Direct mode: rebuild the add catalog from the world (mirror mode gets it
+        // from the producer).
+        void _refreshDirectCatalog();
+        // The entities a relationship's "Other target…" step offers.
+        QVector<QPair<qulonglong, QString>> _targetCandidates() const;
         // Re-tint the property tree with the pins of the current entity+component.
         void _refreshPinnedTint();
         // Apply the required-component filter (from _settings) to the entity list and,
@@ -379,6 +396,7 @@ namespace rpe
 
         // Add/remove-component state (mirror mode).
         QVector<MirrorChannel::CatalogEntry> _catalog; // addable data comps + tags
+        QVector<QPair<qulonglong, QString>> _mirrorTargets; // "Other target…" (mirror mode)
         QStringList _currentComps;  // DATA components on the selected entity
         QSet<QString> _currentTags; // TAG rows on the selected entity
         // PairData rows: selection key → the RTTR type name the pair carries. The

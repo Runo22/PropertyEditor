@@ -113,14 +113,46 @@ namespace rpe
             }
         };
 
-        // Add-component catalog entry (tag == zero-size component: addable, no data).
+        // A suggested target for a relationship in the add picker.
+        struct PairTarget
+        {
+            qulonglong id = 0; // the target entity (generation included)
+            QString path;      // its full path ("elements.Fire"), or "#<id>" if unnamed
+            bool operator==(const PairTarget& o) const
+            {
+                return id == o.id && path == o.path;
+            }
+            bool operator!=(const PairTarget& o) const
+            {
+                return !(*this == o);
+            }
+        };
+
+        // How the add picker offers a catalog entry.
+        enum class PairUse : quint8
+        {
+            None, // added by itself only
+            Only, // a relationship: added as a pair, never by itself
+            Also, // either — by itself, or as a pair
+        };
+
+        // Add-component catalog entry (tag == zero-size component or plain entity:
+        // addable, no data). A RELATIONSHIP entry (pair != None) also carries the
+        // targets to suggest; any other target can still be picked or typed.
         struct CatalogEntry
         {
             QString path;
             bool tag = false;
+            qulonglong id = 0; // the component / relationship entity (generation included)
+            PairUse pair = PairUse::None;
+            bool exclusive = false;      // flecs Exclusive: a new target replaces the old one
+            bool targetsFixed = false;   // flecs OneOf: only `targets` are valid
+            QVector<PairTarget> targets; // suggestions (OneOf children, or targets in use)
+            bool moreTargets = false;    // `targets` was cut at the suggestion limit
             bool operator==(const CatalogEntry& o) const
             {
-                return path == o.path && tag == o.tag;
+                return path == o.path && tag == o.tag && id == o.id && pair == o.pair && exclusive == o.exclusive
+                    && targetsFixed == o.targetsFixed && targets == o.targets && moreTargets == o.moreTargets;
             }
             bool operator!=(const CatalogEntry& o) const
             {
@@ -224,19 +256,28 @@ namespace rpe
         {
             AddComponent,
             RemoveComponent,
-            SpawnPrefab,  // instantiate a new entity from a prefab (rawId = prefab id)
-            DestroyEntity // delete an entity outright (entity = the one to destroy)
+            SpawnPrefab,   // instantiate a new entity from a prefab (rawId = prefab id)
+            DestroyEntity, // delete an entity outright (entity = the one to destroy)
+            AddPair        // add (rawId, target) — target by id, else by path (component)
         };
         struct StructuralEdit
         {
             StructuralKind kind;
             qulonglong entity = 0;
-            QString component;    // by-name form (empty when rawId is used)
-            qulonglong rawId = 0; // by-id form — required for pairs, exact for tags
+            QString component;    // by-name form (empty when rawId is used); AddPair: target path
+            qulonglong rawId = 0; // by-id form — required for pairs, exact for tags; AddPair: relation
+            qulonglong target = 0; // AddPair: the target entity (0 = look `component` up)
         };
         void queueStructural(StructuralKind kind, qulonglong entity, const QString& component);
         // By flecs id — the only way to address a PAIR, and unambiguous for tags.
         void queueStructuralById(StructuralKind kind, qulonglong entity, qulonglong rawId);
+        // Add the pair (relation, target) to `entity`. Ids carry their generation, so
+        // a target deleted (and its id recycled) since the GUI saw it is refused, not
+        // swapped for another entity. With target 0, `targetPath` is looked up instead
+        // ("elements.Fire", "elements::Fire" or "#<id>"). The producer checks flecs'
+        // rules (Relationship / Target / OneOf) first and skips a pair that breaks
+        // them — a debug flecs build would abort on it.
+        void queueAddPair(qulonglong entity, qulonglong relation, qulonglong target, const QString& targetPath = QString());
         // Spawn a new entity from prefab `prefabId` (producer runs is_a + configurator).
         void queueSpawnPrefab(qulonglong prefabId);
         // Destroy `entity` on the simulation thread.
@@ -246,6 +287,10 @@ namespace rpe
         // the first of these it carries). Also drives which prefabs the "add entity"
         // picker offers, alongside the existing required-component filter.
         void setPrefabGroupTags(const QStringList& tags);
+
+        // Relationships the add picker offers as pairs besides those it finds itself
+        // (see EntityComponentBrowser::Settings::pairRelations).
+        void setPairRelations(const QStringList& names);
 
         // ── GUI thread: pinned watches ───────────────────────────────────────────
         // Replace the full pin set (atomic swap; the producer reads it next pump).
@@ -274,6 +319,9 @@ namespace rpe
         bool pollCatalogEntries(QVector<CatalogEntry>& out);
         // Spawnable prefabs for the "add entity" picker. True if changed since last poll.
         bool pollPrefabs(QVector<PrefabEntry>& out);
+        // Named entities, by path — what a relationship's "Other target…" offers.
+        // Published with the catalog. True if changed since the last poll.
+        bool pollTargetCandidates(QVector<EntityEntry>& out);
 
         // True until the producing EcsMirror is destroyed.
         bool producerAlive() const
@@ -289,7 +337,8 @@ namespace rpe
             QString required;
             QStringList paths;
             QStringList prefabGroups;                             // prefab grouping tags
-            std::vector<EditRequest> edits;                       // drained
+            QStringList pairRelations;                            // declared relationships
+            std::vector<EditRequest> edits;                      // drained
             std::vector<StructuralEdit> structurals;              // drained
             QVector<PinKey> pins;                                 // current pin set
             std::vector<std::pair<PinKey, rttr::variant>> pinEdits; // drained
@@ -311,6 +360,7 @@ namespace rpe
         void publishCatalog(const QStringList& catalog); // legacy → non-tag entries
         void publishCatalogEntries(const QVector<CatalogEntry>& entries);
         void publishPrefabs(const QVector<PrefabEntry>& prefabs);
+        void publishTargetCandidates(const QVector<EntityEntry>& entities);
         void publishSearchResults(SearchResults&& results);
         void markProducerGone()
         {
@@ -326,6 +376,7 @@ namespace rpe
         QStringList _inPaths;
         QString _required;
         QStringList _prefabGroups;
+        QStringList _pairRelations;
         std::vector<EditRequest> _edits;
         std::vector<StructuralEdit> _structurals;
         QVector<PinKey> _pins;
@@ -345,6 +396,8 @@ namespace rpe
         bool _outCatalogDirty = false;
         QVector<PrefabEntry> _outPrefabs;
         bool _outPrefabsDirty = false;
+        QVector<EntityEntry> _outTargets;
+        bool _outTargetsDirty = false;
         // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
         // consumer can't make this grow unbounded.
         QHash<QString, ValueUpdate> _outValues; // coalesced by path; carries its target

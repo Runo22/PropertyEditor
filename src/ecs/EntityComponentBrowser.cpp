@@ -117,6 +117,8 @@ namespace rpe
         connect(_componentList, &ComponentListWidget::componentNameSelected, this, &EntityComponentBrowser::_onComponentNameSelected);
         connect(_componentList, &ComponentListWidget::componentDeselected, this, &EntityComponentBrowser::_onComponentDeselected);
         connect(_componentList, &ComponentListWidget::addComponentRequested, this, &EntityComponentBrowser::_onAddComponent);
+        connect(_componentList, &ComponentListWidget::addPairRequested, this, &EntityComponentBrowser::_onAddPair);
+        _componentList->setTargetCandidatesProvider([this] { return _targetCandidates(); });
         connect(_componentList, &ComponentListWidget::removeComponentRequested, this, &EntityComponentBrowser::_onRemoveComponent);
         connect(_componentList, &ComponentListWidget::removeComponentIdRequested, this, &EntityComponentBrowser::_onRemoveComponentId);
         // An Add menu is about to open: have the producer rescan what it offers. The
@@ -126,6 +128,10 @@ namespace rpe
             if (_channel)
             {
                 _channel->requestCatalogRefresh();
+            }
+            else
+            {
+                _refreshDirectCatalog(); // before the picker fills: it's synchronous here
             }
         };
         connect(_componentList, &ComponentListWidget::addPickerWanted, this, refreshCatalog);
@@ -213,6 +219,8 @@ namespace rpe
         // clicking it again changed nothing (it was already current).
         _world = world;
         _liveTimer->stop();
+        _catalog.clear(); // rebuilt from this world when the Add picker opens
+        _updateAddable();
         _componentList->clearEntity();
         _propertyEditor->unbind();
         _entityList->setWorld(world);
@@ -516,6 +524,7 @@ namespace rpe
         _componentList->setPreferredComponents(s.preferredComponents);
         _propertyEditor->setDragToScrubEnabled(s.dragToScrub);
         _applyEntityFilter();
+        setPairRelations(s.pairRelations);
         _updateAddable(); // hiddenAddNamespaces may have changed
     }
 
@@ -523,6 +532,19 @@ namespace rpe
     {
         _settings.hiddenAddNamespaces = namespaces;
         _updateAddable();
+    }
+
+    void EntityComponentBrowser::setPairRelations(const QStringList& names)
+    {
+        _settings.pairRelations = names;
+        if (_channel)
+        {
+            _channel->setPairRelations(names); // the producer rescans its catalog
+        }
+        else if (!_catalog.isEmpty())
+        {
+            _refreshDirectCatalog();
+        }
     }
 
     void EntityComponentBrowser::setPreferredComponents(const QStringList& names)
@@ -1075,6 +1097,13 @@ namespace rpe
         _channel = mirror ? mirror->channel() : nullptr;
         _world = nullptr; // mirror mode never touches the world directly
         _liveTimer->stop();
+        _catalog.clear(); // the producer publishes its own
+        _mirrorTargets.clear();
+        _updateAddable();
+        if (_channel)
+        {
+            _channel->setPairRelations(_settings.pairRelations);
+        }
 
         // Editor edits are queued to the sim thread; values flow back via the channel.
         if (_channel)
@@ -1295,6 +1324,17 @@ namespace rpe
             _entityList->setAddablePrefabs(prefabs);
         }
 
+        QVector<MirrorChannel::EntityEntry> targets;
+        if (_channel->pollTargetCandidates(targets))
+        {
+            _mirrorTargets.clear();
+            _mirrorTargets.reserve(targets.size());
+            for (const MirrorChannel::EntityEntry& t : std::as_const(targets))
+            {
+                _mirrorTargets.append({ t.id, t.label });
+            }
+        }
+
         // With no entity selected (e.g. a required-component filter emptied the list),
         // drain the value feed still in flight for the old entity instead of applying
         // it, so it can't land on the next selection.
@@ -1377,8 +1417,10 @@ namespace rpe
         // Offer every catalogued component the entity does not already have. Both
         // the catalog and the entity's current components are full scoped paths, so
         // compare directly (tags check the tag rows, data the data rows).
+        // (The picker itself also leaves out what the entity has, by flecs id —
+        // that covers pairs, and direct mode, where these name sets stay empty.)
         QVector<MirrorChannel::CatalogEntry> addable;
-        for (const MirrorChannel::CatalogEntry& entry : _catalog)
+        for (MirrorChannel::CatalogEntry entry : _catalog)
         {
             if (_isHiddenFromAdd(entry.path))
             {
@@ -1386,12 +1428,50 @@ namespace rpe
             }
             const bool present = entry.tag ? _currentTags.contains(entry.path)
                                            : _currentComps.contains(entry.path);
-            if (!present)
+            if (present && entry.pair == MirrorChannel::PairUse::None)
             {
-                addable.append(entry);
+                continue;
             }
+            if (present && entry.pair == MirrorChannel::PairUse::Also)
+            {
+                entry.pair = MirrorChannel::PairUse::Only; // still addable as a pair
+            }
+            addable.append(entry);
         }
         _componentList->setAddableEntries(addable);
+    }
+
+    void EntityComponentBrowser::_refreshDirectCatalog()
+    {
+        if (_channel || !_world)
+        {
+            return;
+        }
+        QVector<MirrorChannel::CatalogEntry> catalog;
+        withGuard(_guard, [&] {
+            TypeUseScope scope; // inside the guard: never wait for a release holding it
+            AddCatalogOptions options;
+            options.pairRelations = _settings.pairRelations;
+            catalog = buildAddCatalog(*_world, options);
+        });
+        _catalog = catalog;
+        _updateAddable();
+    }
+
+    QVector<QPair<qulonglong, QString>> EntityComponentBrowser::_targetCandidates() const
+    {
+        if (_channel)
+        {
+            // What the producer published with the catalog (the entity list holds
+            // only entities with components; a target is often a plain entity).
+            return _mirrorTargets.isEmpty() ? _entityList->entries() : _mirrorTargets;
+        }
+        QVector<QPair<qulonglong, QString>> out;
+        if (_world)
+        {
+            withGuard(_guard, [&] { out = namedEntities(*_world); });
+        }
+        return out;
     }
 
     void EntityComponentBrowser::_onAddComponent(const QString& name)
@@ -1414,14 +1494,46 @@ namespace rpe
         {
             // Direct mode: apply under the world guard (the GUI owns the world here).
             withGuard(_guard, [&] {
-                flecs::entity comp = findComponentEntity(*_world, name);
-                if (comp.is_valid() && _selectedEntity.is_alive())
+                // Tags too (they have no bridge), but nothing flecs would refuse to
+                // take by itself (a Relationship / Target).
+                flecs::entity comp = findComponentEntity(*_world, name, /*bridgedOnly=*/false);
+                if (comp.is_valid() && _selectedEntity.is_alive() && plainAddRejection(*_world, comp).isEmpty())
                 {
                     _selectedEntity.add(comp);
                 }
             });
             _componentList->setEntity(_world, _selectedEntity);
             _rebuildGroups(); // the grouped view follows added / removed components
+        }
+    }
+
+    void EntityComponentBrowser::_onAddPair(qulonglong relation, qulonglong target, const QString& targetPath)
+    {
+        const bool haveEntity = _channel ? _mirrorEntity != 0 : _selectedEntity.is_alive();
+        if (!haveEntity || relation == 0 || (target == 0 && targetPath.trimmed().isEmpty()))
+        {
+            return;
+        }
+        if (_channel)
+        {
+            // Checked and applied on the simulation thread (flecs' trait rules, a
+            // target that died meanwhile).
+            _channel->queueAddPair(_mirrorEntity, relation, target, target != 0 ? QString() : targetPath);
+            _channel->requestResync();
+        }
+        else if (_world)
+        {
+            QString why;
+            withGuard(_guard, [&] {
+                addPairChecked(*_world, _selectedEntity, static_cast<flecs::entity_t>(relation),
+                               static_cast<flecs::entity_t>(target), targetPath, &why);
+            });
+            if (!why.isEmpty())
+            {
+                qWarning("rpe: pair not added: %s", qPrintable(why));
+            }
+            _componentList->setEntity(_world, _selectedEntity);
+            _rebuildGroups();
         }
     }
 

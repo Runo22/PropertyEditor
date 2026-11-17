@@ -11,6 +11,9 @@
 #include "rpe/ecs/flecs_prelude.h"
 
 #include <QIcon>
+#include <QHash>
+#include <QPointer>
+#include <QSet>
 
 #include <functional>
 
@@ -18,6 +21,8 @@ class QListWidget;
 class QListWidgetItem;
 class QLineEdit;
 class QToolButton;
+class QTreeWidget;
+class QTreeWidgetItem;
 class QStyledItemDelegate;
 class QEvent;
 class QPoint;
@@ -113,7 +118,16 @@ namespace rpe
         // minus the components already on the entity). Entries flagged as tags are
         // rendered dimmed/italic in the picker.
         void setAddableComponents(const QStringList& names);
+        // Catalog entries. RELATIONSHIPS (entry.pair != None) are offered under a
+        // "Relationships" branch: each lists its suggested targets plus "Other
+        // target…", which asks for any entity (setTargetCandidatesProvider) or a
+        // typed path. What the entity already has is left out (by flecs id). If the
+        // picker is open, it updates in place.
         void setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries);
+        // The entities "Other target…" offers, as (id, label) — asked for when that
+        // step opens.
+        using TargetCandidates = QVector<QPair<qulonglong, QString>>;
+        void setTargetCandidatesProvider(std::function<TargetCandidates()> provider);
 
         // Extra right-click menu entries. The callback receives the clicked row's
         // selection key and its flecs id; the browser wraps them to add the entity.
@@ -139,6 +153,8 @@ namespace rpe
         void removeComponentRequested(const QString& name);
         // By flecs id — emitted for rows that carry one (tags, pairs; mirror rows).
         void removeComponentIdRequested(qulonglong rawId);
+        // Add the pair (relation, target). target 0 → `targetPath` was typed.
+        void addPairRequested(qulonglong relation, qulonglong target, const QString& targetPath);
         // The Add picker is about to open (the pointer reached the Add button, or
         // it was clicked): a good moment for the producer to refresh what it offers.
         void addPickerWanted();
@@ -172,6 +188,22 @@ namespace rpe
         int _releaseHandle = 0; // rpe/core/TypeRelease.h
         QVector<MirrorChannel::ComponentRow> _mirrorRows; // last externally-fed set (dedup)
         QVector<MirrorChannel::CatalogEntry> _addable;    // "+" picker entries
+        // The open Add picker (null when closed) and its step: 0 = components, else
+        // the relationship whose target is being chosen.
+        QPointer<QWidget> _addPopup;
+        QPointer<QTreeWidget> _addTree;
+        QPointer<QLineEdit> _addSearch;
+        qulonglong _addTargetRel = 0;
+        std::function<TargetCandidates()> _targetProvider;
+        void _fillAddTree();
+        void _fillTargetStep();
+        void _filterAddTree();
+        void _activateAddItem(QTreeWidgetItem* item);
+        void _setAddStep(qulonglong relation);
+        // flecs ids of what the listed entity has (rows' ids), and per relationship
+        // (low 32 bits) the targets it has now, as shown.
+        QSet<qulonglong> _presentIds() const;
+        QHash<quint32, QString> _presentTargets() const;
         QVector<MenuAction> _contextActions;
         std::function<void(const QString&, qulonglong, QMenu&)> _menuHook;
         bool _editingEnabled = false;
