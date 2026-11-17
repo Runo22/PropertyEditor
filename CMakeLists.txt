@@ -226,6 +226,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
     add_executable(rpe_named_element_test test/named_element_test.cpp)
     target_link_libraries(rpe_named_element_test PRIVATE rpe_gui)
 
+    add_executable(rpe_decimal_input_test test/decimal_input_test.cpp)
+    target_link_libraries(rpe_decimal_input_test PRIVATE rpe_gui)
+
     add_executable(rpe_plugin_unload_test test/plugin_unload_test.cpp)
     target_link_libraries(rpe_plugin_unload_test PRIVATE rpe_gui)
 

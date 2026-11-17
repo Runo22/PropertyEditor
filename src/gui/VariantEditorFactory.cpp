@@ -149,7 +149,7 @@ namespace rpe::varedit
         // chrono duration → integer spin with the unit as suffix ("250 ms").
         if (TypeRenderer::isChronoDuration(t))
         {
-            auto* sb = new QDoubleSpinBox(parent);
+            auto* sb = new DecimalSpinBox(parent);
             sb->setDecimals(0);
             sb->setRange(-9e15, 9e15);
             sb->setSingleStep(hints.step.value_or(1));
@@ -204,13 +204,14 @@ namespace rpe::varedit
             {
                 cb->addItem(QString::fromUtf8(n.data(), static_cast<int>(n.size())));
             }
+            polishChoiceList(cb);
             return cb;
         }
 
         // floating point
         if (isFloatType(t))
         {
-            auto* sb = new QDoubleSpinBox(parent);
+            auto* sb = new DecimalSpinBox(parent);
             sb->setDecimals(hints.decimals.value_or(4));
             sb->setRange(hints.min.value_or(-1e15), hints.max.value_or(1e15));
             sb->setSingleStep(hints.step.value_or(0.1));

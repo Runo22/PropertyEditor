@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QList>
 #include <QPair>
 #include <QString>
@@ -19,6 +20,30 @@ class QStandardItemModel;
 
 namespace rpe
 {
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  DecimalSpinBox — the editors' floating-point box. Always "." as the decimal
+    //  point, the way the grid shows numbers, whatever the system locale — and a
+    //  typed "," is taken as one too: "0,5" and "0.5" are both a half. A stock
+    //  QDoubleSpinBox follows the locale, so on a Turkish / German / … system it
+    //  rejected the "." in "0.5" (leaving "05" = 5) while the grid showed "0.5".
+    // ─────────────────────────────────────────────────────────────────────────────
+    class DecimalSpinBox : public QDoubleSpinBox
+    {
+    public:
+        explicit DecimalSpinBox(QWidget* parent = nullptr);
+
+    protected:
+        QValidator::State validate(QString& text, int& pos) const override;
+        double valueFromText(const QString& text) const override;
+    };
+
+    // Make a combo box's list read as a list, in any style: each choice a list row
+    // (the style's / style sheet's item look, with the current choice highlighted —
+    // some styles otherwise use a menu look with separators and no current mark),
+    // at least as wide as its longest choice, scrolling after 12. Call after the
+    // items are added (FlagsEditor and the enum editor do).
+    void polishChoiceList(QComboBox* combo);
 
     // ─────────────────────────────────────────────────────────────────────────────
     //  FilePathEditor — line edit + "…" button. Used for file/dir path properties

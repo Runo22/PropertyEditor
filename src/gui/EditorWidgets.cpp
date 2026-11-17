@@ -8,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
+#include <QLocale>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -20,6 +21,7 @@
 #include <QSpinBox>
 #include <QStandardItemModel>
 #include <QStyle>
+#include <QStyledItemDelegate>
 #include <QToolButton>
 
 #include <cmath>
@@ -320,6 +322,43 @@ namespace rpe
         constexpr int kFlagBitsRole = Qt::UserRole + 1; // qint64 bit value per row
     }
 
+    DecimalSpinBox::DecimalSpinBox(QWidget* parent)
+        : QDoubleSpinBox(parent)
+    {
+        QLocale c = QLocale::c();
+        c.setNumberOptions(QLocale::OmitGroupSeparator | QLocale::RejectGroupSeparator);
+        setLocale(c); // "." — the grid's own number format
+    }
+
+    QValidator::State DecimalSpinBox::validate(QString& text, int& pos) const
+    {
+        // "," is a decimal point too (what a ","-locale keyboard types). The C
+        // locale would otherwise read it as a thousands separator: "0,5" → 5.
+        text.replace(QLatin1Char(','), QLatin1Char('.'));
+        return QDoubleSpinBox::validate(text, pos);
+    }
+
+    double DecimalSpinBox::valueFromText(const QString& text) const
+    {
+        QString t = text;
+        t.replace(QLatin1Char(','), QLatin1Char('.'));
+        return QDoubleSpinBox::valueFromText(t);
+    }
+
+    void polishChoiceList(QComboBox* combo)
+    {
+        if (!combo)
+        {
+            return;
+        }
+        combo->setItemDelegate(new QStyledItemDelegate(combo));
+        combo->setMaxVisibleItems(12);
+        QAbstractItemView* list = combo->view();
+        list->setTextElideMode(Qt::ElideRight);
+        // Never narrower than its longest choice (the cell can be narrower).
+        list->setMinimumWidth(list->sizeHintForColumn(0) + 2 * list->frameWidth() + 24);
+    }
+
     FlagsEditor::FlagsEditor(QWidget* parent)
         : QComboBox(parent)
     {
@@ -351,6 +390,7 @@ namespace rpe
             _model->appendRow(item);
         }
         _guard = false;
+        polishChoiceList(this);
         _refreshText();
     }
 
@@ -581,7 +621,7 @@ namespace rpe
             }
             else
             {
-                auto* sb = new QDoubleSpinBox(this);
+                auto* sb = new DecimalSpinBox(this);
                 sb->setDecimals(f.decimals);
                 sb->setRange(f.min, f.max);
                 sb->setSingleStep(f.step > 0 ? f.step : 0.1);

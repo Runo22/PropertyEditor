@@ -33,6 +33,49 @@ QLineEdit {
 }
 QLineEdit:focus { border: 1px solid #2f6fed; }
 
+/* ── combo boxes (the enum editor, the flags editor) ──────────────────── */
+QComboBox {
+    background: #1b1e20;
+    border: 1px solid #3a3f44;
+    border-radius: 6px;
+    padding: 3px 24px 3px 8px;
+    combobox-popup: 0; /* a list UNDER the box (every base style), not a menu over it */
+}
+QComboBox:hover { border: 1px solid #4a5056; }
+QComboBox:focus,
+QComboBox:on { border: 1px solid #2f6fed; }
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 20px;
+    border: none;
+    background: transparent;
+}
+QComboBox::down-arrow {
+    image: url(:/rpe/icons/chevron_down.png);
+    width: 10px;
+    height: 10px;
+}
+QComboBox QAbstractItemView {
+    background: #1b1e20;
+    color: #d6d9dd;
+    border: 1px solid #3a3f44;
+    padding: 3px;
+    outline: 0;
+    selection-background-color: #2f6fed;
+    selection-color: #ffffff;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 22px;
+    padding: 0px 8px;
+    border-radius: 4px;
+}
+QComboBox QAbstractItemView::item:hover { background: rgba(255, 255, 255, 0.06); }
+QComboBox QAbstractItemView::item:selected {
+    background: #2f6fed;
+    color: #ffffff;
+}
+
 /* ── entity + component lists ─────────────────────────────────────────── */
 QListWidget {
     background: #1b1e20;
@@ -85,6 +128,7 @@ QTreeView QPlainTextEdit {
     border-radius: 0;
     padding: 0px 2px;
 }
+QTreeView QComboBox { padding: 0px 22px 0px 4px; } /* room for the arrow */
 QHeaderView::section {
     background: #2a2e32;
     color: #b8bdc4;
