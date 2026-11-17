@@ -10,8 +10,9 @@
 //  mutating an RTTR object graph by a dot-separated path.
 //
 //  Path grammar:   segment ('.' segment)*
-//    segment   :=  <property-name> | '[' <index> ']'
-//    e.g.        "position.x", "forces.[2]", "bones.[0].rotation.y"
+//    segment   :=  <property-name> | '[' <index or key> ']' | '{' <name> '}'
+//    e.g.        "position.x", "forces.[2]", "bones.[0].rotation.y",
+//                "stats.{armor}.value"  (a named element — rpe/core/NamedElement.h)
 //
 //  Write-back (setValueByPath) correctly handles value-type sub-objects by
 //  reading the sub-object, mutating the copy, and writing it back up the chain —

@@ -1,5 +1,6 @@
 #include "rpe/core/RttrBridge.h"
 #include "rpe/core/FlagsSupport.h"
+#include "rpe/core/NamedElement.h"
 #include "rpe/core/OptionalSupport.h"
 #include "rpe/core/TypeRenderer.h"
 
@@ -30,6 +31,20 @@ namespace rpe::bridge
             return false;
         }
         outInner = seg.mid(1, seg.size() - 2);
+        return true;
+    }
+
+    // "{name}" path segment on an array of named elements (rpe/core/NamedElement.h):
+    // the first element with that name, given as its index ("-1" when there's none,
+    // which the index check then refuses).
+    static bool namedSegmentIndex(const rttr::variant& container, const QString& seg, QString& outIndex)
+    {
+        if (seg.size() < 3 || !seg.startsWith(QLatin1Char('{')) || !seg.endsWith(QLatin1Char('}'))
+            || !container.is_sequential_container())
+        {
+            return false;
+        }
+        outIndex = QString::number(findNamedElement(container, seg.mid(1, seg.size() - 2)));
         return true;
     }
 
@@ -265,7 +280,7 @@ namespace rpe::bridge
         const bool isLast = (i == segs.size() - 1);
 
         QString bracket;
-        if (isBracketSegment(seg, bracket))
+        if (isBracketSegment(seg, bracket) || namedSegmentIndex(obj, seg, bracket))
         {
             if (obj.is_sequential_container())
             {
@@ -414,7 +429,7 @@ namespace rpe::bridge
         {
             const QString& seg = segs[i];
             QString bracket;
-            if (isBracketSegment(seg, bracket))
+            if (isBracketSegment(seg, bracket) || namedSegmentIndex(cur, seg, bracket))
             {
                 if (cur.is_sequential_container())
                 {

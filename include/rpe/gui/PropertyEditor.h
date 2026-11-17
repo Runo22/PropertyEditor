@@ -44,6 +44,9 @@ namespace rpe
         void unbind();
         void refresh(const rttr::instance& obj);
         void setPropertyValue(const QString& path, rttr::variant val);
+        // With the names of the named-element arrays in it as text (see
+        // PropertyModel::setPropertyValue).
+        void setPropertyValue(const QString& path, rttr::variant val, const QHash<QString, QStringList>& names);
 
         // ── Behaviour ────────────────────────────────────────────────────────────
         void setReadOnly(bool ro);

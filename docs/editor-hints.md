@@ -30,6 +30,7 @@ RTTR_REGISTRATION
 - [`rpe::editor::*` values](#rpeeditor-values)
 - [Editors by type](#editors-by-type)
 - [Quick-edit helpers](#quick-edit-helpers) — inline vector row, drag to scrub, colour swatch
+- [Named elements](#named-elements) — an array of name/value structs shown by name
 - [Read-only values](#read-only-values)
 - [Why the constants, and never strings](#why-the-constants-and-never-strings)
 - [Edge cases](#edge-cases)
@@ -47,6 +48,7 @@ RTTR_REGISTRATION
 | `rpe::hint::Tooltip` | string | any property | tooltip on the row |
 | `rpe::hint::ReadOnly` | `bool` | a **property**, or a **class** | never opens an editor — see [Read-only values](#read-only-values) |
 | `rpe::hint::Flags` | `bool` | an enum property | treat it as a bitmask: `Fire \| Poison` display, multi-check editor. **Editing** also needs `RPE_REGISTER_FLAGS(E);` |
+| `rpe::hint::ElementLabel` / `ElementValue` | a field's name | a **class** used as an array element | show the array by name — see [Named elements](#named-elements) |
 
 Enums are never auto-detected as flags — a plain enum whose values happen to be
 powers of two would be misread — so `Flags` is the opt-in. Display works with the
@@ -137,6 +139,65 @@ Each step is a normal edit: under `LocalEdit` the row becomes a draft, under
 
 A `QColor` value, and a **string** with `editor::Color`, show a swatch of the
 colour in the value cell (a string that isn't a valid colour shows none).
+
+## Named elements
+
+An array whose elements are a **name and a value** — a template struct you use
+with several types — can show one row per element, **labelled by the name**,
+with the value edited on that row:
+
+```cpp
+template <class N, class V> struct Stat { N name; V value; };
+struct Character { std::vector<Stat<std::string, float>> stats; }; // speed, armor, …
+```
+
+| without | with |
+|---|---|
+| `stats ▸ [1] ▸ name = armor` / `stats ▸ [1] ▸ value = 7` | `stats ▸ armor = 7` |
+
+Mark the element type any of these ways — the runtime ones win over the metadata:
+
+```cpp
+// 1. Class metadata, where you register it
+registration::class_<Stat<std::string, float>>("Stat<std::string,float>")(
+        metadata(rpe::hint::ElementLabel, "name"),
+        metadata(rpe::hint::ElementValue, "value"))
+    .property("name", &Stat<std::string, float>::name)
+    .property("value", &Stat<std::string, float>::value);
+
+// 2. At runtime, one type (or by its name: setNamedElement("Stat<std::string,float>", …))
+rpe::TypeBridge::setNamedElement<Stat<std::string, float>>("name", "value");
+
+// 3. At runtime, EVERY instantiation of the template — including ones a plugin
+//    registers later. Matched by the registered name ("Stat<…>", or "game::Stat<…>"
+//    for "Stat"), so register them under names that start with the template's.
+rpe::TypeBridge::setNamedElementTemplate("Stat", "name", "value");
+
+// Off for one type (whatever the metadata or the template say):
+rpe::TypeBridge::setNamedElement<Stat<int, int>>("");
+```
+
+- **The name can be any type with a text:** `std::string`, `std::string_view`,
+  `const char*`, `QString`, an enum (its enumerator's name), a number, a getter.
+  It's shown, **never edited** (it's read-only everywhere, the mirror included).
+- **The value** is edited on the row with its usual editor and hints. Without
+  `ElementValue` — or when the value is itself a struct — the row is labelled by
+  the name and expands to the fields. Any other fields are rows below it.
+- **Search and the filter** find an element by its name or its value, as one row.
+- **Pins follow the element by name.** A pin made on a named row is kept as
+  `stats.{armor}.value` and shown as `Character.stats.armor`; reorder or resize
+  the array and it still shows `armor`'s value (`—` while there's no `armor`).
+  Paths accept `{name}` anywhere: `getValueByPath(obj, "stats.{armor}.value")`.
+  Two elements with the same name, or a name containing `.` or `}`, are pinned
+  by index instead.
+- **Mirror mode** reads the names on the simulation thread and sends them as
+  text: a `string_view` / `const char*` name points into the simulation's
+  memory, which the GUI never reads.
+- Applies to **sequential** containers (`std::vector`, `std::array`, `std::list`,
+  …). A single struct of a marked type, not in an array, shows as usual.
+- **Marking at runtime takes effect on screen** — open grids lay their arrays out
+  again (the browser on its next poll; a bare `PropertyEditor` on its next
+  refresh / value, or call `model()->syncNamedElements()`).
 
 ## Read-only values
 

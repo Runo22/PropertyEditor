@@ -1,6 +1,7 @@
 #include "rpe/core/PropertySearch.h"
 
 #include "rpe/core/EditorHints.h"
+#include "rpe/core/NamedElement.h"
 #include "rpe/core/TypeRenderer.h"
 
 namespace rpe
@@ -109,13 +110,15 @@ namespace rpe
                     {
                         return 0; // numbers can't contain this text
                     }
+                    // Named elements (rpe/core/NamedElement.h): one row per element.
+                    const NamedElement ne = namedElement(view.get_value_type());
                     for (const rttr::variant& item : view)
                     {
                         if (++seen > limits.maxElements || ++rows > limits.maxRows)
                         {
                             break;
                         }
-                        n += countElement(item, depth + 1);
+                        n += ne.isValid() ? countNamed(ne, item, depth + 1) : countElement(item, depth + 1);
                     }
                     return n;
                 }
@@ -147,27 +150,70 @@ namespace rpe
                         {
                             break;
                         }
-                        const bool nameHit = has(displayName(p));
-                        const rttr::type pt = TypeRenderer::rawType(p.get_type());
-                        if (TypeRenderer::isExpandable(pt) || pt.is_sequential_container() || pt.is_associative_container())
-                        {
-                            n += (nameHit ? 1 : 0) + countInside(p.get_value(obj), depth + 1);
-                            continue;
-                        }
-                        if (nameHit)
-                        {
-                            ++n;
-                            continue;
-                        }
-                        if (!numeric && isNumber(pt))
-                        {
-                            continue;
-                        }
-                        n += valueMatches(p, p.get_value(obj)) ? 1 : 0;
+                        n += countField(p, obj, depth);
                     }
                     return n;
                 }
                 return 0;
+            }
+
+            // A field of a struct inside a container: its own row (by name or
+            // value) or, if it expands, its name's row plus the rows below.
+            int countField(const rttr::property& p, const rttr::instance& obj, int depth)
+            {
+                const bool nameHit = has(displayName(p));
+                const rttr::type pt = TypeRenderer::rawType(p.get_type());
+                if (expandsType(pt))
+                {
+                    return (nameHit ? 1 : 0) + countInside(p.get_value(obj), depth + 1);
+                }
+                if (nameHit)
+                {
+                    return 1;
+                }
+                if (!numeric && isNumber(pt))
+                {
+                    return 0;
+                }
+                return valueMatches(p, p.get_value(obj)) ? 1 : 0;
+            }
+
+            // A named element is ONE row — its name, with its value when that is a
+            // plain value — matching by either; its other fields are rows below it.
+            int countNamed(const NamedElement& ne, const rttr::variant& item, int depth)
+            {
+                if (depth > limits.maxDepth)
+                {
+                    return 0;
+                }
+                const rttr::variant v = TypeRenderer::unwrap(unwrapped(item));
+                if (!v.is_valid())
+                {
+                    return 0;
+                }
+                const rttr::instance obj(v);
+                const rttr::type vt = ne.value.is_valid() ? TypeRenderer::rawType(ne.value.get_type()) : rttr::type::get<void>();
+                const bool valueOnRow = ne.value.is_valid() && !expandsType(vt);
+                bool row = has(TypeRenderer::toDisplayString(ne.label.get_value(obj)));
+                if (!row && valueOnRow && (numeric || !isNumber(vt)))
+                {
+                    row = valueMatches(ne.value, ne.value.get_value(obj));
+                }
+                int n = row ? 1 : 0;
+                for (const rttr::property& p : TypeRenderer::rawType(v.get_type()).get_properties())
+                {
+                    if (p == ne.label || (valueOnRow && p == ne.value) || ++rows > limits.maxRows)
+                    {
+                        continue;
+                    }
+                    n += countField(p, obj, depth);
+                }
+                return n;
+            }
+
+            static bool expandsType(rttr::type t)
+            {
+                return TypeRenderer::isExpandable(t) || t.is_sequential_container() || t.is_associative_container();
             }
 
             static bool expands(const rttr::variant& v)

@@ -354,6 +354,44 @@ namespace rpe
         // (Separate from registryGeneration: locking a type changes no resolution.)
         static uint64_t readOnlyGeneration();
 
+        // ── Named elements ───────────────────────────────────────────────────────
+        // Show a struct used as an ARRAY ELEMENT by its name: one row per element,
+        // labelled by the `labelField`'s value (any type — a string, string_view,
+        // const char*, enum, number…), with the `valueField` edited on that row
+        // (empty: no value field — the row expands to the fields). Search finds an
+        // element by its name, and a pin made on one follows it by name. Names are
+        // shown, never edited.
+        //
+        // The RTTR-side equivalent is class metadata (rpe::hint::ElementLabel /
+        // ElementValue). What's set here wins over the metadata; an empty
+        // `labelField` turns it OFF for that type (whatever the metadata says).
+        static void setNamedElement(rttr::type t, const std::string& labelField, const std::string& valueField = {});
+        template <class T>
+        static void setNamedElement(const std::string& labelField, const std::string& valueField = {})
+        {
+            setNamedElement(rttr::type::get<T>(), labelField, valueField);
+        }
+        // By the type's name ("game::Stat"), matched like setReadOnly's.
+        static void setNamedElement(std::string_view typeName, const std::string& labelField,
+                                    const std::string& valueField = {});
+        // Every instantiation of a class template: "NV" (or "game::NV") covers
+        // NV<std::string, float>, NV<StatKind, int>, … — including ones a plugin
+        // registers later. Matched by the type's registered name ("NV<…>"), so
+        // register them under names that start with the template's name. A per-type
+        // setting wins over this; an empty `labelField` removes it.
+        static void setNamedElementTemplate(std::string_view templateName, const std::string& labelField,
+                                            const std::string& valueField = {});
+        // The field names for `t` (runtime per type, then per template, then the
+        // metadata); empty `label` when it isn't a named element. Cached.
+        struct NamedElementFields
+        {
+            std::string label;
+            std::string value;
+        };
+        static NamedElementFields namedElementFields(rttr::type t);
+        // Bumped on every setNamedElement* change.
+        static uint64_t namedElementGeneration();
+
         // Monotonic counter bumped by every registration change (registerEntry,
         // registerAlias, unregisterType). Lets a consumer cache derived data (e.g.
         // "which flecs components are bridged") and rebuild only when this moves —

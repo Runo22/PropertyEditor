@@ -1,5 +1,6 @@
 #include "rpe/ecs/PinnedPropertiesWidget.h"
 
+#include "rpe/core/NamedElement.h"
 #include "rpe/core/ReadOnly.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/core/TypeRenderer.h"
@@ -396,7 +397,12 @@ namespace rpe
         _updating = true;
         auto* item = new QTreeWidgetItem(_tree);
         item->setText(0, entityLabel);
-        item->setText(1, QStringLiteral("%1.%2").arg(compLeaf, path));
+        {
+            // A named element by its name: "stats.{armor}.value" shows "stats.armor".
+            TypeUseScope scope;
+            const rttr::type root = rawId != 0 ? rttr::type::get<void>() : TypeBridge::resolveByName(component.toUtf8().constData());
+            item->setText(1, QStringLiteral("%1.%2").arg(compLeaf, root.is_valid() ? displayPath(root, path) : path));
+        }
         const QString full = QStringLiteral("#%1  %2.%3").arg(entity).arg(component, path);
         item->setToolTip(0, full);
         item->setToolTip(1, full);
@@ -534,8 +540,17 @@ namespace rpe
                 {
                     _markWhole(it, u.value.get_type());
                 }
-                it->setText(kValueColumn, it->data(0, PinWholeRole).toBool() ? TypeRenderer::summaryString(u.value)
-                                                                             : TypeRenderer::toDisplayString(u.value));
+                // The text made on the simulation thread when it came with one: a
+                // string_view in the copy points into that thread's memory.
+                if (!u.text.isEmpty())
+                {
+                    it->setText(kValueColumn, u.text);
+                }
+                else
+                {
+                    it->setText(kValueColumn, it->data(0, PinWholeRole).toBool() ? TypeRenderer::summaryString(u.value)
+                                                                                 : TypeRenderer::toDisplayString(u.value));
+                }
                 _lastValues.insert(it, u.value); // under pollNow's read section
             }
         }

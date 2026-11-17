@@ -741,7 +741,7 @@ namespace rpe
                 searchProperties(rttr::instance(access), ci.rttrType, _searchText, found);
                 for (PropertyHit& h : found)
                 {
-                    hits.push_back({ kc.first, std::move(h.path), std::move(h.value), h.matches });
+                    hits.push_back({ kc.first, std::move(h.path), std::move(h.value), h.matches, {} });
                 }
             }
         });
@@ -766,7 +766,12 @@ namespace rpe
             if (_groupKeys.contains(h.component))
             {
                 const QString gp = PropertyModel::groupPath(h.component, h.path);
-                _propertyEditor->setPropertyValue(gp, h.value);
+                QHash<QString, QStringList> names; // the hit's named arrays, at their grouped paths
+                for (auto it = h.names.cbegin(); it != h.names.cend(); ++it)
+                {
+                    names.insert(PropertyModel::groupPath(h.component, it.key()), it.value());
+                }
+                _propertyEditor->setPropertyValue(gp, h.value, names);
                 now.insert(gp);
             }
         }
@@ -1350,7 +1355,7 @@ namespace rpe
                 {
                     continue;
                 }
-                _propertyEditor->setPropertyValue(u.path, u.value);
+                _propertyEditor->setPropertyValue(u.path, u.value, u.names);
             }
         }
         else
@@ -1370,6 +1375,9 @@ namespace rpe
             }
         }
 
+        // A type marked as a named element meanwhile: reshape the rows (a value may
+        // not come to trigger it — nothing changed in the world).
+        _propertyEditor->model()->syncNamedElements();
         // Re-send interest each tick so newly expanded fields start mirroring.
         _pushInterest();
     }

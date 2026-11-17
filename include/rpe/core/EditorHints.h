@@ -80,6 +80,19 @@ namespace rpe::hint
     // 0.9.6 cannot build an enum from an integer without the compile-time type.
     inline constexpr Key Flags = makeKey("rpe.flags");
 
+    // NAMED ELEMENTS — CLASS metadata on a struct used as an array element whose
+    // fields are a name and a value (value: the field's name, const char* or
+    // std::string):
+    //     class_<Stat>("Stat")(metadata(rpe::hint::ElementLabel, "name"),
+    //                          metadata(rpe::hint::ElementValue, "value"))
+    // An array of them then shows one row per element, labelled by its name, with
+    // the value edited on that row; search and pins find an element by its name.
+    // ElementValue is optional (without it the row expands to the fields). The
+    // runtime equivalent, also for a whole template: TypeBridge::setNamedElement /
+    // setNamedElementTemplate. See rpe/core/NamedElement.h.
+    inline constexpr Key ElementLabel = makeKey("rpe.elementLabel");
+    inline constexpr Key ElementValue = makeKey("rpe.elementValue");
+
 } // namespace rpe::hint
 
 namespace rpe::editor

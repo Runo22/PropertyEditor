@@ -1,5 +1,6 @@
 #include "rpe/ecs/EcsMirror.h"
 
+#include "rpe/core/NamedElement.h"
 #include "rpe/core/PropertySearch.h"
 #include "rpe/core/ReadOnly.h"
 #include "rpe/core/RttrBridge.h"
@@ -580,7 +581,9 @@ namespace rpe
                     searchProperties(rttr::instance(access), c.type, _search.text, found);
                     for (PropertyHit& h : found)
                     {
-                        _search.hits.push_back({ c.key, std::move(h.path), std::move(h.value), h.matches });
+                        QHash<QString, QStringList> names; // as text, read here (see NamedElement.h)
+                        collectNamedLabels(h.value, h.path, names);
+                        _search.hits.push_back({ c.key, std::move(h.path), std::move(h.value), h.matches, std::move(names) });
                     }
                 }
             }
@@ -1517,7 +1520,7 @@ namespace rpe
                     if (_lastPinStr.value(kk) != kPinMissing)
                     {
                         _lastPinStr.insert(kk, kPinMissing);
-                        pinUpdates.push_back({ k, rttr::variant(), true });
+                        pinUpdates.push_back({ k, rttr::variant(), true, QString() });
                     }
                     continue;
                 }
@@ -1528,7 +1531,7 @@ namespace rpe
                     continue;
                 }
                 _lastPinStr.insert(kk, s);
-                pinUpdates.push_back({ k, std::move(val), false });
+                pinUpdates.push_back({ k, std::move(val), false, s }); // the text made here, not from the copy
             }
             if (!pinUpdates.empty())
             {
@@ -1739,7 +1742,16 @@ namespace rpe
                 continue;
             }
             _lastValueStr.insert(p, s);
-            updates.push_back({ p, std::move(val), entity, component });
+            // Named elements (rpe/core/NamedElement.h): a name read alone goes as text
+            // when it's a view into this thread's memory, and the names inside an
+            // array / struct go along as text.
+            if (isNamedLabelPath(t, p))
+            {
+                val = ownedText(val);
+            }
+            QHash<QString, QStringList> names;
+            collectNamedLabels(val, p, names);
+            updates.push_back({ p, std::move(val), entity, component, std::move(names) });
         }
         if (!updates.empty())
         {

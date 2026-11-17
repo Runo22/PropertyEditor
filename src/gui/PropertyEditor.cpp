@@ -553,6 +553,11 @@ namespace rpe
         _model->setPropertyValue(p, std::move(v));
     }
 
+    void PropertyEditor::setPropertyValue(const QString& p, rttr::variant v, const QHash<QString, QStringList>& names)
+    {
+        _model->setPropertyValue(p, std::move(v), names);
+    }
+
     // ── behaviour ─────────────────────────────────────────────────────────────────
 
     void PropertyEditor::setReadOnly(bool ro)
@@ -636,6 +641,11 @@ namespace rpe
                         if (!idx.data(IsArrayRole).toBool())
                             out.append(idx.data(PropertyPathRole).toString());
                     }
+                    // A named element's name too: a reorder changes it in place.
+                    if (const QString label = idx.data(RowLabelPathRole).toString(); !label.isEmpty())
+                    {
+                        out.append(label);
+                    }
                     else
                     {
                         stack.append(idx);
@@ -658,6 +668,10 @@ namespace rpe
         {
             const QModelIndex idx = stack.takeLast();
             const int rows = _proxy->rowCount(idx);
+            if (const QString label = idx.data(RowLabelPathRole).toString(); !label.isEmpty())
+            {
+                out.append(label); // a named element's name: a reorder changes it in place
+            }
             if (rows == 0)
             {
                 out.append(idx.data(PropertyPathRole).toString());
@@ -1041,13 +1055,17 @@ namespace rpe
         // as a summary).
         if (_pinningEnabled && !srcIdx.data(IsGroupRole).toBool())
         {
-            if (!_model->isPinnedPath(path))
+            // A named element is pinned by its NAME, so the pin follows it when the
+            // array is reordered or resized (rpe/core/NamedElement.h).
+            const QString pinPath = srcIdx.data(StablePathRole).toString();
+            if (!_model->isPinnedPath(pinPath) && !_model->isPinnedPath(path))
             {
-                connect(menu.addAction(tr("Pin to watch list")), &QAction::triggered, this, [this, path] { emit pinRequested(path); });
+                connect(menu.addAction(tr("Pin to watch list")), &QAction::triggered, this, [this, pinPath] { emit pinRequested(pinPath); });
             }
             else
             {
-                connect(menu.addAction(tr("Unpin from watch list")), &QAction::triggered, this, [this, path] { emit unpinRequested(path); });
+                const QString pinned = _model->isPinnedPath(pinPath) ? pinPath : path;
+                connect(menu.addAction(tr("Unpin from watch list")), &QAction::triggered, this, [this, pinned] { emit unpinRequested(pinned); });
             }
             menu.addSeparator();
         }

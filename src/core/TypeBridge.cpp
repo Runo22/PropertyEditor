@@ -1,4 +1,5 @@
 #include "rpe/core/TypeBridge.h"
+#include "rpe/core/EditorHints.h"
 #include "rpe/core/TypeRelease.h"
 
 #include <algorithm>
@@ -56,6 +57,22 @@ namespace rpe
             std::unordered_set<rttr::type::type_id> readOnlyIds;
             std::unordered_set<std::string> readOnlyNames;
             std::atomic<uint64_t> readOnlyGeneration { 0 };
+
+            // Named elements (see setNamedElement). Per type by id — dropped on any
+            // unregister, as an id is an address a reloaded module may reuse — and
+            // by name, which stays; per template by name. An empty label is "off".
+            // The cache (by id) holds the resolved answer, metadata included, and
+            // is cleared on every change here and on every unregister.
+            struct NamedById
+            {
+                TypeBridge::NamedElementFields fields;
+                std::string name; // the type's name key, so a by-name setting can replace it
+            };
+            std::unordered_map<rttr::type::type_id, NamedById> namedIds;
+            std::unordered_map<std::string, TypeBridge::NamedElementFields> namedNames;
+            std::unordered_map<std::string, TypeBridge::NamedElementFields> namedTemplates;
+            std::unordered_map<rttr::type::type_id, TypeBridge::NamedElementFields> namedCache;
+            std::atomic<uint64_t> namedGeneration { 0 };
         };
 
         // Bound on the memo: a world has a few thousand component names; anything far
@@ -194,6 +211,10 @@ namespace rpe
             // A type lock by TYPE dies with it (its id is an address RTTR may reuse);
             // a lock by NAME survives and applies to the reloaded type.
             r.readOnlyIds.erase(id);
+            // Named elements by id go (their names stay in namedNames); the cache
+            // holds ids of types that may be gone with this module.
+            r.namedIds.clear();
+            r.namedCache.clear();
             r.resolved.clear();
             r.generation.fetch_add(1, std::memory_order_relaxed);
         }
@@ -500,6 +521,150 @@ namespace rpe
     uint64_t TypeBridge::readOnlyGeneration()
     {
         return registry().readOnlyGeneration.load(std::memory_order_relaxed);
+    }
+
+    namespace
+    {
+        // A metadata value naming a field: const char* or std::string.
+        std::string metaField(const rttr::variant& m)
+        {
+            if (!m.is_valid())
+            {
+                return {};
+            }
+            if (m.get_type() == rttr::type::get<const char*>())
+            {
+                const char* c = m.get_value<const char*>();
+                return c ? std::string(c) : std::string();
+            }
+            bool ok = false;
+            std::string s = m.to_string(&ok);
+            return ok ? s : std::string();
+        }
+
+        // "NV<std::string,float>" → "NV" (separators normalised, spaces trimmed).
+        std::string templateBase(const std::string& normName)
+        {
+            std::string base = normName.substr(0, normName.find('<'));
+            while (!base.empty() && base.back() == ' ')
+            {
+                base.pop_back();
+            }
+            return base;
+        }
+    } // namespace
+
+    void TypeBridge::setNamedElement(rttr::type t, const std::string& labelField, const std::string& valueField)
+    {
+        if (!t.is_valid())
+        {
+            return;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        const NamedElementFields f { labelField, labelField.empty() ? std::string() : valueField };
+        const std::string key = readOnlyKey(t.get_name().to_string());
+        r.namedIds[t.get_id()] = { f, key };
+        r.namedNames[key] = f; // survives a reload
+        r.namedCache.clear();
+        r.namedGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void TypeBridge::setNamedElement(std::string_view typeName, const std::string& labelField, const std::string& valueField)
+    {
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        const std::string key = readOnlyKey(std::string(typeName));
+        const NamedElementFields f { labelField, labelField.empty() ? std::string() : valueField };
+        r.namedNames[key] = f;
+        for (auto& [id, entry] : r.namedIds)
+        {
+            if (entry.name == key)
+            {
+                entry.fields = f; // the latest setting for that type wins, however it was named
+            }
+        }
+        r.namedCache.clear();
+        r.namedGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void TypeBridge::setNamedElementTemplate(std::string_view templateName, const std::string& labelField,
+                                             const std::string& valueField)
+    {
+        const std::string key = templateBase(readOnlyKey(std::string(templateName)));
+        if (key.empty())
+        {
+            return;
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        if (labelField.empty())
+        {
+            r.namedTemplates.erase(key);
+        }
+        else
+        {
+            r.namedTemplates[key] = { labelField, valueField };
+        }
+        r.namedCache.clear();
+        r.namedGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    TypeBridge::NamedElementFields TypeBridge::namedElementFields(rttr::type t)
+    {
+        if (!t.is_valid())
+        {
+            return {};
+        }
+        auto& r = registry();
+        std::lock_guard<std::mutex> lk(r.mutex);
+        if (const auto c = r.namedCache.find(t.get_id()); c != r.namedCache.end())
+        {
+            return c->second;
+        }
+        NamedElementFields out;
+        bool found = false;
+        if (const auto it = r.namedIds.find(t.get_id()); it != r.namedIds.end())
+        {
+            out = it->second.fields;
+            found = true;
+        }
+        if (!found && (!r.namedNames.empty() || !r.namedTemplates.empty()))
+        {
+            const std::string name = readOnlyKey(t.get_name().to_string());
+            if (const auto it = r.namedNames.find(name); it != r.namedNames.end())
+            {
+                out = it->second;
+                found = true;
+            }
+            else if (name.find('<') != std::string::npos)
+            {
+                // A template's instantiation: "NV<…>" or "game::NV<…>" for "NV".
+                const std::string base = templateBase(name);
+                for (const auto& [key, fields] : r.namedTemplates)
+                {
+                    if (base == key || (base.size() > key.size() + 2 && base.compare(base.size() - key.size(), key.size(), key) == 0
+                                        && base.compare(base.size() - key.size() - 2, 2, "::") == 0))
+                    {
+                        out = fields;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found)
+        {
+            out.label = metaField(t.get_metadata(hint::ElementLabel));
+            out.value = out.label.empty() ? std::string() : metaField(t.get_metadata(hint::ElementValue));
+        }
+        r.namedCache[t.get_id()] = out;
+        return out;
+    }
+
+    uint64_t TypeBridge::namedElementGeneration()
+    {
+        return registry().namedGeneration.load(std::memory_order_relaxed);
     }
 
     rttr::variant TypeBridge::clone(rttr::type t, void* obj)

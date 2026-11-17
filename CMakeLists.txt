@@ -100,7 +100,8 @@ set(RPE_CORE_SOURCES
     src/core/PropertySearch.cpp
     src/core/ReadOnly.cpp
     src/core/OptionalSupport.cpp
-    src/core/FlagsSupport.cpp)
+    src/core/FlagsSupport.cpp
+    src/core/NamedElement.cpp)
 
 add_library(rpe_core SHARED ${RPE_CORE_SOURCES})
 add_library(rpe::core ALIAS rpe_core)
@@ -221,6 +222,9 @@ if(RPE_WITH_FLECS AND RPE_BUILD_DEMO)
 
     add_executable(rpe_array_ops_test test/array_ops_test.cpp)
     target_link_libraries(rpe_array_ops_test PRIVATE rpe_gui)
+
+    add_executable(rpe_named_element_test test/named_element_test.cpp)
+    target_link_libraries(rpe_named_element_test PRIVATE rpe_gui)
 
     add_executable(rpe_plugin_unload_test test/plugin_unload_test.cpp)
     target_link_libraries(rpe_plugin_unload_test PRIVATE rpe_gui)

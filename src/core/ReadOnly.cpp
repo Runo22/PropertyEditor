@@ -1,4 +1,5 @@
 #include "rpe/core/ReadOnly.h"
+#include "rpe/core/NamedElement.h"
 
 #include "rpe/core/EditorHints.h"
 #include "rpe/core/RttrBridge.h"
@@ -70,7 +71,7 @@ namespace rpe
         rttr::type t = root;
         for (const QString& seg : bridge::splitPath(path))
         {
-            if (seg.startsWith(QLatin1Char('[')))
+            if (seg.startsWith(QLatin1Char('[')) || seg.startsWith(QLatin1Char('{')))
             {
                 t = elementType(t);
                 if (!t.is_valid())
@@ -88,6 +89,10 @@ namespace rpe
                 if (p.is_readonly())
                 {
                     return QStringLiteral("Read-only: %1 has no setter").arg(seg);
+                }
+                if (const NamedElement ne = namedElement(t); ne.isValid() && ne.label == p)
+                {
+                    return QStringLiteral("Read-only: %1 is the element's name").arg(seg);
                 }
                 const rttr::variant m = p.get_metadata(hint::ReadOnly);
                 if (m.is_valid() && m.to_bool())

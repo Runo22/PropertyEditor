@@ -260,6 +260,13 @@ anything.
 - **Map keys** aren't editable; string keys containing `.` or `]` can't be
   addressed by path.
 - **`std::string_view` / `std::wstring_view`** are always read-only.
+- **A `string_view` / `const char*` field in mirror mode** points into the
+  simulation's memory, and the copy the GUI shows still does: fine for literals,
+  not for text the simulation changes or frees while it's shown. Named-element
+  names, pinned values and summaries are made into text on the simulation thread;
+  other view fields aren't (yet) — prefer `std::string` for changing text.
+- **Named elements** are addressed by name only when the name is unique in its
+  array and contains no `.` or `}` (otherwise by index). Names are never edited.
 - **Flags enums** need `RPE_REGISTER_FLAGS(E)` to *edit* combined values.
 - **`TypeBridge::clone()`** returns an invalid variant for move-only types.
 - **flecs pairs without data** are badge rows only; pairs carrying data edit the

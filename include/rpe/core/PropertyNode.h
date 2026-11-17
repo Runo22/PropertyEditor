@@ -153,6 +153,27 @@ namespace rpe
         // after the plugin's module is gone. See rpe/core/TypeRelease.h.
         void releaseReflection();
 
+        // ── Named element (rpe/core/NamedElement.h) ──────────────────────────────
+        // An array element shown as ONE row: its name field and (when it is a plain
+        // value) its value field are owned here instead of being child rows — the
+        // row shows the name and edits the value. They keep their own paths, so
+        // updates, edits, freezes and pins land on them as on any field.
+        PropertyNode* rowLabel() const
+        {
+            return _rowLabel;
+        }
+        PropertyNode* rowValue() const
+        {
+            return _rowValue;
+        }
+        // Takes ownership (either may be null).
+        void setRowFields(PropertyNode* label, PropertyNode* value);
+        // True for a row label / row value (it has no row of its own).
+        bool isRowField() const
+        {
+            return _parent && (_parent->_rowLabel == this || _parent->_rowValue == this);
+        }
+
         // ── Sequential-container bookkeeping ─────────────────────────────────────
         int arraySize() const
         {
@@ -181,6 +202,8 @@ namespace rpe
         bool _expandable = false;
         mutable QString _cachedDisplay;
         int _arraySize = -1; // -1 = not a sequential node
+        PropertyNode* _rowLabel = nullptr; // owned (named element)
+        PropertyNode* _rowValue = nullptr; // owned (named element)
     };
 
 } // namespace rpe

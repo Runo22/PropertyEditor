@@ -469,6 +469,20 @@ namespace rpe
                 return QString::fromWCharArray(p, n);
             });
         }
+        if (t == rttr::type::get<const char*>() || t == rttr::type::get<char*>())
+        {
+            // A C string a struct points at (a name — often a literal): its text. It
+            // is foreign memory like a view's (see viewToDisplay), so the scan for
+            // the terminator stops at the same 64K.
+            const char* p = t == rttr::type::get<const char*>() ? v.get_value<const char*>() : v.get_value<char*>();
+            size_t n = 0;
+            constexpr size_t kMaxChars = 64 * 1024;
+            while (p && n <= kMaxChars && p[n] != '\0')
+            {
+                ++n;
+            }
+            return viewToDisplay(p, n, [](const char* d, int len) { return QString::fromUtf8(d, len); });
+        }
         if (t == rttr::type::get<std::filesystem::path>())
         {
             // RTTR can't stringify a path; use its UTF-16 form (path::string() is

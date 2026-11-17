@@ -59,6 +59,10 @@ namespace rpe
             // exists on the new one. 0 / empty = unknown (accept).
             qulonglong entity = 0;
             QString component;
+            // The names of the named-element arrays in `value`, as text, by array
+            // path (see rpe/core/NamedElement.h): read on the simulation thread — a
+            // string_view / const char* name in `value` points into its memory.
+            QHash<QString, QStringList> names;
         };
 
         // A value edit, addressed to the entity + component it was MADE on. The target
@@ -206,6 +210,9 @@ namespace rpe
             // array's end, a map key that's gone, an empty pointer on the way. Sent
             // once; a value follows when the path resolves again. (`value` invalid.)
             bool missing = false;
+            // What the watch shows, made on the simulation thread: the value's text,
+            // or a whole array / struct's summary (TypeRenderer::summaryString).
+            QString text;
         };
 
         // ── Search all components ────────────────────────────────────────────────
@@ -219,6 +226,7 @@ namespace rpe
             QString path;      // row path inside it
             rttr::variant value;
             int matches = 1;   // rows it stands for (a container: its matching rows)
+            QHash<QString, QStringList> names; // as ValueUpdate::names (paths inside the component)
         };
         struct SearchResults
         {

@@ -1,4 +1,5 @@
 #include "rpe/gui/PropertyModel.h"
+#include "rpe/core/NamedElement.h"
 
 #include "rpe/core/ReadOnly.h"
 #include "rpe/core/TypeBridge.h"
@@ -100,6 +101,7 @@ namespace rpe
         : QAbstractItemModel(parent)
     {
         qRegisterMetaType<rttr::variant>("rttr::variant");
+        _namedGen = TypeBridge::namedElementGeneration();
         _resetRoot();
         _releaseHandle = addTypeReleaseHandler(
             [this](const std::vector<rttr::type>& released) { _onTypesReleased(released); });
@@ -376,6 +378,13 @@ namespace rpe
         {
             _collectNodes(child, out);
         }
+        for (auto* field : { node->rowLabel(), node->rowValue() })
+        {
+            if (field)
+            {
+                _collectNodes(field, out);
+            }
+        }
     }
 
     void PropertyModel::_forgetNodes(PropertyNode* node)
@@ -383,6 +392,13 @@ namespace rpe
         for (auto* child : node->children())
         {
             _forgetNodes(child);
+        }
+        for (auto* field : { node->rowLabel(), node->rowValue() })
+        {
+            if (field)
+            {
+                _forgetNodes(field);
+            }
         }
         _nodeByPath.remove(node->path());
     }
@@ -392,6 +408,7 @@ namespace rpe
     void PropertyModel::refresh(const rttr::instance& obj)
     {
         TypeUseScope scope; // see rpe/core/TypeRelease.h
+        syncNamedElements();
         if (!obj.is_valid() || !_root || _grouped) // a grouped view is fed by path
 
         {
@@ -436,10 +453,28 @@ namespace rpe
             {
                 _refreshNode(child, child->prop().get_value(nested));
             }
+            // A named element's own fields. Its name comes from the source as text
+            // when the source gave it (the mirror does: a string_view / const char*
+            // name points into simulation memory) — otherwise it's read here.
+            if (PropertyNode* value = node->rowValue())
+            {
+                _refreshNode(value, value->prop().get_value(nested));
+            }
+            if (PropertyNode* label = node->rowLabel(); label && !label->hasLocalEdit())
+            {
+                const QStringList given = node->parent() ? _givenLabels.value(node->parent()->path()) : QStringList();
+                const int i = node->row();
+                label->setLiveValue(i >= 0 && i < given.size() ? rttr::variant(given[i]) : label->prop().get_value(nested));
+                _syncNamedRow(node);
+            }
         }
         else
         {
             node->setLiveValue(val);
+            if (node->isRowField() && node == node->parent()->rowLabel())
+            {
+                _syncNamedRow(node->parent()); // the name alone came in (a reorder)
+            }
         }
     }
 
@@ -591,6 +626,50 @@ namespace rpe
         }
     }
 
+    void PropertyModel::_shapeNamedElement(PropertyNode* elem, const NamedElement& named)
+    {
+        // The name field and — when it's a plain value — the value field leave the
+        // child rows and become the row's own fields (see PropertyNode::rowLabel).
+        PropertyNode* label = nullptr;
+        PropertyNode* value = nullptr;
+        auto& ch = elem->children();
+        for (int i = ch.size() - 1; i >= 0; --i)
+        {
+            PropertyNode* c = ch[i];
+            if (c->prop() == named.label)
+            {
+                label = c;
+                ch.removeAt(i);
+            }
+            else if (named.value.is_valid() && c->prop() == named.value && !c->isExpandable())
+            {
+                value = c;
+                ch.removeAt(i);
+            }
+        }
+        elem->setRowFields(label, value);
+        elem->setExpandable(!ch.isEmpty()); // no other fields: a plain "name   value" row
+    }
+
+    void PropertyModel::_syncNamedRow(PropertyNode* elem)
+    {
+        // The row's name: its label field's text — "[3]" until there is one.
+        const PropertyNode* label = elem->rowLabel();
+        const rttr::variant v = label ? label->liveValue() : rttr::variant();
+        const QString text = v.is_valid() ? TypeRenderer::toDisplayString(v) : QString();
+        const QString shown = text.isEmpty() ? elem->name() : text;
+        if (elem->displayName() != shown)
+        {
+            elem->setDisplayName(shown);
+            elem->setCachedDisplay(QString());
+            const QModelIndex idx = _indexFromNode(elem, 0);
+            if (idx.isValid())
+            {
+                emit dataChanged(idx, idx, { Qt::DisplayRole });
+            }
+        }
+    }
+
     void PropertyModel::_scheduleCatchUp(const QString& path)
     {
         // Queued: this runs from inside an editor's commit / close, and the catch-up
@@ -697,6 +776,13 @@ namespace rpe
                 return true;
             }
         }
+        for (const auto* field : { node->rowLabel(), node->rowValue() })
+        {
+            if (field && field->hasLocalEdit())
+            {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -725,6 +811,7 @@ namespace rpe
             beginInsertRows(nodeIdx, 0, newSz - 1);
             const rttr::type elemType = view.get_value_type();
             const bool expand = TypeRenderer::isExpandable(elemType);
+            const NamedElement named = namedElement(elemType); // one row per element, by name
             for (int i = 0; i < newSz; ++i)
             {
                 const QString elemName = QStringLiteral("[%1]").arg(i);
@@ -741,6 +828,10 @@ namespace rpe
                 if (expand && !TypeRenderer::isSequential(elemType))
                 {
                     _buildTree(elem, elemType, elemPath);
+                    if (named.isValid())
+                    {
+                        _shapeNamedElement(elem, named);
+                    }
                     // Register the struct's sub-fields by path too — otherwise a leaf
                     // like "items.[0].v" is unreachable by _findNode, so a mirrored
                     // per-leaf update (setPropertyValue) for it is silently dropped and
@@ -773,16 +864,95 @@ namespace rpe
         }
     }
 
+    void PropertyModel::setPropertyValue(const QString& path, rttr::variant val, const QHash<QString, QStringList>& names)
+    {
+        {
+            QMutexLocker lk(&_pendingMutex);
+            _pendingUpdates.insert(path, std::move(val));
+            for (auto it = names.cbegin(); it != names.cend(); ++it)
+            {
+                _pendingLabels.insert(it.key(), it.value());
+            }
+        }
+        if (!_flushScheduled.exchange(true, std::memory_order_acq_rel))
+        {
+            QMetaObject::invokeMethod(this, &PropertyModel::_flushPending, Qt::QueuedConnection);
+        }
+    }
+
     void PropertyModel::_flushPending()
     {
         TypeUseScope scope; // see rpe/core/TypeRelease.h
         _flushScheduled.store(false, std::memory_order_release);
         QHash<QString, rttr::variant> batch;
+        QHash<QString, QStringList> names;
         {
             QMutexLocker lk(&_pendingMutex);
             batch.swap(_pendingUpdates);
+            names.swap(_pendingLabels);
         }
+        for (auto it = names.cbegin(); it != names.cend(); ++it)
+        {
+            _givenLabels.insert(it.key(), it.value()); // before the values that use them
+        }
+        syncNamedElements();
         _applyBatch(batch);
+    }
+
+    void PropertyModel::syncNamedElements()
+    {
+        const quint64 gen = TypeBridge::namedElementGeneration();
+        if (gen == _namedGen)
+        {
+            return;
+        }
+        _namedGen = gen;
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
+        // A type was (un)marked: every array lays its rows out again — from its latest
+        // value, as a mirror won't resend one that hasn't changed. A mismatched size
+        // is what makes _refreshSequential rebuild (deferred, as ever, while one of
+        // its elements is being edited).
+        for (PropertyNode* node : std::as_const(_nodeByPath))
+        {
+            if (TypeRenderer::isSequential(node->type()) && node->arraySize() >= 0)
+            {
+                node->setArraySize(-2);
+            }
+        }
+        _catchUpResizes(QString());
+    }
+
+    QString PropertyModel::_stablePath(const PropertyNode* node) const
+    {
+        // Each named element above (or at) the row addressed by its NAME — "[1]"
+        // becomes "{armor}" — so a pin follows the element, not the index. Only for
+        // a name that is unique in its array and addressable (no '.', no '}').
+        QString path = node ? node->path() : QString();
+        for (const PropertyNode* n = node; n && n != _root.get(); n = n->parent())
+        {
+            if (!n->rowLabel() || !n->parent())
+            {
+                continue;
+            }
+            const QString name = n->displayName();
+            if (name == n->name() || name.contains(QLatin1Char('.')) || name.contains(QLatin1Char('}')))
+            {
+                continue; // no name (yet), or one a path can't carry
+            }
+            int same = 0;
+            for (const PropertyNode* sib : n->parent()->children())
+            {
+                same += sib->rowLabel() && sib->displayName() == name ? 1 : 0;
+            }
+            if (same != 1)
+            {
+                continue;
+            }
+            const QString base = n->path();
+            const QString parentPath = n->parent()->path();
+            path = parentPath + QStringLiteral(".{") + name + QLatin1Char('}') + path.mid(base.size());
+        }
+        return path;
     }
 
     void PropertyModel::_applyBatch(const QHash<QString, rttr::variant>& batch)
@@ -836,7 +1006,17 @@ namespace rpe
         for (int i = 0; i < ch.size(); ++i)
         {
             auto* node = ch[i];
-            if (node->isDirty())
+            // A named element's row shows its row fields: they make it dirty too.
+            bool fieldsDirty = false;
+            for (auto* field : { node->rowLabel(), node->rowValue() })
+            {
+                if (field && field->isDirty())
+                {
+                    field->clearDirty();
+                    fieldsDirty = true;
+                }
+            }
+            if (node->isDirty() || fieldsDirty)
             {
                 node->clearDirty();
                 subtreeDirty = true;
@@ -1276,10 +1456,54 @@ namespace rpe
             }
         }
 
+        // A named element's row (rpe/core/NamedElement.h): the name column shows the
+        // element's name; every value-side role is its value field's (the field the
+        // row edits) — path, value, editor hints, read-only, local edit, filtering.
+        if (node->rowLabel() || node->rowValue())
+        {
+            switch (role)
+            {
+            case Qt::DisplayRole:
+                if (index.column() == 0)
+                {
+                    return node->displayName();
+                }
+                if (!node->rowValue() && !node->isExpandable())
+                {
+                    return QString(); // a name with nothing else: no value to show
+                }
+                break;
+            case Qt::ToolTipRole:
+                if (index.column() == 0)
+                {
+                    return QStringLiteral("%1 \u2014 %2").arg(node->displayName(), node->name());
+                }
+                break;
+            case RowLabelPathRole:
+                return node->rowLabel() ? node->rowLabel()->path() : QString();
+            case StablePathRole:
+                return _stablePath(node->rowValue() ? node->rowValue() : node);
+            case IsLeafRole:
+                return node->isLeaf();
+            case IsArrayRole:
+                return false;
+            default:
+                break;
+            }
+            if (node->rowValue())
+            {
+                node = node->rowValue();
+            }
+        }
+
         switch (role)
         {
         case IsGroupRole:
             return false;
+        case StablePathRole:
+            return _stablePath(node);
+        case RowLabelPathRole:
+            return QString();
         case GroupKeyRole:
             if (const PropertyNode* g = _groupOf(node))
             {
@@ -1387,7 +1611,7 @@ namespace rpe
             {
                 return QBrush(QColor(0xE5, 0x9A, 0x2E)); // amber: local draft edit
             }
-            if (!_pinnedPaths.isEmpty() && _pinnedPaths.contains(node->path()))
+            if (!_pinnedPaths.isEmpty() && (_pinnedPaths.contains(node->path()) || _pinnedPaths.contains(_stablePath(node))))
             {
                 return QBrush(QColor(0x4D, 0xB6, 0xAC)); // teal: pinned to the watch list
             }
@@ -1469,6 +1693,10 @@ namespace rpe
         }
 
         auto* node = static_cast<PropertyNode*>(index.internalPointer());
+        if (node->rowValue())
+        {
+            node = node->rowValue(); // a named element's row edits its value field
+        }
         const rttr::variant newVal = value.value<rttr::variant>();
         if (!newVal.is_valid())
         {
@@ -1510,6 +1738,10 @@ namespace rpe
         if (_isGroupNode(node))
         {
             return f; // a header: never edited
+        }
+        if (node->rowValue())
+        {
+            node = node->rowValue(); // a named element's row edits its value field
         }
         // Read-only rows stay ENABLED (normal text, selectable, copyable) — they just
         // never get ItemIsEditable, so no editor opens. The reason is shown on hover.
@@ -1569,6 +1801,10 @@ namespace rpe
         if (!node || node == _root.get())
         {
             return {};
+        }
+        if (node->isRowField())
+        {
+            node = node->parent(); // shown on its element's row
         }
         return createIndex(node->row(), column, node);
     }

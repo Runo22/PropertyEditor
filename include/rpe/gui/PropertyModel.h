@@ -18,6 +18,7 @@ Q_DECLARE_METATYPE(rttr::variant)
 
 namespace rpe
 {
+    struct NamedElement;
 
     // Custom item-data roles exposed to the delegate.
     // (rttr::property is not default-constructible, so it cannot be a QVariant;
@@ -46,6 +47,11 @@ namespace rpe
         GroupKeyRole,     // QString — grouped view (bindGroups): the row's group key; empty otherwise
         IsGroupRole,      // bool    — the row is a group header (one per component)
         GroupCountRole,   // int     — a group header's match count (setGroupCounts); 0 = none
+        StablePathRole,   // QString — the row's path with each named element addressed by
+                          //           NAME ("stats.{armor}.value", rpe/core/NamedElement.h);
+                          //           what a pin should keep. Same as PropertyPathRole otherwise.
+        RowLabelPathRole, // QString — a named element row: its name field's path (to watch
+                          //           it in mirror mode); empty otherwise
     };
 
     // How committed edits are applied.
@@ -122,6 +128,15 @@ namespace rpe
 
         // Inject one value by dot-path from any thread (coalesced, flushed on GUI thread).
         void setPropertyValue(const QString& path, rttr::variant val);
+        // Same, with the NAMES of the named-element arrays in it as text, keyed by
+        // each array's path: the rows show these instead of reading the names from
+        // `val` — whose string_view / const char* names point into the source's
+        // memory (the mirror's simulation). See rpe/core/NamedElement.h.
+        void setPropertyValue(const QString& path, rttr::variant val, const QHash<QString, QStringList>& names);
+        // Named elements marked / unmarked since the rows were laid out (see
+        // TypeBridge::setNamedElement): lay the arrays out again. Called by refresh()
+        // and by value injection; a host feeding nothing can call it on a timer.
+        void syncNamedElements();
 
         // ── Editing behaviour ────────────────────────────────────────────────────
         void setReadOnly(bool ro);
@@ -223,6 +238,13 @@ namespace rpe
         void _scheduleCatchUp(const QString& path);
         void _catchUpResizes(const QString& path);
         static bool _anyDescendantLocallyEdited(const PropertyNode* node);
+        // Named elements: make `elem` one row (its name / value fields leave the
+        // child rows), and show its name.
+        void _shapeNamedElement(PropertyNode* elem, const NamedElement& named);
+        void _syncNamedRow(PropertyNode* elem);
+        QString _stablePath(const PropertyNode* node) const;
+        QHash<QString, QStringList> _givenLabels; // array path → names given as text
+        quint64 _namedGen = 0;                    // TypeBridge::namedElementGeneration() laid out
         void _applyBatch(const QHash<QString, rttr::variant>& batch);
         bool _emitDirtyRanges(PropertyNode* parent);
         QString _structSummary(PropertyNode* node) const;
@@ -268,6 +290,7 @@ namespace rpe
 
         mutable QMutex _pendingMutex;
         QHash<QString, rttr::variant> _pendingUpdates;
+        QHash<QString, QStringList> _pendingLabels;
         std::atomic<bool> _flushScheduled { false };
 
         bool _readOnly = false;

@@ -15,6 +15,22 @@ namespace rpe
     PropertyNode::~PropertyNode()
     {
         qDeleteAll(_children);
+        delete _rowLabel;
+        delete _rowValue;
+    }
+
+    void PropertyNode::setRowFields(PropertyNode* label, PropertyNode* value)
+    {
+        if (_rowLabel != label)
+        {
+            delete _rowLabel;
+            _rowLabel = label;
+        }
+        if (_rowValue != value)
+        {
+            delete _rowValue;
+            _rowValue = value;
+        }
     }
 
     void PropertyNode::releaseReflection()
@@ -29,6 +45,13 @@ namespace rpe
         for (PropertyNode* c : _children)
         {
             c->releaseReflection();
+        }
+        for (PropertyNode* f : { _rowLabel, _rowValue })
+        {
+            if (f)
+            {
+                f->releaseReflection();
+            }
         }
     }
 
