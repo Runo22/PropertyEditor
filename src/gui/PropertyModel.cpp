@@ -591,6 +591,103 @@ namespace rpe
         }
     }
 
+    void PropertyModel::_scheduleCatchUp(const QString& path)
+    {
+        // Queued: this runs from inside an editor's commit / close, and the catch-up
+        // may delete that editor's row.
+        QMetaObject::invokeMethod(this, [this, path] { _catchUpResizes(path); }, Qt::QueuedConnection);
+    }
+
+    void PropertyModel::_catchUpResizes(const QString& path)
+    {
+        // A resize _refreshSequential/_refreshAssociative held back while an
+        // element was being edited / frozen is applied from the array's latest
+        // value (kept on its node meanwhile) — a mirror sends an unchanged array
+        // only once, so waiting for the next value could wait forever.
+        TypeUseScope scope; // see rpe/core/TypeRelease.h
+        const auto isContainer = [](const PropertyNode* n) {
+            return TypeRenderer::isSequential(n->type()) || TypeRenderer::isAssociative(n->type());
+        };
+        // Only when a resize is really pending below: refreshing from the array's
+        // value otherwise would briefly undo an edit the mirror hasn't echoed yet.
+        std::function<bool(const PropertyNode*)> pending = [&](const PropertyNode* n) {
+            if (isContainer(n))
+            {
+                const rttr::variant v = TypeRenderer::unwrap(n->liveValue());
+                int size = -1;
+                if (v.is_valid() && v.is_sequential_container())
+                {
+                    size = static_cast<int>(v.create_sequential_view().get_size());
+                }
+                else if (v.is_valid() && v.is_associative_container())
+                {
+                    size = static_cast<int>(v.create_associative_view().get_size());
+                }
+                if (size >= 0 && size != n->arraySize())
+                {
+                    return true;
+                }
+            }
+            for (const PropertyNode* c : n->children())
+            {
+                if (pending(c))
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        const auto catchUp = [&](PropertyNode* top) {
+            const rttr::variant live = top->liveValue();
+            if (live.is_valid() && !_anyDescendantLocallyEdited(top) && pending(top))
+            {
+                _refreshNode(top, live);
+            }
+        };
+        const auto outermost = [&](PropertyNode* n) {
+            PropertyNode* top = nullptr;
+            for (; n && n != _root.get(); n = n->parent())
+            {
+                if (isContainer(n))
+                {
+                    top = n;
+                }
+            }
+            return top;
+        };
+        if (path.isEmpty())
+        {
+            // Outermost arrays never nest, so one's rebuild can't free another.
+            QVector<PropertyNode*> tops;
+            for (auto* node : std::as_const(_nodeByPath))
+            {
+                if (isContainer(node) && outermost(node) == node)
+                {
+                    tops.append(node);
+                }
+            }
+            for (PropertyNode* top : std::as_const(tops))
+            {
+                catchUp(top);
+            }
+            return;
+        }
+        // The nearest node still there (the path itself may be gone with its row).
+        QString p = path;
+        PropertyNode* node = _findNode(p);
+        while (!node && !p.isEmpty())
+        {
+            const int cut = p.lastIndexOf(QLatin1Char('.'));
+            p = cut > 0 ? p.left(cut) : QString();
+            node = p.isEmpty() ? nullptr : _findNode(p);
+        }
+        // The outermost array / map above it: refreshing that re-syncs everything below.
+        if (PropertyNode* top = outermost(node))
+        {
+            catchUp(top);
+        }
+    }
+
     bool PropertyModel::_anyDescendantLocallyEdited(const PropertyNode* node)
     {
         for (const auto* child : node->children())
@@ -815,6 +912,7 @@ namespace rpe
         const auto idx = _indexFromNode(node);
         emit dataChanged(idx, idx.siblingAtColumn(columnCount() - 1));
         emit localEditsChanged();
+        _scheduleCatchUp(path); // an array resize it was holding back
     }
 
     void PropertyModel::resetAll()
@@ -835,6 +933,7 @@ namespace rpe
         {
             emit dataChanged(index(0, 0), index(rowCount() - 1, columnCount() - 1));
             emit localEditsChanged();
+            _scheduleCatchUp(QString()); // every array
         }
     }
 
@@ -1020,6 +1119,7 @@ namespace rpe
             _editSink(node->path(), newVal);
             emit propertyEdited(node->path(), node->liveValue());
             emit localEditsChanged();
+            _scheduleCatchUp(node->path()); // an array resize the open editor held back
             return true;
         }
 
@@ -1030,6 +1130,7 @@ namespace rpe
         {
             bool wrote = false;
             bool released = false;
+            bool gone = false;
             {
                 // The provider may hand back a pointer into data owned by another
                 // thread; the whole provider+write+read-back sequence runs under the
@@ -1056,6 +1157,13 @@ namespace rpe
                         node->setLiveValue(actual.is_valid() ? actual : bridge::coerce(newVal, node->type()));
                         wrote = true;
                     }
+                    else if (inst.is_valid() && !bridge::getValueByPath(inst, relPath).is_valid())
+                    {
+                        // The target is gone — an array element whose index went
+                        // away while its editor was open, a map key removed. There
+                        // is nothing to keep a draft OF: drop the edit.
+                        gone = true;
+                    }
                 });
             }
             if (released || _released.load(std::memory_order_acquire))
@@ -1066,7 +1174,18 @@ namespace rpe
             {
                 emit propertyEdited(node->path(), node->liveValue());
                 emit localEditsChanged();
+                _scheduleCatchUp(node->path());
                 return true;
+            }
+            if (gone)
+            {
+                if (node->hasLocalEdit())
+                {
+                    node->setLocalEdit(false);
+                    emit localEditsChanged();
+                }
+                _scheduleCatchUp(node->path()); // the rows can follow the data now
+                return false;
             }
             // Write failed — fall through to a local draft so the edit is not lost.
         }

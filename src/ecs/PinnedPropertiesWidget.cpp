@@ -38,6 +38,8 @@ namespace rpe
             LastValueRoleUnused,            // (was the last value — now kept in _lastValues)
             RawIdRole,                      // qulonglong (pair id; 0 for plain components)
             PinReadOnlyRole,                // QString — why it can't be edited (empty: it can)
+            PinMissingRole,                 // bool — the path doesn't resolve right now
+            PinWholeRole,                   // bool — a whole array / struct (a summary)
         };
 
         constexpr int kValueColumn = 2; // Entity | Property | Value
@@ -135,6 +137,14 @@ namespace rpe
             void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
             {
                 const QTreeWidgetItem* it = _tree->topLevelItem(index.row());
+                if (index.column() == kValueColumn && it && it->data(0, PinMissingRole).toBool())
+                {
+                    // Not there right now: the "—" in the disabled text colour.
+                    QStyleOptionViewItem o(option);
+                    o.palette.setColor(QPalette::Text, o.palette.color(QPalette::Disabled, QPalette::Text));
+                    QStyledItemDelegate::paint(painter, o, index);
+                    return;
+                }
                 if (index.column() != kValueColumn || !it || it->data(0, PinReadOnlyRole).toString().isEmpty())
                 {
                     QStyledItemDelegate::paint(painter, option, index);
@@ -152,9 +162,9 @@ namespace rpe
             {
                 TypeUseScope scope; // see rpe/core/TypeRelease.h
                 const QTreeWidgetItem* row = _tree->topLevelItem(index.row());
-                if (row && !row->data(0, PinReadOnlyRole).toString().isEmpty())
+                if (row && (!row->data(0, PinReadOnlyRole).toString().isEmpty() || row->data(0, PinMissingRole).toBool()))
                 {
-                    return nullptr; // read-only: never an editor (the item isn't editable either)
+                    return nullptr; // read-only, or not there now: never an editor
                 }
                 // Drive the editor from the leaf's declared type (resolvable straight
                 // after pinning) and fall back to the mirrored value's type. No hint
@@ -412,6 +422,16 @@ namespace rpe
         {
             item->setToolTip(kValueColumn, readOnly);
         }
+        {
+            // A whole array / struct (when its declared type says so now; else the
+            // first value will).
+            TypeUseScope scope;
+            const rttr::type dt = pinDeclaredType(item);
+            if (dt.is_valid() && TypeRenderer::isExpandable(dt))
+            {
+                _markWhole(item, dt);
+            }
+        }
         item->setText(kValueColumn, placeholderText()); // until the first value lands
         _updating = false;
 
@@ -494,11 +514,48 @@ namespace rpe
                 {
                     continue;
                 }
-                it->setText(kValueColumn, TypeRenderer::toDisplayString(u.value));
+                if (u.missing)
+                {
+                    // The path doesn't resolve now (the array got shorter, the key
+                    // went): no stale value, no editor, until it's back.
+                    it->setData(0, PinMissingRole, true);
+                    it->setText(kValueColumn, QStringLiteral("\u2014"));
+                    it->setToolTip(kValueColumn, tr("Not there right now \u2014 an index past the end, or a key "
+                                                    "that's gone. It shows again when it's back."));
+                    _lastValues.remove(it);
+                    continue;
+                }
+                if (it->data(0, PinMissingRole).toBool())
+                {
+                    it->setData(0, PinMissingRole, false);
+                    it->setToolTip(kValueColumn, it->data(0, PinReadOnlyRole).toString());
+                }
+                if (!it->data(0, PinWholeRole).toBool() && TypeRenderer::isExpandable(u.value.get_type()))
+                {
+                    _markWhole(it, u.value.get_type());
+                }
+                it->setText(kValueColumn, it->data(0, PinWholeRole).toBool() ? TypeRenderer::summaryString(u.value)
+                                                                             : TypeRenderer::toDisplayString(u.value));
                 _lastValues.insert(it, u.value); // under pollNow's read section
             }
         }
         _updating = false;
+    }
+
+    void PinnedPropertiesWidget::_markWhole(QTreeWidgetItem* item, rttr::type type)
+    {
+        // Shown as a one-line summary of its content, never edited here (a field of
+        // it can be pinned on its own for that).
+        item->setData(0, PinWholeRole, true);
+        if (item->data(0, PinReadOnlyRole).toString().isEmpty())
+        {
+            const bool container = TypeRenderer::isSequential(type) || TypeRenderer::isAssociative(type);
+            const QString why = container ? tr("The whole array \u2014 pin one of its elements to edit it")
+                                          : tr("The whole struct \u2014 pin one of its fields to edit it");
+            item->setData(0, PinReadOnlyRole, why);
+            item->setToolTip(kValueColumn, why);
+            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        }
     }
 
     void PinnedPropertiesWidget::_commitValueEdit(int row, const rttr::variant& v)

@@ -17,6 +17,14 @@ namespace rpe
         // Human-readable one-line representation of a value.
         static QString toDisplayString(const rttr::variant& v);
 
+        // One line showing a WHOLE value's content: an array's elements "[1, 2, 3]",
+        // a struct's fields "{speed, 4}", a map's entries "{fire: 0.5}", nested the
+        // same way — cut at about `maxChars` with how many elements are left
+        // ("[1, 2, … +61]"). A plain value is just toDisplayString. Unlike the
+        // "[3 items]" toDisplayString gives a container, it changes when an element
+        // does (among the ones it shows).
+        static QString summaryString(const rttr::variant& v, int maxChars = 80);
+
         // Bitmask display of an enumeration value: named bits joined with " | ",
         // plus "0xNN" for any leftover un-named bits ("Fire | Poison"). An exact
         // single-name match is shown as-is; zero shows its named value if the enum

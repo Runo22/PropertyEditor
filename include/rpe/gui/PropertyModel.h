@@ -218,6 +218,10 @@ namespace rpe
         void _rebuildAssocChildren(PropertyNode* node,
                                    const QVector<QPair<QString, rttr::variant>>& entries,
                                    rttr::type valueType);
+        // After an edit / reset releases an element: apply the resize its array held
+        // back meanwhile (queued — see _catchUpResizes). Empty path: every array.
+        void _scheduleCatchUp(const QString& path);
+        void _catchUpResizes(const QString& path);
         static bool _anyDescendantLocallyEdited(const PropertyNode* node);
         void _applyBatch(const QHash<QString, rttr::variant>& batch);
         bool _emitDirtyRanges(PropertyNode* parent);

@@ -531,4 +531,115 @@ namespace rpe
         return QString::fromStdString(t.get_name().to_string());
     }
 
+    namespace
+    {
+        void appendSummary(QString& out, const rttr::variant& in, int maxChars, int depth)
+        {
+            const rttr::variant v = TypeRenderer::unwrap(in);
+            if (!v.is_valid() || OptionalBridge::isOptional(v.get_type()))
+            {
+                out += TypeRenderer::toDisplayString(in); // null pointer, optional: as shown
+                return;
+            }
+            const auto full = [&] { return out.size() >= maxChars; };
+            if (v.is_sequential_container() || v.is_associative_container())
+            {
+                if (depth > 3)
+                {
+                    out += QStringLiteral("[\u2026]");
+                    return;
+                }
+                const bool seq = v.is_sequential_container();
+                out += seq ? QLatin1Char('[') : QLatin1Char('{');
+                const auto sep = [&](size_t i) {
+                    if (i > 0)
+                    {
+                        out += QStringLiteral(", ");
+                    }
+                };
+                const auto rest = [&](size_t shown, size_t n) {
+                    out += QStringLiteral("\u2026 +%1").arg(static_cast<qulonglong>(n - shown));
+                };
+                size_t i = 0;
+                if (seq)
+                {
+                    const rttr::variant_sequential_view view = v.create_sequential_view();
+                    const size_t n = view.get_size();
+                    for (const rttr::variant& item : view)
+                    {
+                        sep(i);
+                        if (full())
+                        {
+                            rest(i, n);
+                            break;
+                        }
+                        appendSummary(out, item, maxChars, depth + 1);
+                        ++i;
+                    }
+                }
+                else
+                {
+                    const rttr::variant_associative_view view = v.create_associative_view();
+                    const size_t n = view.get_size();
+                    for (const auto& kv : view)
+                    {
+                        sep(i);
+                        if (full())
+                        {
+                            rest(i, n);
+                            break;
+                        }
+                        appendSummary(out, kv.first, maxChars, depth + 1);
+                        if (view.is_key_only_type())
+                        {
+                            ++i;
+                            continue;
+                        }
+                        out += QStringLiteral(": ");
+                        appendSummary(out, kv.second, maxChars, depth + 1);
+                        ++i;
+                    }
+                }
+                out += seq ? QLatin1Char(']') : QLatin1Char('}');
+                return;
+            }
+            const rttr::type t = TypeRenderer::rawType(v.get_type());
+            const auto props = t.get_properties();
+            if (props.empty())
+            {
+                out += TypeRenderer::toDisplayString(v);
+                return;
+            }
+            if (depth > 3)
+            {
+                out += QStringLiteral("{\u2026}");
+                return;
+            }
+            out += QLatin1Char('{');
+            const rttr::instance obj(v);
+            int i = 0;
+            for (const rttr::property& p : props)
+            {
+                if (i++ > 0)
+                {
+                    out += QStringLiteral(", ");
+                }
+                if (full())
+                {
+                    out += QStringLiteral("\u2026");
+                    break;
+                }
+                appendSummary(out, p.get_value(obj), maxChars, depth + 1);
+            }
+            out += QLatin1Char('}');
+        }
+    } // namespace
+
+    QString TypeRenderer::summaryString(const rttr::variant& v, int maxChars)
+    {
+        QString out;
+        appendSummary(out, v, maxChars, 0);
+        return out;
+    }
+
 } // namespace rpe

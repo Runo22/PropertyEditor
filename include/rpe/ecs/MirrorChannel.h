@@ -202,6 +202,10 @@ namespace rpe
         {
             PinKey key;
             rttr::variant value;
+            // The component is there but the path isn't, for now: an index past the
+            // array's end, a map key that's gone, an empty pointer on the way. Sent
+            // once; a value follows when the path resolves again. (`value` invalid.)
+            bool missing = false;
         };
 
         // ── Search all components ────────────────────────────────────────────────

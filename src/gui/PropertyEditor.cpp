@@ -1003,7 +1003,9 @@ namespace rpe
             }
             menu.addSeparator();
         }
-        if (_pinningEnabled && srcIdx.data(IsLeafRole).toBool())
+        // Any row with a value of its own: a leaf, or a whole array / struct (watched
+        // as a summary).
+        if (_pinningEnabled && !srcIdx.data(IsGroupRole).toBool())
         {
             if (!_model->isPinnedPath(path))
             {

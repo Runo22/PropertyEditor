@@ -76,6 +76,7 @@ namespace rpe
         void _pushPins(); // send the current pin set to the channel
         // Route a value committed by the inline editor (row → top-level item) to the
         // display and the sim thread as a pin edit.
+        void _markWhole(QTreeWidgetItem* item, rttr::type type);
         void _commitValueEdit(int row, const rttr::variant& v);
         QTreeWidgetItem* _findItem(const MirrorChannel::PinKey& key) const;
         static MirrorChannel::PinKey _itemKey(const QTreeWidgetItem* item);

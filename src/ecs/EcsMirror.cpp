@@ -12,6 +12,11 @@
 
 namespace rpe
 {
+    namespace
+    {
+        // What a missing pinned path last published as (never a value's text).
+        const QString kPinMissing = QStringLiteral("\x01missing");
+    } // namespace
 
     namespace
     {
@@ -1503,18 +1508,27 @@ namespace rpe
                 }
                 rttr::instance pinst(access);
                 rttr::variant val = bridge::getValueByPath(pinst, k.path);
+                const QString kk = dedupKey(k);
                 if (!val.is_valid())
                 {
+                    // The component is there, the path isn't (an index past the end, a
+                    // map key gone…): say so once, rather than leave the watch showing
+                    // the last value as if it were current.
+                    if (_lastPinStr.value(kk) != kPinMissing)
+                    {
+                        _lastPinStr.insert(kk, kPinMissing);
+                        pinUpdates.push_back({ k, rttr::variant(), true });
+                    }
                     continue;
                 }
-                const QString kk = dedupKey(k);
-                const QString s = TypeRenderer::toDisplayString(val);
+                // A whole array / struct is compared by its content (a leaf: its text).
+                const QString s = TypeRenderer::summaryString(val);
                 if (_lastPinStr.value(kk) == s)
                 {
                     continue;
                 }
                 _lastPinStr.insert(kk, s);
-                pinUpdates.push_back({ k, std::move(val) });
+                pinUpdates.push_back({ k, std::move(val), false });
             }
             if (!pinUpdates.empty())
             {
