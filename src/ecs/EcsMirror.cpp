@@ -1634,7 +1634,7 @@ namespace rpe
                         }
                     }
                     _selRows.append({ relPath, target, MirrorChannel::RowKind::Pair,
-                                      static_cast<qulonglong>(id.raw_id()) });
+                                      static_cast<qulonglong>(id.raw_id()), QString() });
                     return;
                 }
                 if (!id.is_entity())
@@ -1659,7 +1659,7 @@ namespace rpe
                 if (!cd || cd->size <= 0)
                 {
                     _selRows.append({ qn, QString(), MirrorChannel::RowKind::Tag,
-                                      static_cast<qulonglong>(id.raw_id()) });
+                                      static_cast<qulonglong>(id.raw_id()), QString() });
                     return;
                 }
                 // Identify the component by its FULL scoped path ("game.Transform"),
@@ -1675,7 +1675,7 @@ namespace rpe
                 _selCompIds.append(id.raw_id());
                 _selTypes.push_back(dt);
                 _selRows.append({ qn, QString(), MirrorChannel::RowKind::Data,
-                                  static_cast<qulonglong>(id.raw_id()) });
+                                  static_cast<qulonglong>(id.raw_id()), QString() });
             });
         }
         if (_selRows != _lastCompRows)

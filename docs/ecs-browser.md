@@ -57,6 +57,7 @@ st.snapshotOpenFieldsOnly = true;         // mirror only the expanded rows
 st.editPolicy = rpe::EditPolicy::LocalEdit;
 st.allowComponentEditing = true;          // "+ Add" button and per-row trash
 st.preferredComponents = { "game::Player", "Transform" }; // auto-selected component (see Selection)
+st.pairRelations = { "Follows", "game::Damage" }; // add these as pairs (see Adding pairs)
 st.dragToScrub = true;                    // drag a number's name to change it
 st.mirrorPollIntervalMs = 33;             // GUI poll cadence (mirror mode)
 st.liveUpdateIntervalMs = 20;             // value refresh cadence (direct mode)
@@ -171,9 +172,12 @@ components too**:
   scrolls to its group.
 
 A row matches by its **name** (the label shown) or its **value** text, like the
-filter always did; a nested struct matching by name shows as one row, and a
-container matches by its name or any element. A row whose value stops matching
-drops out.
+filter always did; a nested struct matching by name shows as one row. Containers
+are searched **inside**: an element's text, a map's keys, and — for arrays of
+structs, map values and nested arrays — their fields' names and values. A
+matching array shows with just its matching rows (`stats ▸ [2] ▸ name =
+maxSpeed`), and the counts count those rows. A row whose value stops matching
+drops out, and so does an element removed from its array.
 
 **Cost.** Nothing runs while the filter is empty. With text, mirror mode searches
 on the simulation thread a round every ~250 ms, **sliced across pumps with a
@@ -185,7 +189,8 @@ rendered to text — skipped entirely when the text can't occur in a number).
 The budget is checked between components, so ONE component can't be split: a
 component holding a very large container still costs its whole read in one
 pump (containers of numbers are skipped when the text can't occur in a number;
-a container's text is matched on its first 256 elements).
+a container is searched on its first 256 elements, 8 containers / structs deep).
+Searching inside arrays of structs left these numbers where they were.
 Direct mode searches on the GUI thread on the same timer.
 
 `PropertyEditor` on its own has no scope button; `setSearchAllAvailable(true)`
@@ -206,12 +211,51 @@ as `Damage → Fire` with a `pair` badge: clicking it opens the regular property
 editor for the carried type, and edits write back to that pair instance.
 Zero-size tags are also offered by the "+ Add" picker, under a **Tags** group.
 
+A pair is keyed by its relationship's path and its **target's full path** —
+`Damage (a.Fire)` — so pairs on two targets with the same name in different
+scopes stay apart in the list, in edits and in pins (an unnamed target is
+`#<id>`). The list shows the leaf: `Damage → Fire`.
+
+### Adding pairs
+
+The "+ Add" picker has a **Relationships** branch. Only the relationships you
+actually use are there — everything else is added by itself, as before:
+
+| A component / entity is offered… | when |
+|---|---|
+| **as a pair only** | it has flecs' `Relationship` trait, **or** it's used in a pair somewhere in the world (`(R, *)` in use) and never by itself, **or** you list it in `Settings::pairRelations` |
+| **both ways** (plain under its namespace, and under Relationships) | it's used both ways in the world, or listed and also used by itself |
+| **never** | it has the `Target` trait (only ever a target) |
+
+`pairRelations` takes full paths or trailing parts like `preferredComponents`,
+and plain entities too (`world.entity("Likes")` isn't a component, so it's only
+found when listed or given the `Relationship` trait).
+
+Each relationship opens to its **targets**: the children of its `OneOf` scope
+(then only those — flecs refuses anything else), otherwise the targets it's used
+with now (up to 64), then **Other target…**. That step lists every named entity
+(filter as you type) and, if nothing matches, takes the text as a **path**
+(`elements.Fire`, `elements::Fire`, `#<id>`). Backspace in the empty filter goes
+back. An `Exclusive` relationship says what a target replaces
+(`→ Ice  (replaces Fire)`). Targets the entity already has are left out.
+
+The add goes **by id** (with the generation, so a target deleted and its id
+recycled since the picker opened is refused, not swapped for another entity),
+and flecs' rules are checked first — a `Target` as relationship, a
+`Relationship` as target, a `OneOf` target outside its scope — because a debug
+flecs build aborts on them. A refused pair logs `rpe: pair not added: <why>`.
+A `Relationship` / `Target` is never added by itself either. In mirror mode all
+of it happens on the simulation thread; the picker refreshes in place when the
+rescan it asked for on opening arrives.
+
 ## Add / remove components
 
 With `allowComponentEditing = true` the component panel gains a **"+ Add"**
 button (popup grouped by namespace, filter box with [arrow/Enter
 navigation](#keyboard)) and a per-row trash glyph with a two-step confirm.
-Structural changes are applied on the simulation thread in mirror mode.
+Structural changes are applied on the simulation thread in mirror mode. Direct
+mode builds the same catalog from the world (under the access guard) when the
+picker opens.
 
 The picker is a **namespace tree**: every scope segment is its own level, for
 either separator, so `plugins.output.hud.Speed` and `plugins.output.ig.Radar`

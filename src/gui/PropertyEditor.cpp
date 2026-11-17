@@ -320,6 +320,40 @@ namespace rpe
         root->addWidget(_view, 1);
 
         connect(_filter, &QLineEdit::textChanged, this, &PropertyEditor::_onFilterChanged);
+        // While filtering, everything matching is shown open — but expandAll() ran
+        // when the text changed, before rows that come in LATER existed: an array's
+        // elements arriving from the mirror, a group whose first match just came in.
+        // Open those too (queued: the view handles the insert first).
+        connect(_proxy, &QAbstractItemModel::rowsInserted, this, [this](const QModelIndex& parent, int first, int last) {
+            if (_filter->text().trimmed().isEmpty())
+            {
+                return;
+            }
+            QList<QPersistentModelIndex> rows;
+            for (int r = first; r <= last; ++r)
+            {
+                rows << QPersistentModelIndex(_proxy->index(r, 0, parent));
+            }
+            const QPersistentModelIndex under(parent);
+            QMetaObject::invokeMethod(this, [this, rows, under] {
+                if (_filter->text().trimmed().isEmpty())
+                {
+                    return;
+                }
+                const QScopedValueRollback<bool> bulk(_bulkExpanding, true);
+                for (QModelIndex p = under; p.isValid(); p = p.parent())
+                {
+                    _view->expand(p);
+                }
+                for (const QPersistentModelIndex& r : rows)
+                {
+                    if (r.isValid())
+                    {
+                        _view->expandRecursively(r);
+                    }
+                }
+            }, Qt::QueuedConnection);
+        });
         connect(_resetBtn, &QToolButton::clicked, this, &PropertyEditor::_onResetAll);
         connect(_view, &QTreeView::customContextMenuRequested, this, &PropertyEditor::_onContextMenu);
         connect(_view->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& cur) {

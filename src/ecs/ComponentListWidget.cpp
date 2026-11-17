@@ -587,7 +587,9 @@ namespace rpe
         entries.reserve(names.size());
         for (const QString& n : names)
         {
-            entries.append(MirrorChannel::CatalogEntry { n, false });
+            MirrorChannel::CatalogEntry entry;
+            entry.path = n;
+            entries.append(entry);
         }
         setAddableEntries(entries);
     }
@@ -1081,7 +1083,7 @@ namespace rpe
         _fillAddTree();
 
         const auto activate = [this](QTreeWidgetItem* item) { _activateAddItem(item); };
-        connect(tree, &QTreeWidget::itemClicked, this, [this, activate](QTreeWidgetItem* item, int) {
+        connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) {
             if (item && item->data(0, AddKindRole).isValid())
             {
                 activate(item);
@@ -1199,7 +1201,7 @@ namespace rpe
                         }
                     }
                     extraRows.append({ relPath, target, MirrorChannel::RowKind::Pair,
-                                       static_cast<qulonglong>(id.raw_id()) });
+                                       static_cast<qulonglong>(id.raw_id()), QString() });
                     return;
                 }
                 if (!id.is_entity())
@@ -1226,7 +1228,7 @@ namespace rpe
                 if (!cd || cd->size <= 0)
                 {
                     extraRows.append({ fullPath, QString(), MirrorChannel::RowKind::Tag,
-                                       static_cast<qulonglong>(id.raw_id()) });
+                                       static_cast<qulonglong>(id.raw_id()), QString() });
                     return;
                 }
 
@@ -1384,7 +1386,7 @@ namespace rpe
         rows.reserve(namesIn.size());
         for (const QString& n : namesIn)
         {
-            rows.append(MirrorChannel::ComponentRow { n, QString(), MirrorChannel::RowKind::Data, 0 });
+            rows.append(MirrorChannel::ComponentRow { n, QString(), MirrorChannel::RowKind::Data, 0, QString() });
         }
         setComponentRows(rows);
     }

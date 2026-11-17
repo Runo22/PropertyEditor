@@ -20,7 +20,8 @@ pinWidget.setTitleVisible(false);             // the dock tab already titles it
 That single call wires everything:
 
 - the property tree's context menu gains **"Pin to watch list"** /
-  **"Unpin from watch list"** (leaf rows only),
+  **"Unpin from watch list"** — on values, and on whole arrays, structs and
+  array elements too (see below),
 - pinned rows of the current entity+component are tinted **teal** in the main
   tree (a local-edit draft's amber wins if both apply),
 - the widget receives the mirror channel: values flow at ~30 Hz, edits go back
@@ -37,6 +38,15 @@ That single call wires everything:
 - **Read-only** leaves (no setter, `ReadOnly` hint, locked type — see
   [editor-hints](editor-hints.md#read-only-values)) never open an editor here
   either; they show the same faint lock and the reason in the tooltip.
+- **Whole arrays / structs / elements** show a one-line summary of their content
+  — `[1, 2, 3]`, `{speed, 4}`, `[{speed, 4}, {armor, 7}, … +12]` — that follows
+  the content. They're read-only here (pin a field or element to edit it).
+- **Array elements and map entries** (`items.[2].value`, `counts.[b]`) watch
+  that index / key. When it isn't there any more — the array got shorter, the
+  key was erased — the row shows a greyed **—** (no editor) instead of the last
+  value, and the value comes back when the index / key does. The row is only
+  removed when the component or the entity goes. An index pin follows the
+  **slot**: after a reorder it shows whatever element is at that index now.
 - **Unpin**: right-click → *Unpin* / *Unpin all*.
 - While you are editing a cell, the live echo won't overwrite your typing.
 
@@ -58,6 +68,9 @@ Driving it without a browser is also possible: `pinWidget.setMirror(&mirror)`
 
 Pins are mirrored every pump independently of the selection, deduplicated per
 pin (unchanged values publish nothing), and their component resolution is
-cached — a handful of pins adds no measurable per-frame cost. Pin edits are
+cached — a handful of pins adds no measurable per-frame cost. A whole-array pin
+reads (copies) its array every pump, like any read of it; it's compared by its
+summary, so only changes among the elements it shows are published. A missing
+path is published once (`PinValue::missing`), not every pump. Pin edits are
 addressed explicitly (entity + component + path), so they work for entities
 that are not selected anywhere.
