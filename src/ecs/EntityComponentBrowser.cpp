@@ -741,7 +741,7 @@ namespace rpe
                 searchProperties(rttr::instance(access), ci.rttrType, _searchText, found);
                 for (PropertyHit& h : found)
                 {
-                    hits.push_back({ kc.first, std::move(h.path), std::move(h.value) });
+                    hits.push_back({ kc.first, std::move(h.path), std::move(h.value), h.matches });
                 }
             }
         });
@@ -753,7 +753,7 @@ namespace rpe
         QHash<QString, int> counts;
         for (const auto& h : hits)
         {
-            ++counts[h.component];
+            counts[h.component] += h.matches; // a container: its matching rows inside
         }
         _componentList->setMatchCounts(counts, true);
         if (!_groupView)

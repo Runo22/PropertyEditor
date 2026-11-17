@@ -214,6 +214,7 @@ namespace rpe
             QString component; // the component's selection key
             QString path;      // row path inside it
             rttr::variant value;
+            int matches = 1;   // rows it stands for (a container: its matching rows)
         };
         struct SearchResults
         {

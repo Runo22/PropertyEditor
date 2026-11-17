@@ -575,7 +575,7 @@ namespace rpe
                     searchProperties(rttr::instance(access), c.type, _search.text, found);
                     for (PropertyHit& h : found)
                     {
-                        _search.hits.push_back({ c.key, std::move(h.path), std::move(h.value) });
+                        _search.hits.push_back({ c.key, std::move(h.path), std::move(h.value), h.matches });
                     }
                 }
             }
