@@ -293,7 +293,7 @@ namespace rpe
         return true;
     }
 
-    bool MirrorChannel::pollTargetCandidates(QVector<EntityEntry>& out)
+    bool MirrorChannel::pollTargetCandidates(QVector<TargetEntry>& out)
     {
         std::lock_guard<std::mutex> lk(_m);
         if (!_outTargetsDirty)
@@ -397,10 +397,10 @@ namespace rpe
         _outPrefabsDirty = true;
     }
 
-    void MirrorChannel::publishTargetCandidates(const QVector<EntityEntry>& entities)
+    void MirrorChannel::publishTargetCandidates(const QVector<TargetEntry>& targets)
     {
         std::lock_guard<std::mutex> lk(_m);
-        _outTargets = entities;
+        _outTargets = targets;
         _outTargetsDirty = true;
     }
 

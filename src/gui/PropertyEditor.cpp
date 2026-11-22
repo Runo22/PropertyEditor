@@ -57,14 +57,59 @@ namespace rpe
                     return true;
                 }
                 const QModelIndex idx = sourceModel()->index(row, 0, parent);
-                if (idx.data(Qt::DisplayRole).toString().contains(_text, Qt::CaseInsensitive))
+                if (_matches(idx))
                 {
                     return true;
                 }
-                return idx.data(FilterValueRole).toString().contains(_text, Qt::CaseInsensitive);
+                // An ARRAY whose NAME matches shows its elements — all of them, named
+                // elements or plain values or structs: "inventory" lists what's in it.
+                // (By name only: a value match like "[3]" would open every 3-long one.)
+                for (QModelIndex a = idx.parent(); a.isValid(); a = a.parent())
+                {
+                    if (a.data(IsArrayRole).toBool()
+                        && a.siblingAtColumn(0).data(Qt::DisplayRole).toString().contains(_text, Qt::CaseInsensitive))
+                    {
+                        return true;
+                    }
+                }
+                // Inside an ARRAY ELEMENT, the element is one thing: when anything in
+                // it matches, all of it shows — "speed" finds [0] ▸ name and brings its
+                // value along, which is what gives the match its meaning. (Only the
+                // nearest element: its sibling elements stay filtered.)
+                for (QModelIndex e = idx; e.isValid(); e = e.parent())
+                {
+                    if (e.parent().isValid() && e.parent().data(IsArrayRole).toBool())
+                    {
+                        return _subtreeMatches(e);
+                    }
+                }
+                return false;
             }
 
         private:
+            bool _matches(const QModelIndex& idx) const
+            {
+                return idx.data(Qt::DisplayRole).toString().contains(_text, Qt::CaseInsensitive)
+                    || idx.data(FilterValueRole).toString().contains(_text, Qt::CaseInsensitive);
+            }
+
+            bool _subtreeMatches(const QModelIndex& idx) const
+            {
+                if (_matches(idx))
+                {
+                    return true;
+                }
+                const QAbstractItemModel* m = sourceModel();
+                for (int r = 0; r < m->rowCount(idx); ++r)
+                {
+                    if (_subtreeMatches(m->index(r, 0, idx)))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
             QString _text;
         };
 

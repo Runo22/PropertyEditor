@@ -132,6 +132,22 @@ namespace rpe
             }
         };
 
+        // A candidate for a pair's target in the add picker's "Other target…" step.
+        struct TargetEntry
+        {
+            qulonglong id = 0;        // the entity (generation included)
+            QString path;             // its full path
+            bool carriesData = false; // a component with data, registered with rpe
+            bool operator==(const TargetEntry& o) const
+            {
+                return id == o.id && path == o.path && carriesData == o.carriesData;
+            }
+            bool operator!=(const TargetEntry& o) const
+            {
+                return !(*this == o);
+            }
+        };
+
         // How the add picker offers a catalog entry.
         enum class PairUse : quint8
         {
@@ -150,13 +166,15 @@ namespace rpe
             qulonglong id = 0; // the component / relationship entity (generation included)
             PairUse pair = PairUse::None;
             bool exclusive = false;      // flecs Exclusive: a new target replaces the old one
+            bool carriesData = false;    // the relationship itself has data (else a pair's data is its target's)
             bool targetsFixed = false;   // flecs OneOf: only `targets` are valid
             QVector<PairTarget> targets; // suggestions (OneOf children, or targets in use)
             bool moreTargets = false;    // `targets` was cut at the suggestion limit
             bool operator==(const CatalogEntry& o) const
             {
                 return path == o.path && tag == o.tag && id == o.id && pair == o.pair && exclusive == o.exclusive
-                    && targetsFixed == o.targetsFixed && targets == o.targets && moreTargets == o.moreTargets;
+                    && carriesData == o.carriesData && targetsFixed == o.targetsFixed && targets == o.targets
+                    && moreTargets == o.moreTargets;
             }
             bool operator!=(const CatalogEntry& o) const
             {
@@ -332,9 +350,9 @@ namespace rpe
         bool pollCatalogEntries(QVector<CatalogEntry>& out);
         // Spawnable prefabs for the "add entity" picker. True if changed since last poll.
         bool pollPrefabs(QVector<PrefabEntry>& out);
-        // Named entities, by path — what a relationship's "Other target…" offers.
-        // Published with the catalog. True if changed since the last poll.
-        bool pollTargetCandidates(QVector<EntityEntry>& out);
+        // What a relationship's "Other target…" offers (see pairTargetCandidates in
+        // ComponentScan.h). Published with the catalog. True if changed since the last poll.
+        bool pollTargetCandidates(QVector<TargetEntry>& out);
 
         // True until the producing EcsMirror is destroyed.
         bool producerAlive() const
@@ -373,7 +391,7 @@ namespace rpe
         void publishCatalog(const QStringList& catalog); // legacy → non-tag entries
         void publishCatalogEntries(const QVector<CatalogEntry>& entries);
         void publishPrefabs(const QVector<PrefabEntry>& prefabs);
-        void publishTargetCandidates(const QVector<EntityEntry>& entities);
+        void publishTargetCandidates(const QVector<TargetEntry>& targets);
         void publishSearchResults(SearchResults&& results);
         void markProducerGone()
         {
@@ -409,7 +427,7 @@ namespace rpe
         bool _outCatalogDirty = false;
         QVector<PrefabEntry> _outPrefabs;
         bool _outPrefabsDirty = false;
-        QVector<EntityEntry> _outTargets;
+        QVector<TargetEntry> _outTargets;
         bool _outTargetsDirty = false;
         // Keyed by path: keeps only the latest value per leaf, so a stalled/hidden
         // consumer can't make this grow unbounded.

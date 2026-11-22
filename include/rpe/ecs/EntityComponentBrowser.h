@@ -82,10 +82,12 @@ namespace rpe
             // relationship, then its target), besides the ones it finds itself: those
             // with flecs' Relationship trait, and those already used in a pair
             // somewhere in the world. Full path or a trailing part, like
-            // preferredComponents; plain entities ("Likes") too. A listed one is
-            // added only as a pair unless it is also in use by itself. Everything
-            // else is added by itself, as before. Give a relationship flecs' OneOf
-            // trait to limit its targets to one scope's children.
+            // preferredComponents; plain entities ("Likes") too. Needed only for one
+            // that's in no pair yet (and has no Relationship trait). A relationship
+            // carrying data stays addable by itself as well; a tag one (Left,
+            // Right) and a plain entity are pair only. Everything else is added by
+            // itself, as before. Give a relationship flecs' OneOf trait to limit its
+            // targets to one scope's children.
             QStringList pairRelations;
             // Components to select when an entity is selected and there's no
             // previous component selection to keep (the first entity, or one that
@@ -358,7 +360,7 @@ namespace rpe
         // from the producer).
         void _refreshDirectCatalog();
         // The entities a relationship's "Other target…" step offers.
-        QVector<QPair<qulonglong, QString>> _targetCandidates() const;
+        QVector<MirrorChannel::TargetEntry> _targetCandidates() const;
         // Re-tint the property tree with the pins of the current entity+component.
         void _refreshPinnedTint();
         // Apply the required-component filter (from _settings) to the entity list and,
@@ -396,7 +398,7 @@ namespace rpe
 
         // Add/remove-component state (mirror mode).
         QVector<MirrorChannel::CatalogEntry> _catalog; // addable data comps + tags
-        QVector<QPair<qulonglong, QString>> _mirrorTargets; // "Other target…" (mirror mode)
+        QVector<MirrorChannel::TargetEntry> _mirrorTargets; // "Other target…" (mirror mode)
         QStringList _currentComps;  // DATA components on the selected entity
         QSet<QString> _currentTags; // TAG rows on the selected entity
         // PairData rows: selection key → the RTTR type name the pair carries. The

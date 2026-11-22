@@ -65,10 +65,20 @@ namespace rpe
         {
             QStringList out;
             QString cur;
+            int depth = 0; // inside template arguments "<…>" nothing splits
             for (int i = 0; i < path.size(); ++i)
             {
                 const QChar c = path.at(i);
-                if (c == QLatin1Char('\\') && i + 1 < path.size() && path.at(i + 1) == QLatin1Char('.'))
+                if (c == QLatin1Char('<') || c == QLatin1Char('>'))
+                {
+                    depth += c == QLatin1Char('<') ? 1 : -1;
+                    cur += c;
+                }
+                else if (depth > 0)
+                {
+                    cur += c;
+                }
+                else if (c == QLatin1Char('\\') && i + 1 < path.size() && path.at(i + 1) == QLatin1Char('.'))
                 {
                     cur += QLatin1Char('.');
                     ++i;
@@ -98,14 +108,7 @@ namespace rpe
         // "game::Transform" → "Transform".
         QString componentLeaf(const QString& path)
         {
-            int p = path.lastIndexOf(QStringLiteral("::"));
-            int s = 2;
-            if (p < 0)
-            {
-                p = path.lastIndexOf(QLatin1Char('.'));
-                s = 1;
-            }
-            return p >= 0 ? path.mid(p + s) : path;
+            return scopedLeaf(path); // template-aware: never cuts inside "<…>"
         }
 
         // Item-data roles shared by the list rows. UserRole keeps its historical
@@ -244,7 +247,8 @@ namespace rpe
                 p->restore();
                 if (!pill.isEmpty())
                 {
-                    const int reserve = enabled ? opt.rect.height() : 0;
+                    // Right to left: the trash, the tag/pair chip, then this pill.
+                    const int reserve = (enabled ? opt.rect.height() : 0) + (kind != 0 ? 32 + 4 : 0);
                     const QRect r(opt.rect.right() - reserve - pillW - 6, opt.rect.center().y() - 8, pillW, 16);
                     const bool sel = opt.state & QStyle::State_Selected;
                     p->save();
@@ -740,7 +744,9 @@ namespace rpe
         {
             const QString& full = entry.path;
             QStringList scope = scopeSegments(full);
-            const QString leaf = scope.isEmpty() ? full : scope.takeLast();
+            // (A segment is already one name: only its template arguments shorten.)
+            const QString seg = scope.isEmpty() ? full : scope.takeLast();
+            const QString leaf = seg.contains(QLatin1Char('<')) ? scopedLeaf(seg) : seg;
 
             // By itself — unless it's a relationship only, or already there.
             if (entry.pair != MirrorChannel::PairUse::Only && !(entry.id != 0 && present.contains(entry.id)))
@@ -890,35 +896,51 @@ namespace rpe
             }
             g->setExpanded(true);
         }
-        // Any entity (a OneOf relationship takes only its scope's children, all of
-        // which are suggested already — a typed path still works past the cap).
+        // Any target (a OneOf relationship takes only its scope's children, all of
+        // which are suggested already — a typed path still works past the cap). A
+        // relationship WITHOUT data (a tag: Left, Right…) takes its pair's data from
+        // the target, so the targets that carry data come first; one WITH data has
+        // its target as a mere label — entities and tags only.
         if (!entry->targetsFixed && _targetProvider)
         {
             TargetCandidates candidates = _targetProvider();
             std::sort(candidates.begin(), candidates.end(), [](const auto& x, const auto& y) {
-                return x.second.compare(y.second, Qt::CaseInsensitive) < 0;
+                return x.path.compare(y.path, Qt::CaseInsensitive) < 0;
             });
-            QTreeWidgetItem* g = nullptr;
-            constexpr int kMaxCandidates = 2000;
-            int n = 0;
+            QHash<QString, int> leafCount; // a shared leaf shows its full path
             for (const auto& c : std::as_const(candidates))
             {
-                if (c.first == 0 || listed.contains(c.first) || has(c.first))
-                {
-                    continue;
-                }
-                if (++n > kMaxCandidates)
-                {
-                    break; // the typed-path option below reaches the rest
-                }
-                if (!g)
-                {
-                    g = new QTreeWidgetItem(tree, { tr("Entities") });
-                    g->setFlags(Qt::ItemIsEnabled);
-                    g->setExpanded(true);
-                }
-                option(g, c.first, c.second, c.second);
+                ++leafCount[scopedLeaf(c.path)];
             }
+            constexpr int kMaxCandidates = 2000;
+            int n = 0;
+            const auto fill = [&](bool withData, const QString& title) {
+                QTreeWidgetItem* g = nullptr;
+                for (const auto& c : std::as_const(candidates))
+                {
+                    if (c.carriesData != withData || c.id == 0 || listed.contains(c.id) || has(c.id))
+                    {
+                        continue;
+                    }
+                    if (++n > kMaxCandidates)
+                    {
+                        return; // the typed-path option below reaches the rest
+                    }
+                    if (!g)
+                    {
+                        g = new QTreeWidgetItem(tree, { title });
+                        g->setFlags(Qt::ItemIsEnabled);
+                        g->setExpanded(true);
+                    }
+                    const QString leaf = scopedLeaf(c.path);
+                    option(g, c.id, leafCount.value(leaf) > 1 ? c.path : leaf, c.path);
+                }
+            };
+            if (!entry->carriesData)
+            {
+                fill(true, tr("Components (carry the data)"));
+            }
+            fill(false, tr("Entities"));
         }
         // Whatever was typed, as a path ("elements.Fire", "#123") — last, so Enter
         // takes a listed match first; shown while there is text (see the filter).

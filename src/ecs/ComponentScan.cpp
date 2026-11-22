@@ -3,6 +3,7 @@
 #include "rpe/core/TypeBridge.h"
 
 #include <QPair>
+#include <QRegularExpression>
 #include <QSet>
 #include <QVector>
 
@@ -341,9 +342,73 @@ namespace rpe
         return ecs_pair(rel.id(), tgt.id());
     }
 
-    QVector<QPair<qulonglong, QString>> namedEntities(const flecs::world& world, int limit)
+    namespace
     {
-        QVector<QPair<qulonglong, QString>> out;
+        // What `e` is as a pair's target. Never the machinery a world is full of
+        // — systems, observers, queries, modules — nor enum constants, std:: and
+        // flecs meta types (what flecs registers for member fields), a Relationship
+        // (flecs never takes one as a target), or an unnamed entity. A component
+        // with data is a target only when it's one of YOURS (registered with rpe):
+        // a member field's struct type isn't. Tags and plain entities are — unless
+        // already used as a relationship themselves.
+        enum class TargetKind
+        {
+            None,
+            Thing, // a plain entity or a tag
+            Data,  // a component with data, registered with rpe
+        };
+
+        TargetKind targetKind(flecs::entity e, const QString& path)
+        {
+            // Unnamed, or under an unnamed parent anywhere up ("#140.allocators": the
+            // fields of an anonymous struct flecs describes for its own addons).
+            static const QRegularExpression underUnnamed(QStringLiteral("(^|\\.)#"));
+            if (path.isEmpty() || path.contains(underUnnamed) || path == QLatin1String("std")
+                || path.startsWith(QLatin1String("std.")))
+            {
+                return TargetKind::None;
+            }
+            const ecs_world_t* w = e.world().c_ptr();
+            const ecs_entity_t id = e.id();
+#ifdef FLECS_META
+            // A struct's field, where flecs makes fields entities.
+            const ecs_entity_t parent = ecs_get_target(w, id, EcsChildOf, 0);
+            if (ecs_has(w, id, EcsMember) || (parent && ecs_has(w, parent, EcsStruct)))
+            {
+                return TargetKind::None;
+            }
+#endif
+            // (An enum constant carries EcsConstant as a tag or as (EcsConstant, its type).)
+            if (ecs_has_id(w, id, EcsModule) || ecs_has_id(w, id, EcsRelationship) || ecs_has_id(w, id, EcsConstant)
+                || ecs_has_pair(w, id, EcsConstant, EcsWildcard) || ecs_has_pair(w, id, ecs_id(EcsPoly), EcsSystem)
+                || ecs_has_pair(w, id, ecs_id(EcsPoly), EcsObserver) || ecs_has_pair(w, id, ecs_id(EcsPoly), EcsQuery))
+            {
+                return TargetKind::None;
+            }
+#ifdef FLECS_META
+            if (ecs_has(w, id, EcsPrimitive) || ecs_has(w, id, EcsVector) || ecs_has(w, id, EcsArray) || ecs_has(w, id, EcsOpaque))
+            {
+                return TargetKind::None;
+            }
+#endif
+            const EcsComponent* c = ecs_get(w, id, EcsComponent);
+            if (!c || c->size <= 0)
+            {
+                // A tag / entity already used as a RELATIONSHIP (Left, Right…) is on
+                // the other side of its pairs — not something to pick as a target.
+                return ecs_id_in_use(w, ecs_pair(id, EcsWildcard)) ? TargetKind::None : TargetKind::Thing;
+            }
+            // Resolved like the component listing does: the full path, else the leaf.
+            const char* leaf = e.name().c_str();
+            const bool yours = TypeBridge::resolveByName(path.toUtf8().constData()).is_valid()
+                || (leaf && TypeBridge::resolveByName(leaf).is_valid());
+            return yours ? TargetKind::Data : TargetKind::None;
+        }
+    } // namespace
+
+    QVector<MirrorChannel::TargetEntry> pairTargetCandidates(const flecs::world& world, int limit)
+    {
+        QVector<MirrorChannel::TargetEntry> out;
         const_cast<flecs::world&>(world).query_builder().with<flecs::Identifier>(flecs::Name).build().run([&](flecs::iter& it) {
             while (it.next())
             {
@@ -353,22 +418,26 @@ namespace rpe
                     {
                         continue; // drain the iterator; nothing more is kept
                     }
-                    // Not flecs' own entities, nor rpe's (the mirror's "rpe::EcsMirror"
-                    // system), nor anyone's systems / observers / modules — nor a
-                    // Relationship, which flecs never takes as a target.
                     const flecs::entity e = it.entity(i);
                     const QString path = pairTargetName(e);
-                    if (!isFlecsBuiltinPath(path) && path != QLatin1String("rpe") && !path.startsWith(QLatin1String("rpe."))
-                        && !e.has(flecs::Module) && !e.has(flecs::Relationship) && !e.has(ecs_id(EcsPoly), EcsSystem)
-                        && !e.has(ecs_id(EcsPoly), EcsObserver))
+                    if (isFlecsBuiltinPath(path) || path == QLatin1String("rpe") || path.startsWith(QLatin1String("rpe.")))
                     {
-                        out.append({ static_cast<qulonglong>(e.id()), path });
+                        continue;
+                    }
+                    const TargetKind kind = targetKind(e, path);
+                    if (kind != TargetKind::None)
+                    {
+                        MirrorChannel::TargetEntry t;
+                        t.id = static_cast<qulonglong>(e.id());
+                        t.path = path;
+                        t.carriesData = kind == TargetKind::Data;
+                        out.append(t);
                     }
                 }
             }
         });
-        std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
-            return a.second.compare(b.second, Qt::CaseInsensitive) < 0;
+        std::sort(out.begin(), out.end(), [](const MirrorChannel::TargetEntry& a, const MirrorChannel::TargetEntry& b) {
+            return a.path.compare(b.path, Qt::CaseInsensitive) < 0;
         });
         return out;
     }
@@ -393,26 +462,34 @@ namespace rpe
             }
         }
 
+        // A relationship (used in pairs, named by the host, or with flecs'
+        // Relationship trait) that is a TAG — Left, Right, Output — means nothing
+        // by itself: pair only. One that carries DATA (Damage) is a component in
+        // its own right: offered both ways, also next to a pair of it. The
+        // Relationship trait always means pair only (flecs forbids the rest).
         const auto pairUse = [&](ecs_entity_t id) {
             if (ecs_has_id(w, id, EcsRelationship))
             {
                 return Use::Only;
             }
-            const bool pairs = declared.contains(id) || ecs_id_in_use(w, ecs_pair(id, EcsWildcard));
-            if (!pairs)
+            if (!declared.contains(id) && !ecs_id_in_use(w, ecs_pair(id, EcsWildcard)))
             {
                 return Use::None;
             }
-            return ecs_id_in_use(w, id) ? Use::Also : Use::Only;
+            const EcsComponent* c = ecs_get(w, id, EcsComponent);
+            return (c && c->size > 0) ? Use::Also : Use::Only;
         };
 
         const auto fillTargets = [&](flecs::entity rel, Entry& entry) {
             entry.exclusive = ecs_has_id(w, rel.id(), EcsExclusive);
+            const EcsComponent* relData = ecs_get(w, rel.id(), EcsComponent);
+            entry.carriesData = relData && relData->size > 0;
             QSet<ecs_entity_t> seen;
             const auto add = [&](flecs::entity t) {
-                if (!t.is_valid() || seen.contains(t.id()))
+                const char* tn = t.is_valid() ? t.name().c_str() : nullptr;
+                if (!tn || tn[0] == '\0' || seen.contains(t.id()))
                 {
-                    return;
+                    return; // (an unnamed "#123" target means nothing in a list)
                 }
                 if (entry.targets.size() >= options.maxTargets)
                 {
@@ -488,7 +565,9 @@ namespace rpe
             const flecs::Component* cd = rel.try_get<flecs::Component>();
             entry.tag = !cd || cd->size <= 0;
             entry.id = static_cast<qulonglong>(rel.id());
-            entry.pair = ecs_has_id(w, rel.id(), EcsRelationship) || !ecs_id_in_use(w, rel.id()) ? Use::Only : Use::Also;
+            // A component relationship is offered by itself too (unless flecs forbids
+            // it); a plain entity ("Likes") only ever makes sense in a pair.
+            entry.pair = (ecs_has_id(w, rel.id(), EcsRelationship) || !cd) ? Use::Only : Use::Also;
             fillTargets(rel, entry);
             listed.insert(rel.id());
             out.append(entry);

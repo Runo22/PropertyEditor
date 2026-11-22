@@ -124,9 +124,11 @@ namespace rpe
         // typed path. What the entity already has is left out (by flecs id). If the
         // picker is open, it updates in place.
         void setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries);
-        // The entities "Other target…" offers, as (id, label) — asked for when that
-        // step opens.
-        using TargetCandidates = QVector<QPair<qulonglong, QString>>;
+        // What "Other target…" offers (see pairTargetCandidates) — asked for when
+        // that step opens. For a relationship WITHOUT data (a tag such as Left), the
+        // targets that carry data are listed first: the pair's data is theirs. For
+        // one WITH data, only entities and tags (its target is just a label).
+        using TargetCandidates = QVector<MirrorChannel::TargetEntry>;
         void setTargetCandidatesProvider(std::function<TargetCandidates()> provider);
 
         // Extra right-click menu entries. The callback receives the clicked row's

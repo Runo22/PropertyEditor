@@ -23,6 +23,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QThread>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -61,6 +62,11 @@ struct Marker // Target trait
 };
 struct Visits // used with many targets
 {
+};
+enum class Mood // its constants become entities (flecs meta)
+{
+    Calm,
+    Angry
 };
 
 RTTR_REGISTRATION
@@ -105,6 +111,7 @@ struct Scene
     flecs::world world;
     flecs::entity element, elFire, elIce, scopeA, scopeB, aFire, bFire, red, blue, worldEnt, follows, eats, apples;
     flecs::entity hero, other;
+    flecs::query<Health> healthQuery; // a NAMED query: an entity too
 
     Scene()
     {
@@ -117,6 +124,15 @@ struct Scene
         world.component<Team>().add(flecs::Exclusive);
         world.component<Marker>().add(flecs::Target);
         world.component<Visits>();
+        world.component<Mood>("Mood");
+        world.component<std::string>(); // what reflecting a std::string member registers
+        // Named children of an UNNAMED entity — "#<id>.allocators", like the fields
+        // of an anonymous struct some flecs addons describe.
+        const flecs::entity anon = world.entity();
+        world.entity("allocators").child_of(anon);
+        world.entity("collection_time").child_of(anon);
+        healthQuery = world.query_builder<Health>("HealthQuery").build();
+        world.system<Health>("HealthSystem").each([](Health&) {});
 
         element = world.entity("Element").add(flecs::OneOf);
         elFire = world.entity("Fire").child_of(element);
@@ -141,6 +157,7 @@ struct Scene
         other.add<Team>(red);
         other.set<Owner>({ 7 });
         other.add(element, elFire);
+        other.add<Likes>(world.component<std::vector<Position>>()); // a target with "<….…>" in its name
     }
 };
 
@@ -165,7 +182,7 @@ static void testCatalog()
     check("a plain tag is offered by itself only", frozen && frozen->tag && frozen->pair == Use::None);
 
     const Entry* damage = findEntry(cat, "Damage");
-    check("a component used only in pairs is a relationship only", damage && damage->pair == Use::Only);
+    check("a component used only in pairs is offered both ways (still addable by itself)", damage && damage->pair == Use::Also);
     check("...suggesting the target it's used with, by full path", targetPaths(damage) == QStringList { "a.Fire" });
     check("...with ids carrying the generation", damage && damage->targets.size() == 1
                                                      && damage->targets[0].id == static_cast<qulonglong>(s.aFire.id()));
@@ -176,10 +193,12 @@ static void testCatalog()
 
     const Entry* likes = findEntry(cat, "Likes");
     check("the Relationship trait makes it a relationship only", likes && likes->pair == Use::Only && likes->tag);
-    check("...with no targets to suggest yet (none in use)", likes && likes->targets.isEmpty() && !likes->targetsFixed);
+    check("...suggesting the target it's used with, a template name kept whole",
+          targetPaths(likes) == QStringList { QStringLiteral("std.vector<Position>") } && !likes->targetsFixed);
 
     const Entry* team = findEntry(cat, "Team");
-    check("an Exclusive relationship is flagged", team && team->exclusive && team->pair == Use::Only);
+    check("an Exclusive relationship is flagged", team && team->exclusive);
+    check("a TAG relationship is pair only (by itself it means nothing)", team && team->pair == Use::Only);
     check("...targets in use, sorted", targetPaths(team) == (QStringList { "Blue", "Red" }));
 
     check("an entity with the Target trait is never offered", !findEntry(cat, "Marker"));
@@ -221,6 +240,10 @@ static void testCatalog()
     check("targets are cut at the limit, and the cut is flagged",
           visits && visits->targets.size() == 64 && visits->moreTargets);
     const Entry* teamNoCut = findEntry(cut, "Team");
+    s.other.add<Team>(s.world.entity()); // an UNNAMED target in use
+    const QVector<Entry> withUnnamed = rpe::buildAddCatalog(s.world);
+    const Entry* teamUnnamed = findEntry(withUnnamed, "Team");
+    check("an unnamed (#id) target in use isn't suggested", teamUnnamed && !targetPaths(teamUnnamed).join(' ').contains('#'));
     check("...an uncut list isn't flagged", teamNoCut && !teamNoCut->moreTargets);
 }
 
@@ -247,6 +270,17 @@ static void testRules()
     check("a Relationship can't be added by itself", !rpe::plainAddRejection(w, rel(Likes {})).isEmpty());
     check("a Target can't be added by itself", !rpe::plainAddRejection(w, rel(Marker {})).isEmpty());
     check("a plain component can", rpe::plainAddRejection(w, rel(Health {})).isEmpty());
+
+    // Short names for showing: template-aware.
+    check("scopedLeaf: a scoped name", rpe::scopedLeaf(QStringLiteral("game::Damage")) == "Damage"
+                                           && rpe::scopedLeaf(QStringLiteral("game.Damage")) == "Damage");
+    check("scopedLeaf: never cuts inside template arguments, and shortens them",
+          rpe::scopedLeaf(QStringLiteral("std.vector<resim.core.ModelValue>")) == "vector<ModelValue>"
+              && rpe::scopedLeaf(QStringLiteral("a::Map<b::K, c.d::V<e.F>>")) == "Map<K, V<F>>");
+    check("scopedLeaf: plain and odd names as they are", rpe::scopedLeaf(QStringLiteral("Fire")) == "Fire"
+                                                             && rpe::scopedLeaf(QStringLiteral("#123")) == "#123"
+                                                             && rpe::scopedLeaf(QStringLiteral("a.B<c")) == "B<c"
+                                                             && rpe::scopedLeaf(QStringLiteral("game.render\\.Stats")) == "render\\.Stats");
 
     // Paths the user types.
     check("lookup by dotted path", rpe::lookupEntityPath(w, QStringLiteral("a.Fire")) == s.aFire);
@@ -304,7 +338,7 @@ static void testMirror()
     QVector<Entry> cat;
     ch->pollCatalogEntries(cat);
     check("the producer publishes relationships", findEntry(cat, "Element") && findEntry(cat, "Damage")
-                                                       && findEntry(cat, "Damage")->pair == Use::Only);
+                                                       && findEntry(cat, "Damage")->pair == Use::Also);
 
     // Same leaf, different scopes: both pairs listed, keyed apart.
     ch->queueAddPair(heroId, damage, s.bFire.id());
@@ -503,8 +537,12 @@ static void testPicker(bool mirrorMode)
         return;
     }
     QTreeWidgetItem* damage = findItem(tree, QStringLiteral("Damage"), rels);
-    check("a pair-only component sits under it", damage != nullptr);
-    check("...not as a plain option anywhere else", findItem(tree, QStringLiteral("Damage")) == damage);
+    check("a component used in pairs sits under it", damage != nullptr);
+    QTreeWidgetItem* plainDamage = nullptr;
+    for (QTreeWidgetItemIterator it(tree); *it; ++it)
+        if ((*it)->text(0) == QStringLiteral("Damage") && *it != damage)
+            plainDamage = *it;
+    check("...and is still offered by itself, though the entity has a pair of it", plainDamage != nullptr);
     check("the target the entity already has is left out; Other target… remains",
           childTexts(damage) == QStringList { QStringLiteral("Other target…") });
     QTreeWidgetItem* position = findItem(tree, QStringLiteral("Position"), rels);
@@ -571,6 +609,26 @@ static void testPicker(bool mirrorMode)
               && !childTexts(ents).contains(QStringLiteral("rpe.EcsMirror")) && !childTexts(ents).contains(QStringLiteral("rpe"))
               && !childTexts(ents).join(QLatin1Char(' ')).contains(QStringLiteral("flecs")));
     check("...and the relationship itself isn't a target", !childTexts(ents).contains(QStringLiteral("Likes")));
+    // Likes is a TAG relationship: its pair's data would be its target's, so the
+    // components that carry data (registered with rpe) come first, in their own group.
+    QTreeWidgetItem* dataComps = findItem(tree, QStringLiteral("Components (carry the data)"));
+    check("a tag relationship lists the components that carry data first",
+          dataComps && tree->indexOfTopLevelItem(dataComps) < tree->indexOfTopLevelItem(ents)
+              && childTexts(dataComps).contains(QStringLiteral("Health")) && childTexts(dataComps).contains(QStringLiteral("Position")));
+    check("...only YOURS (registered with rpe): not std:: / unregistered types",
+          !childTexts(dataComps).join(QLatin1Char(' ')).contains(QStringLiteral("vector")));
+    check("...and not again among the entities", !childTexts(ents).contains(QStringLiteral("Health")));
+    check("tags / entities used as relationships aren't targets",
+          !childTexts(ents).contains(QStringLiteral("Team")) && !childTexts(ents).contains(QStringLiteral("Element"))
+              && !childTexts(ents).contains(QStringLiteral("Eats")));
+    check("...nothing under an unnamed parent (\"#140.allocators\")",
+          childTexts(ents).filter(QStringLiteral("#")).isEmpty()
+              && (!dataComps || childTexts(dataComps).filter(QStringLiteral("#")).isEmpty()));
+    check("...not queries, systems, enum constants, std:: types",
+          !childTexts(ents).contains(QStringLiteral("HealthQuery")) && !childTexts(ents).contains(QStringLiteral("HealthSystem"))
+              && !childTexts(ents).contains(QStringLiteral("Mood.Calm"))
+              && childTexts(ents).filter(QRegularExpression(QStringLiteral("^std(\\.|$)"))).isEmpty());
+    check("...tags are (a tag is often a target)", childTexts(ents).contains(QStringLiteral("Frozen")));
     check("...the filter box was cleared, with a target placeholder",
           search->text().isEmpty() && search->placeholderText().contains(QStringLiteral("target")));
     key(search, Qt::Key_Backspace);
@@ -599,6 +657,16 @@ static void testPicker(bool mirrorMode)
     key(search, Qt::Key_Return);
     pump();
     check("...and Enter adds it by path", s.hero.has<Likes>(s.bFire));
+    closePopup();
+
+    // A relationship WITH data (Damage): its target is a label — entities only.
+    open();
+    rels = findItem(tree, QStringLiteral("Relationships"));
+    QTreeWidgetItem* dmgRel = findItem(tree, QStringLiteral("Damage"), rels);
+    emit tree->itemClicked(findItem(tree, QStringLiteral("Other target\u2026"), dmgRel), 0);
+    QCoreApplication::processEvents();
+    check("a relationship with data lists entities only, no data components",
+          !findItem(tree, QStringLiteral("Components (carry the data)")) && findItem(tree, QStringLiteral("Entities")));
     closePopup();
 
     // A relationship that gains a target while the picker is open: refreshed in place.
@@ -630,6 +698,30 @@ static void testPicker(bool mirrorMode)
     pump();
     check("a tag is added by itself", s.hero.has<Frozen>());
     closePopup();
+
+    // A component the entity already has as a PAIR can still be added by itself.
+    open();
+    rels = findItem(tree, QStringLiteral("Relationships"));
+    QTreeWidgetItem* plainDmg = nullptr;
+    for (QTreeWidgetItemIterator it(tree); *it; ++it)
+        if ((*it)->text(0) == QStringLiteral("Damage") && (*it)->parent() != nullptr && !(*it)->data(0, Qt::UserRole).isNull())
+            plainDmg = *it;
+    emit tree->itemClicked(plainDmg, 0);
+    pump();
+    check("a component added by itself next to its pair", s.hero.has<Damage>() && s.hero.has<Damage>(s.aFire));
+    closePopup();
+
+    // A pair whose target's name has template arguments: never cut inside them.
+    for (int i = 0; el && i < el->count(); ++i)
+        if (el->item(i)->text() == QStringLiteral("Other"))
+            el->setCurrentRow(i);
+    pump();
+    auto* compList = browser.componentList()->findChild<QListWidget*>();
+    QStringList rowsShown;
+    for (int i = 0; compList && i < compList->count(); ++i)
+        rowsShown << compList->item(i)->text();
+    check("a template target shows as vector<Position>, not \"Position>\"",
+          rowsShown.contains(QStringLiteral("Likes \u2192 vector<Position>")));
 
     if (mirrorMode)
         mirror.detach();

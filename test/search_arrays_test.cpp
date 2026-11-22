@@ -258,6 +258,9 @@ static void runBrowser(bool mirrorMode)
               return onScreen(QStringLiteral("Inventory"), QStringLiteral("stats.[0].name"))
                   && onScreen(QStringLiteral("Inventory"), QStringLiteral("nested.[0].[0].name"));
           }));
+    check(tag + "a matching field brings the rest of its element along",
+          waitFor([&] { return visibleRows(view).contains(QStringLiteral("Inventory/stats.[0].value")); }));
+    check(tag + "...not the other elements'", !visibleRows(view).contains(QStringLiteral("Inventory/stats.[1].value")));
     check(tag + "...and only them", !visibleRows(view).contains(QStringLiteral("Inventory/stats.[1].name"))
                                         && visibleRows(view).filter(QStringLiteral("weights")).isEmpty());
     check(tag + "...with their values", rowFor(view, QStringLiteral("Inventory"), QStringLiteral("stats.[2].name"))
@@ -309,6 +312,18 @@ static void runBrowser(bool mirrorMode)
               return visibleRows(view).filter(QStringLiteral("Inventory/stats")).isEmpty();
           }));
 
+    // An array matching by NAME shows its elements — plain values and structs.
+    filter->setText(QStringLiteral("weights"));
+    check(tag + "an array of numbers matching by name shows its elements", waitFor([&] {
+              const QStringList rows = visibleRows(view);
+              return rows.contains(QStringLiteral("Inventory/weights.[0]")) && rows.contains(QStringLiteral("Inventory/weights.[1]"));
+          }));
+    filter->setText(QStringLiteral("stats"));
+    check(tag + "an array of structs matching by name shows every element, whole", waitFor([&] {
+              const QStringList rows = visibleRows(view);
+              return rows.contains(QStringLiteral("Inventory/stats.[0].name")) && rows.contains(QStringLiteral("Inventory/stats.[1].value"));
+          }));
+
     // The single-component view: the array's elements come in after the filter
     // text too (mirror mode reads them lazily) and open the same way.
     scope->click(); // scope off: back to one component
@@ -317,7 +332,15 @@ static void runBrowser(bool mirrorMode)
     for (int i = 0; i < comps->count(); ++i)
         if (comps->item(i)->text() == QStringLiteral("Inventory"))
             comps->setCurrentRow(i);
+    filter->setText(QStringLiteral("weights"));
+    check(tag + "single component: an array matching by name shows its elements", waitFor([&] {
+              return rowFor(view, QString(), QStringLiteral("weights.[1]")).isValid();
+          }));
     filter->setText(QStringLiteral("spee"));
+    check(tag + "single component: a matching field's element shows whole (its value too)", waitFor([&] {
+              return rowFor(view, QString(), QStringLiteral("stats.[0].value")).isValid()
+                  && !rowFor(view, QString(), QStringLiteral("stats.[1].value")).isValid();
+          }));
     check(tag + "single component: matching array elements are shown open", waitFor([&] {
               const QModelIndex i = rowFor(view, QString(), QStringLiteral("stats.[0].name"));
               if (!i.isValid())

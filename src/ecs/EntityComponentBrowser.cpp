@@ -1329,15 +1329,10 @@ namespace rpe
             _entityList->setAddablePrefabs(prefabs);
         }
 
-        QVector<MirrorChannel::EntityEntry> targets;
+        QVector<MirrorChannel::TargetEntry> targets;
         if (_channel->pollTargetCandidates(targets))
         {
-            _mirrorTargets.clear();
-            _mirrorTargets.reserve(targets.size());
-            for (const MirrorChannel::EntityEntry& t : std::as_const(targets))
-            {
-                _mirrorTargets.append({ t.id, t.label });
-            }
+            _mirrorTargets = targets;
         }
 
         // With no entity selected (e.g. a required-component filter emptied the list),
@@ -1466,18 +1461,21 @@ namespace rpe
         _updateAddable();
     }
 
-    QVector<QPair<qulonglong, QString>> EntityComponentBrowser::_targetCandidates() const
+    QVector<MirrorChannel::TargetEntry> EntityComponentBrowser::_targetCandidates() const
     {
         if (_channel)
         {
             // What the producer published with the catalog (the entity list holds
             // only entities with components; a target is often a plain entity).
-            return _mirrorTargets.isEmpty() ? _entityList->entries() : _mirrorTargets;
+            return _mirrorTargets;
         }
-        QVector<QPair<qulonglong, QString>> out;
+        QVector<MirrorChannel::TargetEntry> out;
         if (_world)
         {
-            withGuard(_guard, [&] { out = namedEntities(*_world); });
+            withGuard(_guard, [&] {
+                TypeUseScope scope; // inside the guard: never wait for a release holding it
+                out = pairTargetCandidates(*_world);
+            });
         }
         return out;
     }

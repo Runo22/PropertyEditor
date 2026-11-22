@@ -30,6 +30,73 @@ namespace rpe
         int propertyCount = 0;
     };
 
+    // The short name of a scoped name, for showing: its last segment, with any
+    // template arguments shortened the same way — "game::Damage" → "Damage",
+    // "std.vector<resim.core.ModelValue>" → "vector<ModelValue>". A separator
+    // inside "<…>" never splits (a plain last-"." cut gave "ModelValue>"), nor
+    // does flecs' escaped "\." inside a name.
+    inline QString scopedLeaf(const QString& name)
+    {
+        int depth = 0;
+        int cut = -1;
+        int sepLen = 0;
+        for (int i = 0; i < name.size(); ++i)
+        {
+            const QChar c = name.at(i);
+            if (c == QLatin1Char('<'))
+            {
+                ++depth;
+            }
+            else if (c == QLatin1Char('>'))
+            {
+                --depth;
+            }
+            else if (c == QLatin1Char('\\') && i + 1 < name.size() && name.at(i + 1) == QLatin1Char('.'))
+            {
+                ++i; // flecs' escaped dot: part of the name
+            }
+            else if (depth == 0 && c == QLatin1Char('.'))
+            {
+                cut = i;
+                sepLen = 1;
+            }
+            else if (depth == 0 && c == QLatin1Char(':') && i + 1 < name.size() && name.at(i + 1) == QLatin1Char(':'))
+            {
+                cut = i;
+                sepLen = 2;
+                ++i;
+            }
+        }
+        const QString last = cut >= 0 ? name.mid(cut + sepLen) : name;
+        const int lt = last.indexOf(QLatin1Char('<'));
+        if (lt < 0 || !last.endsWith(QLatin1Char('>')))
+        {
+            return last;
+        }
+        QStringList args;
+        int d = 0;
+        int start = lt + 1;
+        for (int i = lt + 1; i < last.size() - 1; ++i)
+        {
+            const QChar c = last.at(i);
+            if (c == QLatin1Char('<'))
+            {
+                ++d;
+            }
+            else if (c == QLatin1Char('>'))
+            {
+                --d;
+            }
+            else if (c == QLatin1Char(',') && d == 0)
+            {
+                args << scopedLeaf(last.mid(start, i - start).trimmed());
+                start = i + 1;
+            }
+        }
+        args << scopedLeaf(last.mid(start, last.size() - 1 - start).trimmed());
+        return last.left(lt + 1) + args.join(QStringLiteral(", ")) + QLatin1Char('>');
+    }
+
     // True for flecs' OWN scope — "flecs", "flecs.core.Identifier", "flecs::meta…".
     // A user namespace that merely starts with those letters ("flecsx.Foo",
     // "FlecsTools.Bar") is NOT built-in: a plain prefix test used to hide such
@@ -125,16 +192,21 @@ namespace rpe
     //   • is named in `pairRelations` (full path or a trailing part, as in
     //     matchComponentName; plain entities too — "Likes"), or
     //   • is already used as one in the world: (R, *) is in use.
-    // It is offered BY ITSELF as well only when it is also in use on its own (and
-    // never with the Relationship trait). An entity with the Target trait is only
-    // ever a target, so it isn't offered at all.
+    // A relationship that carries DATA (Damage) is offered BY ITSELF as well —
+    // also next to a pair of it; a TAG relationship (Left, Right) is pair only, as
+    // is anything with the Relationship trait (flecs forbids the rest). An entity
+    // with the Target trait is only ever a target, so it isn't offered at all.
     // Suggested targets: the children of its OneOf scope (and then only those are
     // valid), else the targets it is used with now, at most `maxTargets`.
-    // Named entities that can be a pair's target, as (id, path) sorted by path, at
-    // most `limit` — what a relationship's "Other target…" step offers. Leaves out
-    // flecs' and rpe's own entities, systems, observers, modules and entities with
-    // the Relationship trait (never a target).
-    QVector<QPair<qulonglong, QString>> namedEntities(const flecs::world& world, int limit = 5000);
+    // What a relationship's "Other target…" step can offer, sorted by path, at
+    // most `limit`: plain entities and tags, and YOUR components that carry data
+    // (registered with rpe — `carriesData`: a tag relationship such as (Left,
+    // HotRequest) takes its data from its target, so those come first there). Never
+    // the machinery (flecs' and rpe's own entities, systems, observers, queries,
+    // modules), enum constants, std:: / meta types or other unregistered data types
+    // (what flecs registers for member fields), Relationships, tags / entities in
+    // use as a relationship, unnamed entities.
+    QVector<MirrorChannel::TargetEntry> pairTargetCandidates(const flecs::world& world, int limit = 5000);
 
     struct AddCatalogOptions
     {

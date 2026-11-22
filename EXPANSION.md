@@ -210,6 +210,15 @@ plan makes the editor *feed* them from richer metadata.
 These need new keys *and* new widget behaviour; defer until a producer models
 them.
 
+UI behaviour to evaluate (no new key):
+
+- **Filter: a struct matching by NAME shows its fields.** Today a match inside an
+  ARRAY ELEMENT brings the whole element along (`[0] ▸ name = speed` with its
+  `value`), but a struct row matching by its own name (`position`) shows without
+  its `x / y / z` unless they match too. Same rule for any struct? Name matches
+  only (a value match like an array's `[3]` would open far too much), and watch
+  how much a short needle opens up before deciding.
+
 ---
 
 ## 5. Design rules

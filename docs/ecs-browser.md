@@ -176,8 +176,10 @@ filter always did; a nested struct matching by name shows as one row. Containers
 are searched **inside**: an element's text, a map's keys, and — for arrays of
 structs, map values and nested arrays — their fields' names and values. A
 matching array shows with just its matching rows (`stats ▸ [2] ▸ name =
-maxSpeed`), and the counts count those rows. A row whose value stops matching
-drops out, and so does an element removed from its array.
+maxSpeed`) — and the rest of that element with it (its `value` beside the
+matching `name`), not the other elements — and the counts count those rows. A row whose value stops matching
+drops out, and so does an element removed from its array. An array matching
+by its **name** shows all its elements (`inventory` lists what's in it).
 
 **Cost.** Nothing runs while the filter is empty. With text, mirror mode searches
 on the simulation thread a round every ~250 ms, **sliced across pumps with a
@@ -223,8 +225,8 @@ actually use are there — everything else is added by itself, as before:
 
 | A component / entity is offered… | when |
 |---|---|
-| **as a pair only** | it has flecs' `Relationship` trait, **or** it's used in a pair somewhere in the world (`(R, *)` in use) and never by itself, **or** you list it in `Settings::pairRelations` |
-| **both ways** (plain under its namespace, and under Relationships) | it's used both ways in the world, or listed and also used by itself |
+| **under Relationships** (pick a target) | it has flecs' `Relationship` trait, **or** it's used in a pair somewhere in the world (`(R, *)` in use), **or** you list it in `Settings::pairRelations` (only needed for one that's in no pair yet) |
+| **by itself as well** | a relationship that carries **data** (`Damage`) — also next to a pair of it. A **tag** relationship (`Left`, `Right`, `Output`) and a plain entity are pairs only |
 | **never** | it has the `Target` trait (only ever a target) |
 
 `pairRelations` takes full paths or trailing parts like `preferredComponents`,
@@ -233,8 +235,16 @@ found when listed or given the `Relationship` trait).
 
 Each relationship opens to its **targets**: the children of its `OneOf` scope
 (then only those — flecs refuses anything else), otherwise the targets it's used
-with now (up to 64), then **Other target…**. That step lists every named entity
-(filter as you type) and, if nothing matches, takes the text as a **path**
+with now (up to 64), then **Other target…**. That step depends on
+the relationship: for a **tag** one (`Left`) the pair's data is its target's, so
+**your components that carry data** (registered with rpe — `HotRequest`) come
+first, then entities and tags; for one with **data** (`Damage`) the target is a
+label — entities and tags only. Never offered: the machinery (systems,
+observers, queries, modules), enum constants, `std::` / meta / unregistered
+types (what flecs registers for member fields), tags already used as
+relationships, unnamed `#id`s. A target already in use is suggested under its
+relationship (unnamed ones aren't). Filter as you type; if nothing matches it
+takes the text as a **path**
 (`elements.Fire`, `elements::Fire`, `#<id>`). Backspace in the empty filter goes
 back. An `Exclusive` relationship says what a target replaces
 (`→ Ice  (replaces Fire)`). Targets the entity already has are left out.

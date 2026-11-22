@@ -1159,13 +1159,10 @@ namespace rpe
             const bool anyOpenRelation = std::any_of(catalog.begin(), catalog.end(), [](const MirrorChannel::CatalogEntry& c) {
                 return c.pair != MirrorChannel::PairUse::None && !c.targetsFixed;
             });
-            QVector<MirrorChannel::EntityEntry> targets;
+            QVector<MirrorChannel::TargetEntry> targets;
             if (anyOpenRelation)
             {
-                for (const auto& t : namedEntities(world))
-                {
-                    targets.append({ t.first, t.second });
-                }
+                targets = pairTargetCandidates(world);
             }
             if (targets != _lastTargets)
             {

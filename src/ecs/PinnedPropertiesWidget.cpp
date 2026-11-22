@@ -4,6 +4,7 @@
 #include "rpe/core/ReadOnly.h"
 #include "rpe/core/TypeBridge.h"
 #include "rpe/core/TypeRenderer.h"
+#include "rpe/ecs/ComponentScan.h"
 #include "rpe/ecs/EcsMirror.h"
 #include "rpe/gui/PropertyDelegate.h"
 #include "rpe/gui/PropertyModel.h" // Q_DECLARE_METATYPE(rttr::variant)
@@ -391,8 +392,11 @@ namespace rpe
         }
         // Display the leaf component name; the full scoped name stays in the data.
         // A pair key ("Rel (Target)") has no "." to trim — it shows as-is.
-        const int cut = component.lastIndexOf(QLatin1Char('.'));
-        const QString compLeaf = cut >= 0 ? component.mid(cut + 1) : component;
+        // A pair's key is "Rel (Target)": both shortened, never cut inside them.
+        const int open = component.endsWith(QLatin1Char(')')) ? component.indexOf(QStringLiteral(" (")) : -1;
+        const QString compLeaf = open > 0 ? scopedLeaf(component.left(open)) + QStringLiteral(" (")
+                + scopedLeaf(component.mid(open + 2, component.size() - open - 3)) + QLatin1Char(')')
+                                          : scopedLeaf(component);
 
         _updating = true;
         auto* item = new QTreeWidgetItem(_tree);
