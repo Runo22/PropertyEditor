@@ -199,13 +199,12 @@ namespace rpe
     // Suggested targets: the children of its OneOf scope (and then only those are
     // valid), else the targets it is used with now, at most `maxTargets`.
     // What a relationship's "Other target…" step can offer, sorted by path, at
-    // most `limit`: plain entities and tags, and YOUR components that carry data
-    // (registered with rpe — `carriesData`: a tag relationship such as (Left,
+    // most `limit`: plain entities, tags (`tag`), and YOUR components that carry
+    // data (registered with rpe — `carriesData`: a tag relationship such as (Left,
     // HotRequest) takes its data from its target, so those come first there). Never
     // the machinery (flecs' and rpe's own entities, systems, observers, queries,
     // modules), enum constants, std:: / meta types or other unregistered data types
-    // (what flecs registers for member fields), Relationships, tags / entities in
-    // use as a relationship, unnamed entities.
+    // (what flecs registers for member fields), Relationships, unnamed entities.
     QVector<MirrorChannel::TargetEntry> pairTargetCandidates(const flecs::world& world, int limit = 5000);
 
     struct AddCatalogOptions

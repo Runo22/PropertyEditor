@@ -15,12 +15,10 @@ namespace rpe
         rttr::type sequenceElementType(rttr::type container)
         {
             const rttr::type r = TypeRenderer::rawType(container);
-            if (r.is_sequential_container())
+            const auto args = r.get_template_arguments();
+            if (r.is_sequential_container() && args.begin() != args.end())
             {
-                for (const rttr::type& a : r.get_template_arguments())
-                {
-                    return a;
-                }
+                return *args.begin();
             }
             return rttr::type::get_by_name(std::string());
         }

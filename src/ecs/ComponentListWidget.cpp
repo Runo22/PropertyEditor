@@ -899,8 +899,8 @@ namespace rpe
         // Any target (a OneOf relationship takes only its scope's children, all of
         // which are suggested already — a typed path still works past the cap). A
         // relationship WITHOUT data (a tag: Left, Right…) takes its pair's data from
-        // the target, so the targets that carry data come first; one WITH data has
-        // its target as a mere label — entities and tags only.
+        // the target, so the targets that carry data come first; one WITH data
+        // ((HotRequest, Left)) has its target as a mere label — tags, then entities.
         if (!entry->targetsFixed && _targetProvider)
         {
             TargetCandidates candidates = _targetProvider();
@@ -914,11 +914,20 @@ namespace rpe
             }
             constexpr int kMaxCandidates = 2000;
             int n = 0;
-            const auto fill = [&](bool withData, const QString& title) {
+            enum class Group
+            {
+                Data,
+                Tags,
+                Entities
+            };
+            const auto groupOf = [](const MirrorChannel::TargetEntry& c) {
+                return c.carriesData ? Group::Data : (c.tag ? Group::Tags : Group::Entities);
+            };
+            const auto fill = [&](Group which, const QString& title) {
                 QTreeWidgetItem* g = nullptr;
                 for (const auto& c : std::as_const(candidates))
                 {
-                    if (c.carriesData != withData || c.id == 0 || listed.contains(c.id) || has(c.id))
+                    if (groupOf(c) != which || c.id == 0 || listed.contains(c.id) || has(c.id))
                     {
                         continue;
                     }
@@ -938,9 +947,10 @@ namespace rpe
             };
             if (!entry->carriesData)
             {
-                fill(true, tr("Components (carry the data)"));
+                fill(Group::Data, tr("Components (carry the data)"));
             }
-            fill(false, tr("Entities"));
+            fill(Group::Tags, tr("Tags"));
+            fill(Group::Entities, tr("Entities"));
         }
         // Whatever was typed, as a path ("elements.Fire", "#123") — last, so Enter
         // takes a listed match first; shown while there is text (see the filter).

@@ -63,6 +63,9 @@ struct Marker // Target trait
 struct Visits // used with many targets
 {
 };
+struct LeftSide // a tag used as a TARGET: (Damage, Left), data on the relationship
+{
+};
 enum class Mood // its constants become entities (flecs meta)
 {
     Calm,
@@ -158,6 +161,8 @@ struct Scene
         other.set<Owner>({ 7 });
         other.add(element, elFire);
         other.add<Likes>(world.component<std::vector<Position>>()); // a target with "<….…>" in its name
+        world.component<LeftSide>("Left");
+        other.set<Damage, LeftSide>({ 5 }); // (Damage, Left): the data is the relationship's
     }
 };
 
@@ -183,9 +188,11 @@ static void testCatalog()
 
     const Entry* damage = findEntry(cat, "Damage");
     check("a component used only in pairs is offered both ways (still addable by itself)", damage && damage->pair == Use::Also);
-    check("...suggesting the target it's used with, by full path", targetPaths(damage) == QStringList { "a.Fire" });
-    check("...with ids carrying the generation", damage && damage->targets.size() == 1
+    check("...suggesting the targets it's used with (an entity, a tag), by full path",
+          targetPaths(damage) == (QStringList { "a.Fire", "Left" }));
+    check("...with ids carrying the generation", damage && damage->targets.size() == 2
                                                      && damage->targets[0].id == static_cast<qulonglong>(s.aFire.id()));
+    check("...it carries data itself (its targets are labels)", damage && damage->carriesData);
 
     const Entry* position = findEntry(cat, "Position");
     check("a component used by itself AND in pairs is offered both ways", position && position->pair == Use::Also);
@@ -543,8 +550,8 @@ static void testPicker(bool mirrorMode)
         if ((*it)->text(0) == QStringLiteral("Damage") && *it != damage)
             plainDamage = *it;
     check("...and is still offered by itself, though the entity has a pair of it", plainDamage != nullptr);
-    check("the target the entity already has is left out; Other target… remains",
-          childTexts(damage) == QStringList { QStringLiteral("Other target…") });
+    check("the target the entity already has is left out; the others and Other target… remain",
+          childTexts(damage) == (QStringList { QStringLiteral("\u2192 Left"), QStringLiteral("Other target…") }));
     QTreeWidgetItem* position = findItem(tree, QStringLiteral("Position"), rels);
     check("an Also relationship is under Relationships with its target",
           position && childTexts(position).contains(QStringLiteral("→ World")));
@@ -618,9 +625,14 @@ static void testPicker(bool mirrorMode)
     check("...only YOURS (registered with rpe): not std:: / unregistered types",
           !childTexts(dataComps).join(QLatin1Char(' ')).contains(QStringLiteral("vector")));
     check("...and not again among the entities", !childTexts(ents).contains(QStringLiteral("Health")));
-    check("tags / entities used as relationships aren't targets",
-          !childTexts(ents).contains(QStringLiteral("Team")) && !childTexts(ents).contains(QStringLiteral("Element"))
-              && !childTexts(ents).contains(QStringLiteral("Eats")));
+    QTreeWidgetItem* tagsGroup = findItem(tree, QStringLiteral("Tags"));
+    check("tags have their own group, between the data components and the entities",
+          tagsGroup && tree->indexOfTopLevelItem(dataComps) < tree->indexOfTopLevelItem(tagsGroup)
+              && tree->indexOfTopLevelItem(tagsGroup) < tree->indexOfTopLevelItem(ents)
+              && childTexts(tagsGroup).contains(QStringLiteral("Frozen")) && childTexts(tagsGroup).contains(QStringLiteral("Left")));
+    check("...a tag used as a relationship elsewhere is still offered (a world may be switching sides)",
+          childTexts(tagsGroup).contains(QStringLiteral("Team")));
+    check("...and the entities group holds plain entities only", !childTexts(ents).contains(QStringLiteral("Frozen")));
     check("...nothing under an unnamed parent (\"#140.allocators\")",
           childTexts(ents).filter(QStringLiteral("#")).isEmpty()
               && (!dataComps || childTexts(dataComps).filter(QStringLiteral("#")).isEmpty()));
@@ -628,7 +640,7 @@ static void testPicker(bool mirrorMode)
           !childTexts(ents).contains(QStringLiteral("HealthQuery")) && !childTexts(ents).contains(QStringLiteral("HealthSystem"))
               && !childTexts(ents).contains(QStringLiteral("Mood.Calm"))
               && childTexts(ents).filter(QRegularExpression(QStringLiteral("^std(\\.|$)"))).isEmpty());
-    check("...tags are (a tag is often a target)", childTexts(ents).contains(QStringLiteral("Frozen")));
+    check("...plain entities used as relationships are too", childTexts(ents).contains(QStringLiteral("Eats")));
     check("...the filter box was cleared, with a target placeholder",
           search->text().isEmpty() && search->placeholderText().contains(QStringLiteral("target")));
     key(search, Qt::Key_Backspace);
@@ -665,8 +677,11 @@ static void testPicker(bool mirrorMode)
     QTreeWidgetItem* dmgRel = findItem(tree, QStringLiteral("Damage"), rels);
     emit tree->itemClicked(findItem(tree, QStringLiteral("Other target\u2026"), dmgRel), 0);
     QCoreApplication::processEvents();
-    check("a relationship with data lists entities only, no data components",
-          !findItem(tree, QStringLiteral("Components (carry the data)")) && findItem(tree, QStringLiteral("Entities")));
+    check("a relationship with data ((Damage, Left)): no data components — its target is a label",
+          !findItem(tree, QStringLiteral("Components (carry the data)")));
+    check("...tags first, then entities", findItem(tree, QStringLiteral("Tags")) && findItem(tree, QStringLiteral("Entities"))
+                                             && tree->indexOfTopLevelItem(findItem(tree, QStringLiteral("Tags")))
+                                                 < tree->indexOfTopLevelItem(findItem(tree, QStringLiteral("Entities"))));
     closePopup();
 
     // A relationship that gains a target while the picker is open: refreshed in place.

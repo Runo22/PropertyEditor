@@ -349,13 +349,13 @@ namespace rpe
         // flecs meta types (what flecs registers for member fields), a Relationship
         // (flecs never takes one as a target), or an unnamed entity. A component
         // with data is a target only when it's one of YOURS (registered with rpe):
-        // a member field's struct type isn't. Tags and plain entities are — unless
-        // already used as a relationship themselves.
+        // a member field's struct type isn't. Tags and plain entities are.
         enum class TargetKind
         {
             None,
-            Thing, // a plain entity or a tag
-            Data,  // a component with data, registered with rpe
+            Entity, // a plain entity
+            Tag,    // a component without data
+            Data,   // a component with data, registered with rpe
         };
 
         TargetKind targetKind(flecs::entity e, const QString& path)
@@ -392,11 +392,13 @@ namespace rpe
             }
 #endif
             const EcsComponent* c = ecs_get(w, id, EcsComponent);
-            if (!c || c->size <= 0)
+            if (!c)
             {
-                // A tag / entity already used as a RELATIONSHIP (Left, Right…) is on
-                // the other side of its pairs — not something to pick as a target.
-                return ecs_id_in_use(w, ecs_pair(id, EcsWildcard)) ? TargetKind::None : TargetKind::Thing;
+                return TargetKind::Entity;
+            }
+            if (c->size <= 0)
+            {
+                return TargetKind::Tag;
             }
             // Resolved like the component listing does: the full path, else the leaf.
             const char* leaf = e.name().c_str();
@@ -431,6 +433,7 @@ namespace rpe
                         t.id = static_cast<qulonglong>(e.id());
                         t.path = path;
                         t.carriesData = kind == TargetKind::Data;
+                        t.tag = kind == TargetKind::Tag;
                         out.append(t);
                     }
                 }

@@ -125,9 +125,10 @@ namespace rpe
         // picker is open, it updates in place.
         void setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries);
         // What "Other target…" offers (see pairTargetCandidates) — asked for when
-        // that step opens. For a relationship WITHOUT data (a tag such as Left), the
-        // targets that carry data are listed first: the pair's data is theirs. For
-        // one WITH data, only entities and tags (its target is just a label).
+        // that step opens, in groups. For a relationship WITHOUT data (a tag such as
+        // Left), the components that carry data come first — the pair's data is
+        // theirs — then tags, then entities. For one WITH data ((HotRequest, Left)),
+        // the target is a label: tags, then entities.
         using TargetCandidates = QVector<MirrorChannel::TargetEntry>;
         void setTargetCandidatesProvider(std::function<TargetCandidates()> provider);
 

@@ -138,9 +138,10 @@ namespace rpe
             qulonglong id = 0;        // the entity (generation included)
             QString path;             // its full path
             bool carriesData = false; // a component with data, registered with rpe
+            bool tag = false;         // a component without data (else a plain entity)
             bool operator==(const TargetEntry& o) const
             {
-                return id == o.id && path == o.path && carriesData == o.carriesData;
+                return id == o.id && path == o.path && carriesData == o.carriesData && tag == o.tag;
             }
             bool operator!=(const TargetEntry& o) const
             {

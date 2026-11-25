@@ -235,14 +235,14 @@ found when listed or given the `Relationship` trait).
 
 Each relationship opens to its **targets**: the children of its `OneOf` scope
 (then only those — flecs refuses anything else), otherwise the targets it's used
-with now (up to 64), then **Other target…**. That step depends on
-the relationship: for a **tag** one (`Left`) the pair's data is its target's, so
-**your components that carry data** (registered with rpe — `HotRequest`) come
-first, then entities and tags; for one with **data** (`Damage`) the target is a
-label — entities and tags only. Never offered: the machinery (systems,
-observers, queries, modules), enum constants, `std::` / meta / unregistered
-types (what flecs registers for member fields), tags already used as
-relationships, unnamed `#id`s. A target already in use is suggested under its
+with now (up to 64), then **Other target…**. That step lists
+targets in groups, by the relationship: for a **tag** one (`(Left, HotRequest)`)
+the pair's data is its target's, so **your components that carry data**
+(registered with rpe) come first, then **Tags**, then **Entities**; for one with
+**data** (`(HotRequest, Left)`, `(Damage, Fire)`) the target is a label —
+**Tags**, then **Entities**. Never offered: the machinery (systems, observers,
+queries, modules), enum constants, `std::` / meta / unregistered types (what
+flecs registers for member fields), unnamed `#id`s and anything under one. A target already in use is suggested under its
 relationship (unnamed ones aren't). Filter as you type; if nothing matches it
 takes the text as a **path**
 (`elements.Fire`, `elements::Fire`, `#<id>`). Backspace in the empty filter goes
