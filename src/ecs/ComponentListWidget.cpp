@@ -550,6 +550,7 @@ namespace rpe
             AddRelRole,    // qulonglong relationship
             AddTargetRole, // qulonglong target
             AddPathRole,   // QString component path / target path
+            AddPairRole,   // qulonglong the pair id (an Existing option)
         };
         enum class AddKind
         {
@@ -558,7 +559,21 @@ namespace rpe
             OtherTarget, // open the target step for AddRelRole
             TypedPath,   // add (relationship, the typed path)
             Back,        // (not an option) back to the component step
+            Existing,    // a pair the entity already has: picking it selects its row
         };
+
+        // A pair the entity already has, shown where it would be offered — rather
+        // than missing from the list — marked, and picking it goes to its row.
+        void makeExisting(QTreeWidgetItem* item, qulonglong pairId)
+        {
+            item->setText(0, item->text(0) + QObject::tr("  (already added)"));
+            QFont f = item->font(0);
+            f.setItalic(true);
+            item->setFont(0, f);
+            item->setData(0, AddKindRole, static_cast<int>(AddKind::Existing));
+            item->setData(0, AddPairRole, pairId);
+            item->setToolTip(0, item->toolTip(0) + QObject::tr("\nAlready on this entity — Enter / click selects it"));
+        }
 
         void setItalic(QTreeWidgetItem* item)
         {
@@ -770,19 +785,14 @@ namespace rpe
 
             // As a relationship: its targets, then "Other target…".
             const quint32 relLo = static_cast<quint32>(entry.id);
-            QVector<MirrorChannel::PairTarget> targets;
-            for (const auto& t : entry.targets)
-            {
-                const ecs_id_t pairId = ecs_pair(static_cast<ecs_entity_t>(entry.id), static_cast<ecs_entity_t>(t.id));
-                if (!present.contains(static_cast<qulonglong>(pairId)))
-                {
-                    targets.append(t);
-                }
-            }
+            const QVector<MirrorChannel::PairTarget>& targets = entry.targets;
+            const auto pairOf = [&](qulonglong target) {
+                return static_cast<qulonglong>(ecs_pair(static_cast<ecs_entity_t>(entry.id), static_cast<ecs_entity_t>(target)));
+            };
             const bool other = !entry.targetsFixed || entry.moreTargets;
             if (targets.isEmpty() && !other)
             {
-                continue; // every valid target is already there
+                continue; // nothing to pick
             }
             auto* rel = new QTreeWidgetItem(groupFor(relRootLabel, scope), { leaf });
             rel->setFlags(Qt::ItemIsEnabled);
@@ -792,16 +802,28 @@ namespace rpe
             const QString replaces = (entry.exclusive && hasTarget.contains(relLo))
                 ? tr("  (replaces %1)").arg(hasTarget.value(relLo))
                 : QString();
+            // The targets that can be added, then "Other target…", then the ones the
+            // entity already has (shown only when the filter asks for them).
             const QStringList labels = targetLabels(targets);
-            for (int i = 0; i < targets.size(); ++i)
-            {
-                auto* item = new QTreeWidgetItem(rel, { QStringLiteral("→ ") + labels[i] + replaces });
+            const auto addTarget = [&](int i, bool there) {
+                auto* item = new QTreeWidgetItem(rel, { QStringLiteral("→ ") + labels[i] + (there ? QString() : replaces) });
                 item->setToolTip(0, QStringLiteral("(%1, %2)").arg(full, targets[i].path));
                 item->setData(0, Qt::UserRole, full + QLatin1Char(' ') + targets[i].path);
                 item->setData(0, AddKindRole, static_cast<int>(AddKind::PairTarget));
                 item->setData(0, AddRelRole, entry.id);
                 item->setData(0, AddTargetRole, targets[i].id);
+                if (there)
+                {
+                    makeExisting(item, pairOf(targets[i].id));
+                }
                 ++offered;
+            };
+            for (int i = 0; i < targets.size(); ++i)
+            {
+                if (!present.contains(pairOf(targets[i].id)))
+                {
+                    addTarget(i, false);
+                }
             }
             if (other)
             {
@@ -811,6 +833,13 @@ namespace rpe
                 item->setData(0, AddKindRole, static_cast<int>(AddKind::OtherTarget));
                 item->setData(0, AddRelRole, entry.id);
                 ++offered;
+            }
+            for (int i = 0; i < targets.size(); ++i)
+            {
+                if (present.contains(pairOf(targets[i].id)))
+                {
+                    addTarget(i, true);
+                }
             }
             rel->setExpanded(false); // opened by a click, or by a filter that matches inside
         }
@@ -873,16 +902,29 @@ namespace rpe
             item->setData(0, AddRelRole, entry->id);
             item->setData(0, AddTargetRole, id);
             item->setData(0, AddPathRole, path);
+            if (has(id))
+            {
+                makeExisting(item, static_cast<qulonglong>(ecs_pair(static_cast<ecs_entity_t>(entry->id),
+                                                                    static_cast<ecs_entity_t>(id))));
+            }
         };
 
+        // The entity's own pairs are listed too — marked, and LAST in their group,
+        // after what can be added.
         QSet<qulonglong> listed;
         QVector<MirrorChannel::PairTarget> suggested;
-        for (const auto& t : entry->targets)
+        for (const bool own : { false, true })
         {
-            if (!has(t.id))
+            for (const auto& t : entry->targets)
             {
-                suggested.append(t);
+                if (has(t.id) == own)
+                {
+                    suggested.append(t);
+                }
             }
+        }
+        for (const auto& t : suggested)
+        {
             listed.insert(t.id);
         }
         if (!suggested.isEmpty())
@@ -925,24 +967,27 @@ namespace rpe
             };
             const auto fill = [&](Group which, const QString& title) {
                 QTreeWidgetItem* g = nullptr;
-                for (const auto& c : std::as_const(candidates))
+                for (const bool own : { false, true }) // the entity's own pairs last
                 {
-                    if (groupOf(c) != which || c.id == 0 || listed.contains(c.id) || has(c.id))
+                    for (const auto& c : std::as_const(candidates))
                     {
-                        continue;
+                        if (groupOf(c) != which || c.id == 0 || listed.contains(c.id) || has(c.id) != own)
+                        {
+                            continue;
+                        }
+                        if (++n > kMaxCandidates)
+                        {
+                            return; // the typed-path option below reaches the rest
+                        }
+                        if (!g)
+                        {
+                            g = new QTreeWidgetItem(tree, { title });
+                            g->setFlags(Qt::ItemIsEnabled);
+                            g->setExpanded(true);
+                        }
+                        const QString leaf = scopedLeaf(c.path);
+                        option(g, c.id, leafCount.value(leaf) > 1 ? c.path : leaf, c.path);
                     }
-                    if (++n > kMaxCandidates)
-                    {
-                        return; // the typed-path option below reaches the rest
-                    }
-                    if (!g)
-                    {
-                        g = new QTreeWidgetItem(tree, { title });
-                        g->setFlags(Qt::ItemIsEnabled);
-                        g->setExpanded(true);
-                    }
-                    const QString leaf = scopedLeaf(c.path);
-                    option(g, c.id, leafCount.value(leaf) > 1 ? c.path : leaf, c.path);
                 }
             };
             if (!entry->carriesData)
@@ -990,8 +1035,13 @@ namespace rpe
             const QVariant full = item->data(0, Qt::UserRole);
             if (!full.isNull())
             {
-                const bool match = s.isEmpty() || full.toString().contains(s, Qt::CaseInsensitive)
-                    || item->text(0).contains(s, Qt::CaseInsensitive);
+                // A pair the entity already has shows, among a relationship's
+                // targets, only when typed for — browsing, the list offers what can
+                // be ADDED. (The target step shows it, last, as it is.)
+                const bool typedOnly = item->data(0, AddKindRole).isValid() && kind == AddKind::Existing && _addTargetRel == 0;
+                const bool match = s.isEmpty() ? !typedOnly
+                                               : (full.toString().contains(s, Qt::CaseInsensitive)
+                                                  || item->text(0).contains(s, Qt::CaseInsensitive));
                 item->setHidden(!match);
                 return match;
             }
@@ -1005,8 +1055,10 @@ namespace rpe
                 any = apply(item->child(j)) || any;
             }
             item->setHidden(!any);
-            // Namespaces stay open; a relationship opens only while filtering.
-            const bool isRelation = item->childCount() > 0 && item->child(0)->data(0, AddRelRole).isValid();
+            // Namespaces stay open; a relationship opens only while filtering. (The
+            // target step's groups — In use, Tags, … — are not relationships: open.)
+            const bool isRelation = _addTargetRel == 0 && item->childCount() > 0
+                && item->child(0)->data(0, AddRelRole).isValid();
             item->setExpanded(any && (!isRelation || !s.isEmpty()));
             return any;
         };
@@ -1082,6 +1134,34 @@ namespace rpe
         case AddKind::Back:
             _setAddStep(0);
             break;
+        case AddKind::Existing:
+        {
+            const qulonglong pairId = item->data(0, AddPairRole).toULongLong();
+            close();
+            _revealPresent(pairId); // nothing added: it's there already
+            break;
+        }
+        }
+    }
+
+    void ComponentListWidget::_revealPresent(qulonglong rawId)
+    {
+        for (int i = 0; i < _list->count(); ++i)
+        {
+            QListWidgetItem* item = _list->item(i);
+            if (item->data(CompRawIdRole).toULongLong() != rawId)
+            {
+                continue;
+            }
+            if (!item->isHidden())
+            {
+                _list->scrollToItem(item);
+            }
+            if (item->flags() & Qt::ItemIsSelectable)
+            {
+                _list->setCurrentItem(item); // a pair with data: open it in the editor
+            }
+            return;
         }
     }
 
@@ -1113,6 +1193,7 @@ namespace rpe
         _addSearch = search;
         _addTargetRel = 0;
         _fillAddTree();
+        _filterAddTree(); // the entity's own pairs wait for a filter
 
         const auto activate = [this](QTreeWidgetItem* item) { _activateAddItem(item); };
         connect(tree, &QTreeWidget::itemClicked, this, [activate](QTreeWidgetItem* item, int) {

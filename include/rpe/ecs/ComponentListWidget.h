@@ -121,8 +121,9 @@ namespace rpe
         // Catalog entries. RELATIONSHIPS (entry.pair != None) are offered under a
         // "Relationships" branch: each lists its suggested targets plus "Other
         // target…", which asks for any entity (setTargetCandidatesProvider) or a
-        // typed path. What the entity already has is left out (by flecs id). If the
-        // picker is open, it updates in place.
+        // typed path. A component the entity already has is left out (by flecs id);
+        // a pair it already has is shown, marked "(already added)", and picking it
+        // selects its row instead of adding. If the picker is open, it updates in place.
         void setAddableEntries(const QVector<MirrorChannel::CatalogEntry>& entries);
         // What "Other target…" offers (see pairTargetCandidates) — asked for when
         // that step opens, in groups. For a relationship WITHOUT data (a tag such as
@@ -203,6 +204,8 @@ namespace rpe
         void _filterAddTree();
         void _activateAddItem(QTreeWidgetItem* item);
         void _setAddStep(qulonglong relation);
+        // Select (or, for a pair without data, scroll to) the row with this flecs id.
+        void _revealPresent(qulonglong rawId);
         // flecs ids of what the listed entity has (rows' ids), and per relationship
         // (low 32 bits) the targets it has now, as shown.
         QSet<qulonglong> _presentIds() const;

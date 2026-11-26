@@ -247,7 +247,11 @@ relationship (unnamed ones aren't). Filter as you type; if nothing matches it
 takes the text as a **path**
 (`elements.Fire`, `elements::Fire`, `#<id>`). Backspace in the empty filter goes
 back. An `Exclusive` relationship says what a target replaces
-(`→ Ice  (replaces Fire)`). Targets the entity already has are left out.
+(`→ Ice  (replaces Fire)`). Browsing, a relationship lists what can be **added** (then *Other target…*).
+A pair the entity already has shows up, marked **(already added)**, when the
+filter asks for it — and in the target step, last in its group. Picking it
+(click or Enter) adds nothing and selects that pair's row instead (flecs holds
+a pair once per entity anyway).
 
 The add goes **by id** (with the generation, so a target deleted and its id
 recycled since the picker opened is refused, not swapped for another entity),

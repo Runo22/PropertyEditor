@@ -550,8 +550,11 @@ static void testPicker(bool mirrorMode)
         if ((*it)->text(0) == QStringLiteral("Damage") && *it != damage)
             plainDamage = *it;
     check("...and is still offered by itself, though the entity has a pair of it", plainDamage != nullptr);
-    check("the target the entity already has is left out; the others and Other target… remain",
-          childTexts(damage) == (QStringList { QStringLiteral("\u2192 Left"), QStringLiteral("Other target…") }));
+    check("what can be added comes first, then Other target…, then the entity's own pair (marked)",
+          childTexts(damage) == (QStringList { QStringLiteral("\u2192 Left"), QStringLiteral("Other target…"),
+                                               QStringLiteral("\u2192 Fire  (already added)") }));
+    check("...the entity's own pair is hidden while browsing", findItem(tree, QStringLiteral("\u2192 Fire  (already added)"), damage)
+                                                               && findItem(tree, QStringLiteral("\u2192 Fire  (already added)"), damage)->isHidden());
     QTreeWidgetItem* position = findItem(tree, QStringLiteral("Position"), rels);
     check("an Also relationship is under Relationships with its target",
           position && childTexts(position).contains(QStringLiteral("→ World")));
@@ -610,6 +613,8 @@ static void testPicker(bool mirrorMode)
     check("Other target… opens the target step",
           tree->topLevelItemCount() > 0 && tree->topLevelItem(0)->text(0).startsWith(QStringLiteral("← Likes")));
     QTreeWidgetItem* ents = findItem(tree, QStringLiteral("Entities"));
+    check("the target step's groups are open, filter empty",
+          ents && ents->isExpanded() && (!findItem(tree, QStringLiteral("Tags")) || findItem(tree, QStringLiteral("Tags"))->isExpanded()));
     check("...listing the entities", ents && ents->childCount() > 3);
     check("...plain entities included (a target is often one), rpe's and flecs' own left out",
           childTexts(ents).contains(QStringLiteral("Red")) && childTexts(ents).contains(QStringLiteral("a.Fire"))
@@ -677,6 +682,9 @@ static void testPicker(bool mirrorMode)
     QTreeWidgetItem* dmgRel = findItem(tree, QStringLiteral("Damage"), rels);
     emit tree->itemClicked(findItem(tree, QStringLiteral("Other target\u2026"), dmgRel), 0);
     QCoreApplication::processEvents();
+    check("the target step shows the entity's own pair, marked, LAST under In use",
+          findItem(tree, QStringLiteral("In use"))
+              && childTexts(findItem(tree, QStringLiteral("In use"))).last() == QStringLiteral("Fire  (already added)"));
     check("a relationship with data ((Damage, Left)): no data components — its target is a label",
           !findItem(tree, QStringLiteral("Components (carry the data)")));
     check("...tags first, then entities", findItem(tree, QStringLiteral("Tags")) && findItem(tree, QStringLiteral("Entities"))
@@ -713,6 +721,48 @@ static void testPicker(bool mirrorMode)
     pump();
     check("a tag is added by itself", s.hero.has<Frozen>());
     closePopup();
+
+    // A pair the entity already has: picking it selects its row, adds nothing.
+    {
+        auto* compList = browser.componentList()->findChild<QListWidget*>();
+        const auto pairsOf = [&] {
+            int n = 0;
+            s.hero.each([&](flecs::id id) { n += id.is_pair() ? 1 : 0; });
+            return n;
+        };
+        const int pairsBefore = pairsOf();
+        open();
+        search->setText(QStringLiteral("Fire")); // typed for: the entity's own pair shows
+        QCoreApplication::processEvents();
+        rels = findItem(tree, QStringLiteral("Relationships"));
+        QTreeWidgetItem* dmgRel = findItem(tree, QStringLiteral("Damage"), rels);
+        QTreeWidgetItem* own = findItem(tree, QStringLiteral("\u2192 Fire  (already added)"), dmgRel);
+        check("typing for it shows the entity's own pair, marked", own && !own->isHidden());
+        emit tree->itemClicked(own, 0);
+        pump();
+        check("clicking a pair the entity has selects its row",
+              compList && compList->currentItem() && compList->currentItem()->text() == QStringLiteral("Damage \u2192 Fire"));
+        check("...adds nothing", pairsOf() == pairsBefore);
+        check("...and closes the picker", !popup || !popup->isVisible());
+        closePopup();
+
+        // By keyboard: filter to it, Enter.
+        compList->setCurrentRow(-1);
+        for (int i = 0; i < compList->count(); ++i)
+            if (compList->item(i)->text() == QStringLiteral("Health"))
+                compList->setCurrentRow(i);
+        pump();
+        open();
+        search->setText(QStringLiteral("Damage a.Fire"));
+        QCoreApplication::processEvents();
+        check("filtering to it highlights the marked entry",
+              tree->currentItem() && tree->currentItem()->text(0).contains(QStringLiteral("already added")));
+        key(search, Qt::Key_Return);
+        pump();
+        check("Enter on it selects the pair's row", compList->currentItem() && compList->currentItem()->text() == QStringLiteral("Damage \u2192 Fire"));
+        check("...still adds nothing", pairsOf() == pairsBefore);
+        closePopup();
+    }
 
     // A component the entity already has as a PAIR can still be added by itself.
     open();
